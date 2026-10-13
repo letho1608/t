@@ -479,6 +479,41 @@ void tval_retain(TVal *v) {
     default: break;
     }
 }
+/* pool buffer dữ liệu tensor lớn: vòng lặp số học tạo/huỷ liên tục các tensor cùng
+   kích thước; dùng lại buffer vừa nhả tránh cấp phát + page fault mỗi phép toán */
+#define TBUF_MIN 1024
+#define TBUF_SLOTS 16
+static double *tbuf_p[TBUF_SLOTS];
+static size_t tbuf_n[TBUF_SLOTS];
+static int tbuf_cnt;
+static double *tbuf_get(size_t n) {
+    if (n >= TBUF_MIN)
+        for (int i = tbuf_cnt - 1; i >= 0; i--)
+            if (tbuf_n[i] == n) {
+                double *p = tbuf_p[i];
+                tbuf_cnt--;
+                tbuf_p[i] = tbuf_p[tbuf_cnt]; tbuf_n[i] = tbuf_n[tbuf_cnt];
+                return p;
+            }
+    return (double*)malloc(sizeof(double) * (n ? n : 1));
+}
+static void tbuf_put(double *p, size_t n) {
+    if (n >= TBUF_MIN) {
+        if (tbuf_cnt == TBUF_SLOTS) {          /* đầy: bỏ buffer cũ nhất */
+            free(tbuf_p[0]);
+            memmove(tbuf_p, tbuf_p + 1, sizeof(tbuf_p[0]) * (TBUF_SLOTS - 1));
+            memmove(tbuf_n, tbuf_n + 1, sizeof(tbuf_n[0]) * (TBUF_SLOTS - 1));
+            tbuf_cnt--;
+        }
+        tbuf_p[tbuf_cnt] = p; tbuf_n[tbuf_cnt++] = n;
+        return;
+    }
+    free(p);
+}
+static void tbuf_clear(void) {
+    while (tbuf_cnt) free(tbuf_p[--tbuf_cnt]);
+}
+
 void tval_free(TVal *v) {
     size_t i;
     if (!v) return;
@@ -500,11 +535,11 @@ void tval_free(TVal *v) {
             TTensor *b = v->u.ten->base;
             if (b) {                      /* view: nhả tensor sở hữu bộ nhớ */
                 TVal bv; bv.t = T_TENSOR; bv.u.ten = b;
-                if (v->u.ten->sv) free(v->u.ten->d);     /* cache của view theo bước */
+                if (v->u.ten->sv) tbuf_put(v->u.ten->d, v->u.ten->len);   /* cache của view theo bước */
                 free(v->u.ten);
                 tval_free(&bv);
             } else {
-                free(v->u.ten->d); free(v->u.ten);
+                tbuf_put(v->u.ten->d, v->u.ten->len); free(v->u.ten);
             }
         }
         break;
@@ -2564,6 +2599,7 @@ static void prog_init_globals(TProg *p) {
     }
 }
 void tvm_free(TVM *vm) {
+    tbuf_clear();
     size_t i;
     vm->prog = vm->root;
     while (vm->sp) tval_free(&vm->stack[--vm->sp]);

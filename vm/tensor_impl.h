@@ -21,7 +21,7 @@ static TTensor *ten_alloc(int nd, const size_t *sh) {
     t->ndim = nd;
     for (int i = 0; i < nd; i++) t->shape[i] = sh[i];
     t->len = sh_prod(sh, nd);
-    t->d = (double*)malloc(sizeof(double) * (t->len ? t->len : 1));
+    t->d = tbuf_get(t->len);
     if (!t->d) exit(1);
     t->base = NULL;
     t->sv = 0;
@@ -108,7 +108,7 @@ static TTensor *ten_mkview(const TTensor *t, size_t off, int nd, const size_t *s
     v->sv = !cont;
     if (cont) v->d = own->d + off;
     else {
-        v->d = (double*)malloc(sizeof(double) * n);
+        v->d = tbuf_get(n);
         if (!v->d) exit(1);
         v->ver = own->ver - 1;      /* cache chưa có -> lần đọc đầu sẽ gom */
     }
@@ -255,23 +255,6 @@ static void ten_bshape(TVM *vm, const TTensor *a, const TTensor *b, int *ndo, si
     }
     *ndo = n;
 }
-/* bảng chỉ số phẳng vào input (đã đệm 1) cho mỗi phần tử output */
-static void ten_bindex(const size_t *out, int nd, const size_t *in, size_t *idx) {
-    size_t st[TMAXDIM], eff[TMAXDIM], cnt[TMAXDIM];
-    size_t acc = 1, n = sh_prod(out, nd), off = 0;
-    for (int i = nd - 1; i >= 0; i--) { st[i] = acc; acc *= in[i]; }
-    for (int i = 0; i < nd; i++) { eff[i] = in[i] == 1 ? 0 : st[i]; cnt[i] = 0; }
-    for (size_t k = 0; k < n; k++) {
-        idx[k] = off;
-        for (int j = nd - 1; j >= 0; j--) {
-            cnt[j]++;
-            off += eff[j];
-            if (cnt[j] < out[j]) break;
-            off -= eff[j] * cnt[j];
-            cnt[j] = 0;
-        }
-    }
-}
 #define TOP_EQ 1001   /* .eq() / .ne() từng phần tử (== của ngôn ngữ so cả tensor) */
 #define TOP_NE 1002
 static double ten_apply(int op, double x, double y) {
@@ -289,6 +272,30 @@ static double ten_apply(int op, double x, double y) {
     default: return pow(x, y);
     }
 }
+/* R[i] = X[i*sx] op Y[i*sy] (i < n). switch nằm ngoài vòng lặp: mỗi case gọi
+   ten_apply với op hằng nên được gập lại; bước 1/0 thì trình biên dịch vector hoá.
+   Cùng phép toán IEEE như bản từng phần tử -> kết quả trùng bit. */
+#define TK_LOOP(OPC) do { \
+    if (sx == 1 && sy == 1) for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, X[i], Y[i]); \
+    else if (sx == 1 && sy == 0) { double y0 = Y[0]; for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, X[i], y0); } \
+    else if (sx == 0 && sy == 1) { double x0 = X[0]; for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, x0, Y[i]); } \
+    else for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, X[i * sx], Y[i * sy]); \
+} while (0)
+static void ten_kern(int op, double *R, const double *X, size_t sx, const double *Y, size_t sy, size_t n) {
+    switch (op) {
+    case OP_ADD: TK_LOOP(OP_ADD); break;
+    case OP_SUB: TK_LOOP(OP_SUB); break;
+    case OP_MUL: TK_LOOP(OP_MUL); break;
+    case OP_DIV: TK_LOOP(OP_DIV); break;
+    case OP_LT: TK_LOOP(OP_LT); break;
+    case OP_GT: TK_LOOP(OP_GT); break;
+    case OP_LE: TK_LOOP(OP_LE); break;
+    case OP_GE: TK_LOOP(OP_GE); break;
+    case TOP_EQ: TK_LOOP(TOP_EQ); break;
+    case TOP_NE: TK_LOOP(TOP_NE); break;
+    default: TK_LOOP(OP_POW); break;
+    }
+}
 /* phép từng phần tử: tensor/số với tensor/số (ít nhất 1 tensor) */
 static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
     if (a->t == T_TENSOR) ten_sync(a->u.ten);
@@ -299,8 +306,8 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
         double s = to_num(a->t == T_TENSOR ? b : a, &ok);
         if (!ok) die(vm, "bad tensor op");
         TTensor *r = ten_alloc(t->ndim, t->shape);
-        if (a->t == T_TENSOR) for (size_t i = 0; i < t->len; i++) r->d[i] = ten_apply(op, t->d[i], s);
-        else for (size_t i = 0; i < t->len; i++) r->d[i] = ten_apply(op, s, t->d[i]);
+        if (a->t == T_TENSOR) ten_kern(op, r->d, t->d, 1, &s, 0, t->len);
+        else ten_kern(op, r->d, &s, 0, t->d, 1, t->len);
         return r;
     }
     {
@@ -309,20 +316,32 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
         for (int i = 0; same && i < x->ndim; i++) same = x->shape[i] == y->shape[i];
         if (same) {
             TTensor *r = ten_alloc(x->ndim, x->shape);
-            for (size_t i = 0; i < x->len; i++) r->d[i] = ten_apply(op, x->d[i], y->d[i]);
+            ten_kern(op, r->d, x->d, 1, y->d, 1, x->len);
             return r;
         }
         {
-            size_t out[TMAXDIM], a2[TMAXDIM], b2[TMAXDIM];
+            /* broadcast: bước của x/y theo shape output (trục giãn -> bước 0); chạy
+               trục trong cùng bằng ten_kern, các trục ngoài bằng bộ đếm */
+            size_t out[TMAXDIM], a2[TMAXDIM], b2[TMAXDIM], xs[TMAXDIM], ys[TMAXDIM], cnt[TMAXDIM];
+            size_t accx = 1, accy = 1, ox = 0, oy = 0;
             int nd;
             ten_bshape(vm, x, y, &nd, out, a2, b2);
             TTensor *r = ten_alloc(nd, out);
-            size_t *ia = (size_t*)malloc(sizeof(size_t) * (r->len ? r->len : 1));
-            size_t *ib = (size_t*)malloc(sizeof(size_t) * (r->len ? r->len : 1));
-            ten_bindex(out, nd, a2, ia);
-            ten_bindex(out, nd, b2, ib);
-            for (size_t k = 0; k < r->len; k++) r->d[k] = ten_apply(op, x->d[ia[k]], y->d[ib[k]]);
-            free(ia); free(ib);
+            for (int i = nd - 1; i >= 0; i--) {
+                xs[i] = a2[i] == 1 ? 0 : accx; accx *= a2[i];
+                ys[i] = b2[i] == 1 ? 0 : accy; accy *= b2[i];
+                cnt[i] = 0;
+            }
+            size_t inner = out[nd - 1], rows = inner ? r->len / inner : 0;
+            for (size_t k = 0; k < rows; k++) {
+                ten_kern(op, r->d + k * inner, x->d + ox, xs[nd - 1], y->d + oy, ys[nd - 1], inner);
+                for (int j = nd - 2; j >= 0; j--) {
+                    ox += xs[j]; oy += ys[j];
+                    if (++cnt[j] < out[j]) break;
+                    ox -= xs[j] * cnt[j]; oy -= ys[j] * cnt[j];
+                    cnt[j] = 0;
+                }
+            }
             return r;
         }
     }
@@ -628,8 +647,18 @@ static double un_apply(int k, double x) {
 }
 static TTensor *ten_unary(const TTensor *t, int k) {
     TTensor *r = ten_alloc(t->ndim, t->shape);
+    double *R = r->d;
+    const double *X = t->d;
+    size_t n = t->len;
     ten_sync(t);
-    for (size_t i = 0; i < t->len; i++) r->d[i] = un_apply(k, t->d[i]);
+    /* switch ngoài vòng lặp (un_apply với k hằng được gập lại) */
+#define TU_CASE(K) case K: for (size_t i = 0; i < n; i++) R[i] = un_apply(K, X[i]); break;
+    switch (k) {
+    TU_CASE(U_EXP) TU_CASE(U_LOG) TU_CASE(U_SQRT) TU_CASE(U_TANH) TU_CASE(U_SIN)
+    TU_CASE(U_COS) TU_CASE(U_ABS) TU_CASE(U_RELU) TU_CASE(U_SIGMOID) TU_CASE(U_FLOOR)
+    default: for (size_t i = 0; i < n; i++) R[i] = un_apply(U_CEIL, X[i]); break;
+    }
+#undef TU_CASE
     return r;
 }
 
