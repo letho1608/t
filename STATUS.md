@@ -23,6 +23,10 @@
   vòng lặp, bảng kích thước opcode, `be_bytes` đường nhanh, peephole kiểm opcode
   trước). Output byte-identical, fixed point giữ.
 - `-DTVM_PROF`: profile số lệnh theo hàm T và theo opcode.
+- JIT đọc field số + gọi method của struct (record mượn, guard kiểu/tag;
+  `tests/jitrec.t`): code số học trên struct nhanh ~13× so với interpreter.
+- Vòng dispatch giữ `pc` trong thanh ghi: loop 0.330 → 0.297s, sieve 0.513 → 0.447s
+  (không JIT).
 
 ## v2.3 — số dòng lỗi runtime, lambda/comprehension, autograd, JIT top-level
 

@@ -130,7 +130,9 @@ Biên dịch **cả hàm số học** sang mã máy: int/float/bool, biến cụ
 `if/while/for range`, so sánh, `and/or`, `%` floor, đệ quy / gọi hàm JIT khác,
 `int() float() abs() min() max() len()`, đọc global số/list (có guard), **đọc và
 ghi phần tử list** (`xs[i]`, `xs[i] = v`, `xs.len`) với kiểu phần tử được đoán và
-guard từng lần truy cập.
+guard từng lần truy cập, **đọc field số của struct** (`p.x`) và **gọi method struct**
+(`p.norm2()`, phân giải tĩnh theo kiểu) trên record mượn (đối số / global), guard
+kiểu struct + tag field. Tạo / gán record vẫn chạy ở interpreter.
 
 - Kích hoạt: hàm được gọi ≥ 50 lần (đặc hoá theo kiểu đối số), hoặc **OSR** khi
   một vòng lặp trong hàm chạy ≥ 2000 vòng (kể cả hàm chỉ gọi 1 lần), hoặc vòng lặp

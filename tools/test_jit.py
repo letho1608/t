@@ -1,6 +1,6 @@
 """test_jit.py — kiểm JIT x86-64 (v2.2): đúng + thực sự kích hoạt + nhanh hơn.
 Chạy: python tools/test_jit.py   (in JIT-ALL-GREEN khi xanh)
-  1. tests/jit2.t, jit.t, jitlist.t: output VM có JIT == VM tắt JIT (TVM_NOJIT) == t.py
+  1. tests/jit2.t, jit.t, jitlist.t, jitmain.t, jitrec.t: output VM có JIT == VM tắt JIT (TVM_NOJIT) == t.py
   2. log TVM_JITLOG: đủ số hàm được biên dịch entry và vùng OSR
   3. fib(27) và vòng lặp float: JIT nhanh hơn interpreter ít nhất 3 lần
 """
@@ -45,7 +45,7 @@ def main():
         print("SKIP (thiếu %s)" % TRUN)
         return 0
     tmp = tempfile.mkdtemp(prefix="tjit")
-    for name in ("jit2", "jit", "jitlist", "jitmain"):
+    for name in ("jit2", "jit", "jitlist", "jitmain", "jitrec"):
         src = os.path.join(ROOT, "tests", name + ".t")
         tb = os.path.join(tmp, name + ".tb")
         check("compile " + name, compile_t(src, tb))
@@ -67,6 +67,11 @@ def main():
             log = rj.stderr.decode("utf-8", "replace")
             no = log.count("osr ok")
             check("jitlist: >= 6 vùng OSR có list (có %d)" % no, no >= 6, log)
+        if name == "jitrec":
+            log = rj.stderr.decode("utf-8", "replace")
+            ne, no = log.count("entry ok"), log.count("osr ok")
+            check("jitrec: >= 4 hàm/method đọc record JIT (có %d)" % ne, ne >= 4, log)
+            check("jitrec: >= 3 vùng OSR đọc record (có %d)" % no, no >= 3, log)
         if name == "jitmain":
             log = rj.stderr.decode("utf-8", "replace")
             nm = log.count("main ok")

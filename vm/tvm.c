@@ -2929,6 +2929,17 @@ static void call_method(TVM *vm, uint8_t k, const char *nm, size_t len, TAttrIC 
         if (mi >= 0 && (size_t)mi < tp->len && tp->vals[mi].t == T_FN) {
             TFn *f = tp->vals[mi].u.fn;
             if ((int)k + 1 != f->nargs) die(vm, "call arity");
+            /* JIT: method nóng (self = record mượn) chạy native nếu kiểu khớp */
+            if (!f->native) t_jit_maybe(vm, f, &vm->stack[bp]);
+            if (f->native) {
+                TVal rv; rv.t = T_NIL;
+                if (t_jit_call(vm, f, &vm->stack[bp], k + 1, &rv)) {
+                    for (int i = 0; i <= k; i++) TV_FREE(&vm->stack[bp + i]);
+                    vm->sp = bp;
+                    push(vm, rv);
+                    return;
+                }
+            }
             enter_fn(vm, f, bp, k + 1);
             return;
         }

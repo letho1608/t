@@ -435,4 +435,11 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   và interpreter chạy lại. OSR được ghi phần tử list → guard hỏng thì deopt: native
   chép frame ra `ctx->save`, VM ghi locals + đẩy stack ảo rồi chạy tiếp tại pc của
   lệnh hỏng. Biến môi trường: `TVM_NOJIT`, `TVM_JITLOG`, `TVM_JITDUMP`, `TVM_GCTHRESH`.
+- JIT record (v2.4): kiểu trừu tượng "shape" = (kiểu struct, kiểu đoán từng field),
+  tối đa 64 shape, JIT giữ ref kiểu struct. Record chỉ được mượn (đối số, global
+  của vòng lặp top-level); `ATTR` đọc `vals[i]` + guard tag; `CALLM` gọi thẳng code
+  JIT của method; vòng lặp main được ghi lại global record nếu là cùng con trỏ
+  (biến tạm của inliner). `CALLM` của interpreter cũng đếm/JIT method nóng.
+- Vòng dispatch giữ `pc` ở biến cục bộ; `vm->pc` ghi sau mỗi opcode và đồng bộ
+  quanh CALL/CALLM/RET/OSR/try/debugger.
 

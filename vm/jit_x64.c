@@ -75,6 +75,17 @@ typedef char tval_layout_check[(offsetof(TVal, u) == 8 && sizeof(TType) == 4) ? 
    JT_LX: list phần tử lẫn lộn (chỉ dùng len) */
 enum { JT_UNK = 0, JT_I, JT_F, JT_B, JT_FN, JT_NAT, JT_LI, JT_LF, JT_LB, JT_LX };
 static int is_list_t(uint8_t t) { return t >= JT_LI && t <= JT_LX; }
+/* record (struct) mượn: kiểu JT_R0 + chỉ số shape. Shape = (kiểu struct, kiểu đoán của
+   từng field). Native chỉ ĐỌC field (guard tag mỗi lần đọc) và gọi method tĩnh; record
+   không được gán vào local / trả về (không cần đếm tham chiếu trong code máy). */
+#define JT_R0 32
+#define JIT_MAX_SHAPES 64
+#define JIT_SHAPE_MAXF 32
+typedef struct { TDict *tp; int nf; uint8_t fty[JIT_SHAPE_MAXF]; const TVal *keys; } JShape;
+static JShape jshapes[JIT_MAX_SHAPES];
+static int njshapes;
+static int is_rec_t(uint8_t t) { return t >= JT_R0 && t < JT_R0 + njshapes; }
+static JShape *shape_of(uint8_t t) { return &jshapes[t - JT_R0]; }
 static uint8_t list_elem(uint8_t t) { return t == JT_LI ? JT_I : t == JT_LF ? JT_F : t == JT_LB ? JT_B : JT_UNK; }
 /* code sinh ra đọc TList: len/items theo offset thật; TVal 32 byte */
 typedef char tval_size_check[(sizeof(TVal) == 32) ? 1 : -1];
@@ -258,7 +269,10 @@ static int decode(JC *j, TProg *p, size_t beg, size_t end) {
         case OP_ATTR:
             /* xs.len trên list == LEN; thuộc tính khác: ngoài phạm vi */
             if (rd32(c + pc + 1) == 3 && memcmp(c + pc + 5, "len", 3) == 0) add_op(j, OP_LEN, 0, pc, 1);
-            else add_op(j, OP_BAD, op, pc, 1);
+            else add_op(j, OP_ATTR, 0, pc, 1);       /* field record (tên đọc lại từ pc) */
+            break;
+        case OP_CALLM:
+            add_op(j, OP_CALLM, c[pc + 1], pc, 1);   /* k = số đối; tên đọc lại từ pc */
             break;
         case OP_JMP: case OP_JMPF: case OP_JMPT:
             add_op(j, op, (int64_t)(pc + 5 + rd32(c + pc + 1)), pc, 1); break;
@@ -369,6 +383,25 @@ static int callee_info(JC *j, TFn *F, const uint8_t *at, int k, uint8_t *retty) 
 }
 
 static int is_num(uint8_t t) { return t == JT_I || t == JT_F; }
+/* chỉ số field `name` trong shape (-1 nếu không có) */
+static int shape_field(const JShape *sh, const uint8_t *name, uint32_t len) {
+    for (int i = 0; i < sh->nf; i++) {
+        const TVal *k = &sh->keys[i];
+        if (k->t == T_STR && k->u.str.n == len && memcmp(k->u.str.s, name, len) == 0) return i;
+    }
+    return -1;
+}
+/* method `name` của kiểu struct (NULL nếu không có / không phải hàm T) */
+static TFn *shape_method(const JShape *sh, const uint8_t *name, uint32_t len) {
+    const TDict *tp = sh->tp;
+    for (size_t i = 0; i < tp->len; i++) {
+        const TVal *k = &tp->keys[i];
+        if (k->t == T_STR && k->u.str.n == len && memcmp(k->u.str.s, name, len) == 0)
+            return tp->vals[i].t == T_FN ? tp->vals[i].u.fn : NULL;
+    }
+    return NULL;
+}
+static int arg_ok_t(uint8_t t) { return t == JT_I || t == JT_F || t == JT_B || is_list_t(t) || is_rec_t(t); }
 /* kiểu trừu tượng của list theo phần tử hiện có (đoán; mỗi lần đọc đều có guard) */
 static uint8_t list_ty(const TList *l) {
     TType t0;
@@ -425,7 +458,11 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 if (pi < 0) { jc_fail(j, "ghi global ngoài vòng lặp top-level"); break; }
                 if (d < 1) { jc_fail(j, "stack rỗng"); break; }
                 d--;
-                if (!(st[d] == JT_I || st[d] == JT_F || st[d] == JT_B)) { jc_fail(j, "gán global kiểu ngoài phạm vi"); break; }
+                /* record: chỉ khi global đã giữ đúng record đó (vd biến tạm của inliner
+                   gán lại receiver mỗi vòng) -> guard cùng con trỏ, không cần refcount */
+                if (!(st[d] == JT_I || st[d] == JT_F || st[d] == JT_B || is_rec_t(st[d]))) {
+                    jc_fail(j, "gán global kiểu ngoài phạm vi"); break;
+                }
                 lt[pi] = st[d];
                 break;
             }
@@ -463,6 +500,32 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 }
                 if (!j->osr) { jc_fail(j, "ghi list (side effect) chỉ JIT trong vùng OSR"); break; }
                 d -= 3;
+                break;
+            }
+            case OP_ATTR: {
+                const uint8_t *c = j->prog->code + m->pc;
+                int fi;
+                if (d < 1 || !is_rec_t(st[d - 1])) { jc_fail(j, "thuộc tính ngoài phạm vi JIT"); break; }
+                fi = shape_field(shape_of(st[d - 1]), c + 5, (uint32_t)rd32(c + 1));
+                if (fi < 0 || shape_of(st[d - 1])->fty[fi] == JT_UNK) { jc_fail(j, "field không phải số"); break; }
+                st[d - 1] = shape_of(st[d - 1])->fty[fi]; sv[d - 1] = 0;
+                break;
+            }
+            case OP_CALLM: {
+                int k = (int)m->k;
+                const uint8_t *c = j->prog->code + m->pc;
+                uint8_t at[256], r = JT_UNK;
+                TFn *F;
+                if (d < k + 1 || !is_rec_t(st[d - k - 1])) { jc_fail(j, "method ngoài phạm vi JIT"); break; }
+                F = shape_method(shape_of(st[d - k - 1]), c + 6, (uint32_t)rd32(c + 2));
+                for (int q = 0; q <= k; q++) {
+                    at[q] = st[d - k - 1 + q];
+                    if (!arg_ok_t(at[q])) { jc_fail(j, "đối số kiểu lạ"); break; }
+                }
+                if (j->fail) break;
+                if (!F || !callee_info(j, F, at, k + 1, &r) || r == JT_UNK) { jc_fail(j, "method không JIT được"); break; }
+                d -= k;
+                st[d - 1] = r; sv[d - 1] = 0;
                 break;
             }
             case OP_LEN:
@@ -545,7 +608,7 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                     uint8_t at[256], r = JT_UNK;
                     for (int q = 0; q < k; q++) {
                         at[q] = st[d - k + q];
-                        if (!(at[q] == JT_I || at[q] == JT_F || at[q] == JT_B || is_list_t(at[q]))) {
+                        if (!arg_ok_t(at[q])) {
                             jc_fail(j, "đối số kiểu lạ"); break;
                         }
                     }
@@ -726,6 +789,18 @@ static int is_nat_ok(int64_t k) {
            k == NAT_LEN;
 }
 
+/* giữ ref callee (code này nhảy thẳng vào nó) */
+static void keep_callee(JC *j, TFn *F) {
+    if (F == j->fn) return;
+    for (int q = 0; q < j->jf->ncallees; q++) if (j->jf->callees[q] == F) return;
+    if (j->jf->ncallees >= j->jf->capcallees) {
+        j->jf->capcallees = j->jf->capcallees ? j->jf->capcallees * 2 : 4;
+        j->jf->callees = realloc(j->jf->callees, (size_t)j->jf->capcallees * sizeof(TFn *));
+    }
+    j->jf->callees[j->jf->ncallees++] = F;
+    F->refc++;
+}
+
 static int gen_body(JC *j) {
     TVal *G = j->prog->globals;
     for (int i = 0; i < j->nops; i++) {
@@ -752,6 +827,12 @@ static int gen_body(JC *j) {
             uint8_t t = st[d - 1];
             int tag = t == JT_I ? T_INT : t == JT_F ? T_FLOAT : T_BOOL;
             mov_rax_imm(j, (int64_t)(intptr_t)g);
+            if (is_rec_t(t)) {
+                eb3(j, 0x83, 0x38, (uint8_t)T_DICT); jguard(j, 0x85);   /* global đang là dict */
+                eb2(j, 0x48, 0x8B); m_rsp(j, 1, SLOT(j, d - 1));       /* mov rcx,[slot] */
+                eb(j, 0x48); eb3(j, 0x39, 0x48, 0x08); jguard(j, 0x85);  /* cmp [rax+8],rcx: cùng record */
+                break;
+            }
             if (m->head) { eb3(j, 0x83, 0x38, (uint8_t)T_FLOAT); jguard(j, 0x87); }  /* trong superop: LOADG đầu lệnh đã guard */
             eb2(j, 0xC7, 0x00); e32(j, tag);                       /* mov dword [rax],tag */
             eb2(j, 0x48, 0x8B); m_rsp(j, 1, SLOT(j, d - 1));       /* mov rcx,[slot] */
@@ -763,7 +844,8 @@ static int gen_body(JC *j) {
             TVal *g = &G[m->k];
             if (j->mainmode && j->gpseudo[m->k] >= 0) {
                 uint8_t t = s->lt[j->gpseudo[m->k]];
-                int tag = t == JT_I ? T_INT : t == JT_F ? T_FLOAT : t == JT_B ? T_BOOL : T_LIST;
+                int tag = t == JT_I ? T_INT : t == JT_F ? T_FLOAT : t == JT_B ? T_BOOL :
+                          is_rec_t(t) ? T_DICT : T_LIST;
                 mov_rax_imm(j, (int64_t)(intptr_t)g);
                 eb3(j, 0x83, 0x38, (uint8_t)tag); jguard(j, 0x85);
                 eb(j, 0x48); eb3(j, 0x8B, 0x40, 0x08);
@@ -952,6 +1034,44 @@ static int gen_body(JC *j) {
             }
             break;
         }
+        case OP_ATTR: {
+            const uint8_t *c = j->prog->code + m->pc;
+            JShape *sh = shape_of(st[d - 1]);
+            int fi = shape_field(sh, c + 5, (uint32_t)rd32(c + 1));
+            uint8_t ft = sh->fty[fi];
+            int ttag = ft == JT_I ? T_INT : ft == JT_F ? T_FLOAT : T_BOOL;
+            ld_rax(j, SLOT(j, d - 1));
+            eb(j, 0x48); eb2(j, 0x8B, 0x80); e32(j, (int32_t)offsetof(TDict, vals));   /* mov rax,[rax+vals] */
+            eb2(j, 0x48, 0x05); e32(j, 32 * fi);                                      /* add rax,32*fi */
+            eb3(j, 0x83, 0x38, (uint8_t)ttag); jguard(j, 0x85);                       /* field đúng kiểu */
+            eb(j, 0x48); eb3(j, 0x8B, 0x40, 0x08);                                    /* mov rax,[rax+8] */
+            if (ft == JT_B) eb3(j, 0x83, 0xE0, 0x01);
+            st_rax(j, SLOT(j, d - 1));
+            break;
+        }
+        case OP_CALLM: {
+            /* method tĩnh: kiểu struct của receiver đã cố định (guard lúc vào / shape) */
+            int k = (int)m->k;
+            int fd = d - k - 1;
+            const uint8_t *c = j->prog->code + m->pc;
+            TFn *F = shape_method(shape_of(st[fd]), c + 6, (uint32_t)rd32(c + 2));
+            if (JIT_SYSV) { eb3(j, 0x48, 0x8D, 0xBC); eb(j, 0x24); e32(j, SLOT(j, fd)); eb3(j, 0x48, 0x89, 0xDE); }
+            else { eb3(j, 0x48, 0x8D, 0x8C); eb(j, 0x24); e32(j, SLOT(j, fd)); eb3(j, 0x48, 0x89, 0xDA); }
+            if (j->fn && F == j->fn && j->jf->estate == 1) {
+                eb(j, 0xE8);
+                e32(j, (int32_t)(0 - (int64_t)(j->n + 4)));
+            } else {
+                TJitFn *fj = (TJitFn *)F->jit;
+                mov_rax_imm(j, (int64_t)(intptr_t)fj->entry);
+                eb2(j, 0xFF, 0xD0);
+                keep_callee(j, F);
+            }
+            eb3(j, 0x83, 0x3B, 0x00);           /* cmp dword [rbx],0 */
+            if (j->osr) jguard(j, 0x85);
+            else jepi(j, 0x85);
+            st_rax(j, SLOT(j, fd));
+            break;
+        }
         case OP_LEN:
             ld_rax(j, SLOT(j, d - 1));
             eb(j, 0x48); eb2(j, 0x8B, 0x80); e32(j, (int32_t)offsetof(TList, len));
@@ -1029,19 +1149,7 @@ static int gen_body(JC *j) {
                     TJitFn *fj = (TJitFn *)F->jit;
                     mov_rax_imm(j, (int64_t)(intptr_t)fj->entry);
                     eb2(j, 0xFF, 0xD0);
-                    /* giữ ref callee (code này nhảy thẳng vào nó) */
-                    if (F != j->fn) {
-                        int seen = 0;
-                        for (int q = 0; q < j->jf->ncallees; q++) if (j->jf->callees[q] == F) seen = 1;
-                        if (!seen) {
-                            if (j->jf->ncallees >= j->jf->capcallees) {
-                                j->jf->capcallees = j->jf->capcallees ? j->jf->capcallees * 2 : 4;
-                                j->jf->callees = realloc(j->jf->callees, (size_t)j->jf->capcallees * sizeof(TFn *));
-                            }
-                            j->jf->callees[j->jf->ncallees++] = F;
-                            F->refc++;
-                        }
-                    }
+                    keep_callee(j, F);
                 }
                 eb3(j, 0x83, 0x3B, 0x00);           /* cmp dword [rbx],0 */
                 if (j->osr) jguard(j, 0x85);        /* callee huỷ: deopt tại CALL (callee thuần -> gọi lại được) */
@@ -1218,13 +1326,41 @@ static int compile_entry(TVM *vm, TFn *fn, const uint8_t *argty, int nest) {
 static uint8_t tag_ty(TType t) {
     return t == T_INT ? JT_I : t == T_FLOAT ? JT_F : t == T_BOOL ? JT_B : JT_UNK;
 }
+/* shape của record d (đăng ký nếu mới; giữ ref kiểu struct để địa chỉ không bị dùng lại) */
+static uint8_t rec_ty(const TDict *d) {
+    uint8_t ft[JIT_SHAPE_MAXF];
+    if (d->kind != DK_REC || !d->meths || d->meths->mod || d->len > JIT_SHAPE_MAXF) return JT_UNK;
+    for (size_t i = 0; i < d->len; i++) ft[i] = tag_ty(d->vals[i].t);
+    for (int q = 0; q < njshapes; q++) {
+        JShape *sh = &jshapes[q];
+        if (sh->tp == d->meths && (size_t)sh->nf == d->len && memcmp(sh->fty, ft, d->len) == 0)
+            return (uint8_t)(JT_R0 + q);
+    }
+    if (njshapes >= JIT_MAX_SHAPES) return JT_UNK;
+    {
+        JShape *sh = &jshapes[njshapes];
+        sh->tp = d->meths;
+        sh->tp->refc++;
+        sh->nf = (int)d->len;
+        memcpy(sh->fty, ft, d->len);
+        sh->keys = d->keys;                 /* mảng tên field của kiểu (kiểu đã giữ ref) */
+        return (uint8_t)(JT_R0 + njshapes++);
+    }
+}
 static uint8_t val_ty(const TVal *v) {
     if (v->t == T_LIST) return list_ty(v->u.list);
+    if (v->t == T_DICT) return rec_ty(v->u.dict);
     return tag_ty(v->t);
 }
-/* guard lúc vào native: list chỉ cần đúng tag (phần tử được guard từng lần đọc) */
+/* guard lúc vào native: list chỉ cần đúng tag (phần tử được guard từng lần đọc);
+   record: đúng kiểu struct (field guard từng lần đọc) */
 static int ty_ok(const TVal *v, uint8_t want) {
     if (is_list_t(want)) return v->t == T_LIST;
+    if (is_rec_t(want)) {
+        JShape *sh = shape_of(want);
+        return v->t == T_DICT && v->u.dict->kind == DK_REC && v->u.dict->meths == sh->tp &&
+               v->u.dict->len == (size_t)sh->nf;
+    }
     return tag_ty(v->t) == want;
 }
 
@@ -1252,6 +1388,7 @@ static int64_t val_bits(const TVal *v) {
     else if (v->t == T_FLOAT) memcpy(&x, &v->u.f, 8);
     else if (v->t == T_BOOL) x = v->u.b ? 1 : 0;
     else if (v->t == T_LIST) x = (int64_t)(intptr_t)v->u.list;   /* mượn: local/arg giữ ref */
+    else if (v->t == T_DICT) x = (int64_t)(intptr_t)v->u.dict;    /* record mượn */
     return x;
 }
 /* giá trị native (theo kiểu trừu tượng) -> TVal sở hữu được */
@@ -1262,6 +1399,7 @@ static TVal bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
     else if (ty == JT_F) { v.t = T_FLOAT; memcpy(&v.u.f, &x, 8); }
     else if (ty == JT_B) { v.t = T_BOOL; v.u.b = (int)(x & 1); }
     else if (is_list_t(ty)) { v.t = T_LIST; v.u.list = (TList *)(intptr_t)x; tval_retain(&v); }
+    else if (is_rec_t(ty)) { v.t = T_DICT; v.u.dict = (TDict *)(intptr_t)x; tval_retain(&v); }
     else if (ty == JT_FN || ty == JT_NAT) { v = vm->prog->globals[sv]; tval_retain(&v); }
     return v;
 }
