@@ -2810,7 +2810,7 @@ static void call_value(TVM *vm, uint8_t k) {
                     if (t_jit_call(vm, f, &vm->stack[vm->sp - k], k, &rv)) {
                         int i;
                         for (i = 0; i < k + 1; i++)
-                            tval_free(&vm->stack[vm->sp - k - 1 + i]);
+                            TV_FREE(&vm->stack[vm->sp - k - 1 + i]);
                         vm->sp -= k + 1;
                         push(vm, rv);
                         return;
@@ -2824,7 +2824,7 @@ static void call_value(TVM *vm, uint8_t k) {
                 fr->fn = f;
                 fr->ret_prog = vm->prog; fr->is_mod = 0;
                 vm->prog = f->prog;
-                { TVal fv2 = vm->stack[bp]; tval_retain(&fv2); }
+                /* ref của ô stack[bp] (giá trị hàm) chuyển thẳng cho frame (fr->fn) */
                 if (f->nlocals == 0) {
                     fr->locals = NULL;
                 } else if (fr->locals && fr->lcap >= f->nlocals) {
@@ -2838,7 +2838,6 @@ static void call_value(TVM *vm, uint8_t k) {
                 }
                 for (uint8_t i = 0; i < k; i++)
                     fr->locals[i] = vm->stack[bp + 1 + i];
-                tval_free(&vm->stack[bp]);
                 vm->sp = bp;
                 vm->pc = (size_t)f->entry;
             } else if (fv.t == T_NATIVE) {
@@ -2855,7 +2854,7 @@ static void call_value(TVM *vm, uint8_t k) {
                 TVal rv; rv.t = T_NIL;
                 nt->fn(vm, ap, ek, &rv);
                 for (int i = 0; i < k + 1; i++)
-                    tval_free(&vm->stack[vm->sp - k - 1 + i]);
+                    TV_FREE(&vm->stack[vm->sp - k - 1 + i]);
                 vm->sp -= k + 1;
                 push(vm, rv);
             } else die(vm, "not callable");
@@ -2929,7 +2928,7 @@ static void call_method(TVM *vm, uint8_t k, const char *nm, size_t len, TAttrIC 
         if (fn) {
             TVal rv; rv.t = T_NIL;
             fn(vm, ov, k + 1, &rv);
-            for (int i = 0; i <= k; i++) tval_free(&vm->stack[bp + i]);
+            for (int i = 0; i <= k; i++) TV_FREE(&vm->stack[bp + i]);
             vm->sp = bp;
             push(vm, rv);
             return;
