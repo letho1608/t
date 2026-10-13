@@ -29,7 +29,7 @@ NAT = {n: i for i, n in enumerate(
      "set", "input", "__struct", "__new",
      # tensor + toán học (builtin mềm)
      "zeros", "ones", "full", "arange", "eye", "rand", "randn", "seed",
-     "sqrt", "exp", "log", "sin", "cos", "tanh", "floor", "ceil", "pi"])}
+     "sqrt", "exp", "log", "sin", "cos", "tanh", "floor", "ceil", "pi", "load"])}
 NFIXED = len(NAT)
 BINOP = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD",
          "**": "POW", "@": "TDOT", "==": "EQ", "!=": "NE", "<": "LT",
@@ -1292,6 +1292,7 @@ def compile_prog(prog):
             if len(bs) == 1 and bs[0][0] == "ret":
                 c.fntab[s[1]] = (list(s[2]), bs[0][1])
     main = FnCtx(True)
+    c.main = main
     c.fnstack.append(main)
     c.prescan_globals(prog[1])     # pha 1: global top-level (kể cả khai sau)
     c.prescan(prog[1])          # cấp slot trước (kể cả bind sau)
@@ -1624,6 +1625,18 @@ def line_table(c):
     return bytes(out)
 
 
+def export_table(c):
+    """phần "EX01" sau LN01: u16 n + (u16 len + tên + u16 slot)* — global ở scope gốc
+    của main (bỏ tên ẩn chứa "$" và kiểu struct "X__type"); load() của VM dùng."""
+    ex = [(k, v) for k, v in c.main.scopes[0].m.items()
+          if "$" not in k and not k.endswith("__type")]
+    out = bytearray(b"EX01") + struct.pack("<H", len(ex))
+    for k, v in ex:
+        b = k.encode("utf-8")
+        out += struct.pack("<H", len(b)) + b + struct.pack("<H", v)
+    return bytes(out)
+
+
 def has_import(prog):
     return any(st[0] in ("import", "fromimport") for st in prog[1])
 
@@ -1640,6 +1653,7 @@ def build(src_path, out_path, dobundle):
     with open(out_path, "wb") as f:
         f.write(b"TB01" + struct.pack("<H", ng) + struct.pack("<I", len(c.b)) + bytes(c.b))
         f.write(line_table(c))
+        f.write(export_table(c))
     print(f"[tcomp] {src_path} -> {out_path} ({len(c.b)} bytes, globals={len(c.gnames)})")
 
 

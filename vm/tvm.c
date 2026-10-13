@@ -42,6 +42,7 @@ int tvm_pc_line(const TProg *p, size_t pc, const char **file, uint32_t *line) {
 
 static void die(TVM *vm, const char *msg) {
     vm->errpc = vm->pc;
+    vm->errprog = vm->prog;
     strncpy(vm->errmsg, msg, sizeof(vm->errmsg) - 1);
     vm->errmsg[sizeof(vm->errmsg) - 1] = 0;
     if (vm->nhandlers > 0) {
@@ -50,6 +51,7 @@ static void die(TVM *vm, const char *msg) {
         while (vm->nframes > h.nframes) free_frame(vm);
         vm->pc = h.pc;
         vm->stop_nf = h.stop_nf;
+        if (h.prog) vm->prog = h.prog;
         longjmp(h.jb, 1);
     }
     vm->err = 1;
@@ -65,25 +67,25 @@ static size_t gc_threshold = GC_THRESHOLD_DEFAULT;   /* TVM_GCTHRESH=n để th�
 static void gc_unlink(TVM *vm, GCNode *nd) {
     (void)vm;
     if (nd->prev) nd->prev->next = nd->next;
-    else vm->prog->gc_head = nd->next;
+    else vm->root->gc_head = nd->next;
     if (nd->next) nd->next->prev = nd->prev;
     free(nd);
-    vm->prog->gc_tracked--;
+    vm->root->gc_tracked--;
 }
 
 static void gc_track(TVM *vm, int type, void *ptr) {
     GCNode *nd = (GCNode*)malloc(sizeof(GCNode));
     if (!nd) return;
     nd->type = type; nd->ptr = ptr;
-    nd->prev = NULL; nd->next = vm->prog->gc_head;
+    nd->prev = NULL; nd->next = vm->root->gc_head;
     if (nd->next) nd->next->prev = nd;
-    vm->prog->gc_head = nd;
+    vm->root->gc_head = nd;
     if (type == T_LIST) ((TList*)ptr)->gc_node = nd;
     else if (type == T_DICT) ((TDict*)ptr)->gc_node = nd;
     else if (type == T_FN) ((TFn*)ptr)->gc_node = nd;
     else if (type == T_NATIVE) ((TNative*)ptr)->gc_node = nd;
-    vm->prog->gc_tracked++;
-    vm->prog->gc_allocs++;
+    vm->root->gc_tracked++;
+    vm->root->gc_allocs++;
 }
 
 static void gc_mark_val(TVM *vm, TVal *v) {
@@ -213,8 +215,8 @@ static void gc_collect(TVM *vm) {
     /* đang trong lời gọi lồng từ native (map/sort/method...): biến cục bộ C có
        thể giữ object chưa nằm trên stack -> để lần sau ở tầng ngoài cùng */
     if (vm->stop_nf != 0) return;
-    vm->prog->gc_allocs = 0;
-    vm->prog->gc_runs++;
+    vm->root->gc_allocs = 0;
+    vm->root->gc_runs++;
     for (i = 0; i < vm->sp; i++) gc_mark_val(vm, &vm->stack[i]);
     for (i = 0; i < vm->nframes; i++) {
         TFrame *f = &vm->frames[i];
@@ -222,14 +224,18 @@ static void gc_collect(TVM *vm) {
         for (j = 0; j < f->nlocals; j++) gc_mark_val(vm, &f->locals[j]);
         if (f->fn) { TVal v; v.t = T_FN; v.u.fn = f->fn; gc_mark_val(vm, &v); }
     }
-    for (i = 0; i < vm->prog->nglobals; i++)
-        gc_mark_val(vm, &vm->prog->globals[i]);
+    for (i = 0; i < vm->root->nglobals; i++)
+        gc_mark_val(vm, &vm->root->globals[i]);
+    for (TProg *m = vm->root->next_mod; m; m = m->next_mod) {
+        for (i = 0; i < m->nglobals; i++) gc_mark_val(vm, &m->globals[i]);
+        gc_mark_val(vm, &m->mod_rec);
+    }
     {
         TFn **rf; int nr = t_jit_root_fns(&rf);
         for (int q = 0; q < nr; q++) { TVal fv; fv.t = T_FN; fv.u.fn = rf[q]; gc_mark_val(vm, &fv); }
     }
     /* pha 1: gom rác (không đánh dấu), xoá dấu của object sống */
-    for (GCNode *nd = vm->prog->gc_head; nd; nd = nd->next) {
+    for (GCNode *nd = vm->root->gc_head; nd; nd = nd->next) {
         if (gc_take_mark(nd)) continue;
         if (ng >= cap) {
             cap = cap ? cap * 2 : 256;
@@ -1042,9 +1048,9 @@ static void n_chr(TVM *vm, TVal *a, int argc, TVal *r) {
 }
 static void n_argv(TVM *vm, TVal *a, int argc, TVal *r) {
     (void)a; NMAX(0);
-    TList *l = list_new(vm->prog->xargc > 0 ? (size_t)vm->prog->xargc : 0);
-    for (int i = 0; i < vm->prog->xargc; i++)
-        list_push(l, mk_str(vm->prog->xargv[i]));
+    TList *l = list_new(vm->root->xargc > 0 ? (size_t)vm->root->xargc : 0);
+    for (int i = 0; i < vm->root->xargc; i++)
+        list_push(l, mk_str(vm->root->xargv[i]));
     r->t = T_LIST; r->u.list = l;
 }
 static void n_print(TVM *vm, TVal *a, int argc, TVal *r) {
@@ -1061,10 +1067,10 @@ static void n_mem(TVM *vm, TVal *a, int argc, TVal *r) {
     TDict *d = dict_new();
     TVal k, v;
     k = mk_str("objs");
-    v = mk_int((int64_t)vm->prog->gc_tracked);
+    v = mk_int((int64_t)vm->root->gc_tracked);
     dict_set(d, k, v);
     k = mk_str("gc");
-    v = mk_int((int64_t)vm->prog->gc_runs);
+    v = mk_int((int64_t)vm->root->gc_runs);
     dict_set(d, k, v);
     r->t = T_DICT; r->u.dict = d;
 }
@@ -1097,8 +1103,11 @@ int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out) {
     }
     if (argc != f->nargs) die(vm, "call arity");
     size_t sp0 = vm->sp, pc0 = vm->pc, nf0 = vm->nframes, stop0 = vm->stop_nf;
+    TProg *prog0 = vm->prog;
     TFrame *fr = push_frame(vm);
     fr->ret_pc = pc0; fr->bp = sp0; fr->nlocals = f->nlocals; fr->fn = f;
+    fr->ret_prog = prog0; fr->is_mod = 0;
+    vm->prog = f->prog;
     tval_retain(&fv);
     if (f->nlocals == 0) {
         fr->locals = NULL;
@@ -1132,6 +1141,7 @@ int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out) {
     }
     vm->sp = sp0;
     vm->pc = pc0;
+    vm->prog = prog0;
     vm->nframes = nf0;
     *out = rv;
     return 1;
@@ -2189,6 +2199,175 @@ static void free_frame(TVM *vm) {
 }
 
 /* ---------- init/free ---------- */
+/* ---------- đọc .tb + load() (import động lúc chạy) ---------- */
+static int rd_exact(FILE *f, void *b, size_t n) { return n == 0 || fread(b, 1, n, f) == n; }
+int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
+    FILE *f = fopen(path, "rb");
+    char magic[4];
+    uint16_t ng = 0;
+    uint32_t len = 0;
+    if (!f) { snprintf(msg, msgn, "no file %s", path); return -1; }
+    if (!rd_exact(f, magic, 4) || memcmp(magic, "TB01", 4)) {
+        snprintf(msg, msgn, "bad magic"); fclose(f); return -1;
+    }
+    if (!rd_exact(f, &ng, 2)) { snprintf(msg, msgn, "bad nglobals"); fclose(f); return -1; }
+    if (!rd_exact(f, &len, 4)) { snprintf(msg, msgn, "bad len"); fclose(f); return -1; }
+    p->nglobals = ng;
+    p->code = (uint8_t*)malloc(len ? len : 1); p->len = len;
+    if (!rd_exact(f, p->code, len)) {
+        snprintf(msg, msgn, "short read"); fclose(f); free(p->code); p->code = NULL; return -1;
+    }
+    {
+        /* bảng dòng tuỳ chọn: "LN01" u16 nfile (u16 len + tên)* u32 n (u32 pc, u32 dòng, u16 file)* */
+        char mg[4];
+        int have = rd_exact(f, mg, 4);
+        if (have && !memcmp(mg, "LN01", 4)) {
+            uint16_t nf = 0;
+            uint32_t nl = 0;
+            int ok = rd_exact(f, &nf, 2);
+            if (ok) p->lfiles = (char**)calloc(nf ? nf : 1, sizeof(char*));
+            for (uint16_t i = 0; ok && i < nf; i++) {
+                uint16_t ln = 0;
+                ok = rd_exact(f, &ln, 2);
+                if (!ok) break;
+                p->lfiles[i] = (char*)calloc((size_t)ln + 1, 1);
+                ok = rd_exact(f, p->lfiles[i], ln);
+                p->nlfiles = (uint16_t)(i + 1);
+            }
+            if (ok) ok = rd_exact(f, &nl, 4);
+            if (ok && nl) {
+                p->lpc = (uint32_t*)malloc(sizeof(uint32_t) * nl);
+                p->lline = (uint32_t*)malloc(sizeof(uint32_t) * nl);
+                p->lfile = (uint16_t*)malloc(sizeof(uint16_t) * nl);
+                for (uint32_t i = 0; ok && i < nl; i++) {
+                    ok = rd_exact(f, &p->lpc[i], 4) && rd_exact(f, &p->lline[i], 4) &&
+                         rd_exact(f, &p->lfile[i], 2);
+                    if (ok) p->nlines = i + 1;
+                }
+            }
+            have = ok && rd_exact(f, mg, 4);
+        }
+        /* bảng export: "EX01" u16 n (u16 len + tên + u16 slot)* */
+        if (have && !memcmp(mg, "EX01", 4)) {
+            uint16_t ne = 0;
+            int ok = rd_exact(f, &ne, 2);
+            if (ok) {
+                p->exnames = (char**)calloc(ne ? ne : 1, sizeof(char*));
+                p->exslots = (uint16_t*)calloc(ne ? ne : 1, sizeof(uint16_t));
+            }
+            for (uint16_t i = 0; ok && i < ne; i++) {
+                uint16_t ln = 0;
+                ok = rd_exact(f, &ln, 2);
+                if (!ok) break;
+                p->exnames[i] = (char*)calloc((size_t)ln + 1, 1);
+                ok = rd_exact(f, p->exnames[i], ln) && rd_exact(f, &p->exslots[i], 2);
+                if (ok) p->nexports = (uint16_t)(i + 1);
+                else { free(p->exnames[i]); p->exnames[i] = NULL; }
+            }
+        }
+    }
+    fclose(f);
+    p->path = (char*)malloc(strlen(path) + 1);
+    strcpy(p->path, path);
+    return 0;
+}
+void tvm_prog_release(TProg *p) {
+    free(p->code); p->code = NULL;
+    for (uint16_t i = 0; i < p->nlfiles; i++) free(p->lfiles[i]);
+    free(p->lfiles); free(p->lpc); free(p->lline); free(p->lfile);
+    p->lfiles = NULL; p->lpc = p->lline = NULL; p->lfile = NULL; p->nlfiles = 0; p->nlines = 0;
+    for (uint16_t i = 0; i < p->nexports; i++) free(p->exnames[i]);
+    free(p->exnames); free(p->exslots);
+    p->exnames = NULL; p->exslots = NULL; p->nexports = 0;
+    free(p->path); p->path = NULL;
+}
+
+static void prog_init_globals(TProg *p);
+static int file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+/* load("tên"): nạp tên.tb (thư mục hiện tại, rồi thư mục của chương trình chính),
+   chạy top-level của nó một lần (cache theo đường dẫn) -> bản ghi kiểu "module"
+   gồm các global top-level (giá trị lúc nạp xong). */
+static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
+    char path[1024], eb[1200];
+    TProg *root = vm->root;
+    if (argc != 1 || a[0].t != T_STR) die(vm, "load(name str)");
+    if (a[0].u.str.n > 900) die(vm, "load: tên quá dài");
+    snprintf(path, sizeof(path), "%.*s.tb", (int)a[0].u.str.n, a[0].u.str.s);
+    if (!file_exists(path) && root->path) {
+        const char *s1 = strrchr(root->path, '/'), *s2 = strrchr(root->path, '\\');
+        const char *sl = s1 > s2 ? s1 : s2;
+        if (sl) snprintf(path, sizeof(path), "%.*s/%.*s.tb", (int)(sl - root->path), root->path,
+                         (int)a[0].u.str.n, a[0].u.str.s);
+    }
+    for (TProg *m = root->next_mod; m; m = m->next_mod) {
+        if (strcmp(m->path, path) != 0) continue;
+        if (m->loading) die(vm, "load: nạp vòng");
+        *r = m->mod_rec; tval_retain(r);
+        return;
+    }
+    TProg *m = (TProg*)calloc(1, sizeof(TProg));
+    if (!m) exit(1);
+    if (tvm_read_tb(path, m, eb, 256) != 0) {
+        free(m);
+        snprintf(eb, sizeof(eb), "no module %.*s", (int)(a[0].u.str.n > 200 ? 200 : a[0].u.str.n), a[0].u.str.s);
+        die(vm, eb);
+    }
+    if (m->nglobals < NAT_NFIXED) { tvm_prog_release(m); free(m); die(vm, "load: .tb hỏng"); }
+    m->mod_rec.t = T_NIL;
+    prog_init_globals(m);
+    m->ic = (TAttrIC*)calloc(m->len ? m->len : 1, sizeof(TAttrIC));
+    if (!m->ic) exit(1);
+    m->loading = 1;
+    m->next_mod = root->next_mod;
+    root->next_mod = m;           /* liên kết trước khi chạy: GC thấy global của nó */
+    {
+        size_t sp0 = vm->sp, pc0 = vm->pc, stop0 = vm->stop_nf, nf0 = vm->nframes;
+        TProg *p0 = vm->prog;
+        TFrame *fr = push_frame(vm);
+        fr->ret_pc = pc0; fr->bp = sp0; fr->nlocals = 0; fr->fn = NULL;
+        fr->ret_prog = p0; fr->is_mod = 1;
+        vm->prog = m;
+        vm->pc = 0;
+        vm->stop_nf = nf0;        /* lồng trong native: GC hoãn tới tầng ngoài */
+        tvm_run(vm);
+        while (vm->nframes > nf0) free_frame(vm);
+        while (vm->sp > sp0) tval_free(&vm->stack[--vm->sp]);
+        vm->prog = p0;
+        vm->pc = pc0;
+        vm->stop_nf = stop0;
+    }
+    m->loading = 0;
+    {
+        /* kiểu "module" (field = tên export) + bản ghi giá trị */
+        uint16_t ne = m->nexports;
+        TList *fl = list_new(ne);
+        TVal targs[3], tp, *vals;
+        for (uint16_t i = 0; i < ne; i++) list_push(fl, mk_str(m->exnames[i]));
+        targs[0] = mk_str("module");
+        targs[1].t = T_LIST; targs[1].u.list = fl;
+        targs[2].t = T_DICT; targs[2].u.dict = dict_new();
+        n___struct(vm, targs, 3, &tp);
+        for (int i = 0; i < 3; i++) tval_free(&targs[i]);
+        vals = (TVal*)malloc(sizeof(TVal) * ((size_t)ne + 1));
+        vals[0] = tp;
+        for (uint16_t i = 0; i < ne; i++) {
+            uint16_t sl = m->exslots[i];
+            TVal v = sl < m->nglobals ? m->globals[sl] : mk_nil();
+            if (v.t == T_CELL) v = v.u.cell->val;
+            vals[i + 1] = v;
+        }
+        n___new(vm, vals, ne + 1, &m->mod_rec);
+        free(vals);
+        tval_free(&tp);
+    }
+    *r = m->mod_rec; tval_retain(r);
+}
+
 void tvm_init(TVM *vm, TProg *p) {
     memset(vm, 0, sizeof(*vm));
     {
@@ -2203,6 +2382,12 @@ void tvm_init(TVM *vm, TProg *p) {
     vm->frames = (TFrame*)malloc(vm->fcap * sizeof(TFrame));
     vm->hcap = HAND_INIT;
     vm->handlers = (THandler*)malloc(vm->hcap * sizeof(THandler));
+    vm->root = p;
+    p->mod_rec.t = T_NIL;
+    prog_init_globals(p);
+}
+/* cấp mảng global + đặt builtin (chương trình chính và module nạp bằng load) */
+static void prog_init_globals(TProg *p) {
     p->globals = (TVal*)calloc(p->nglobals ? p->nglobals : 1, sizeof(TVal));
     fill_undef(p->globals, p->nglobals ? p->nglobals : 1);
     {
@@ -2242,6 +2427,7 @@ void tvm_init(TVM *vm, TProg *p) {
             {NAT_TANH, n_tanh, "tanh"},
             {NAT_FLOOR, n_floor, "floor"},
             {NAT_CEIL, n_ceil, "ceil"},
+            {NAT_LOAD, n_load, "load"},
         };
         size_t i;
         if (NAT_PI < p->nglobals) p->globals[NAT_PI] = mk_float(3.141592653589793);
@@ -2253,12 +2439,32 @@ void tvm_init(TVM *vm, TProg *p) {
 }
 void tvm_free(TVM *vm) {
     size_t i;
+    vm->prog = vm->root;
     while (vm->sp) tval_free(&vm->stack[--vm->sp]);
     while (vm->nframes) {
         free_frame(vm);
         free(vm->frames[vm->nframes].locals);
         vm->frames[vm->nframes].locals = NULL;
         vm->frames[vm->nframes].lcap = 0;
+    }
+    /* module đã nạp: free giá trị global trước (node GC thuộc prog gốc) */
+    if (vm->prog) {
+        TProg *m = vm->prog->next_mod;
+        while (m) {
+            TProg *nx = m->next_mod;
+            for (i = 0; i < m->nglobals; i++) tval_free(&m->globals[i]);
+            tval_free(&m->mod_rec);
+            free(m->globals);
+            if (m->ic) {
+                for (size_t q = 0; q < m->len; q++)
+                    if (m->ic[q].kind == 4) { TVal *kv = (TVal*)m->ic[q].key; tval_free(kv); free(kv); }
+                free(m->ic);
+            }
+            tvm_prog_release(m);
+            free(m);
+            m = nx;
+        }
+        vm->prog->next_mod = NULL;
     }
     if (vm->prog) {
         for (i = 0; i < vm->prog->nglobals; i++) tval_free(&vm->prog->globals[i]);
@@ -2267,13 +2473,13 @@ void tvm_free(TVM *vm) {
         vm->prog->globals = NULL;
         /* dọn node GC còn lại (object đã free hết ở trên) */
         {
-            GCNode *nd = (GCNode*)vm->prog->gc_head;
+            GCNode *nd = (GCNode*)vm->root->gc_head;
             while (nd) {
                 GCNode *nx = nd->next;
                 free(nd);
                 nd = nx;
             }
-            vm->prog->gc_head = NULL;
+            vm->root->gc_head = NULL;
         }
     }
     if (vm->prog && vm->prog->ic) {
@@ -2353,6 +2559,7 @@ static void do_return(TVM *vm, TVal rv) {
     TFrame *fr = &vm->frames[vm->nframes - 1];
     size_t bp = fr->bp;
     size_t rpc = fr->ret_pc;
+    TProg *rprog = fr->ret_prog;
     /* return bên trong try: gỡ handler của frame này (nếu không, handler
        "chết" còn trên stack và lỗi sau đó nhảy vào code của hàm đã về) */
     while (vm->nhandlers > 0 &&
@@ -2362,6 +2569,7 @@ static void do_return(TVM *vm, TVal rv) {
     while (vm->sp > bp) tval_free(&vm->stack[--vm->sp]);
     vm->sp = bp;
     vm->pc = rpc;
+    if (rprog) vm->prog = rprog;
     push(vm, rv);
 }
 
@@ -2395,6 +2603,8 @@ static void call_value(TVM *vm, uint8_t k) {
                 fr->ret_pc = vm->pc; fr->bp = bp;
                 fr->nlocals = f->nlocals;
                 fr->fn = f;
+                fr->ret_prog = vm->prog; fr->is_mod = 0;
+                vm->prog = f->prog;
                 { TVal fv2 = vm->stack[bp]; tval_retain(&fv2); }
                 if (f->nlocals == 0) {
                     fr->locals = NULL;
@@ -2438,6 +2648,8 @@ static void enter_fn(TVM *vm, TFn *f, size_t bp, int nargs) {
     fr->ret_pc = vm->pc; fr->bp = bp;
     fr->nlocals = f->nlocals;
     fr->fn = f;
+    fr->ret_prog = vm->prog; fr->is_mod = 0;
+    vm->prog = f->prog;
     f->refc++;
     if (f->nlocals == 0) {
         fr->locals = NULL;
@@ -2570,7 +2782,7 @@ int tvm_run(TVM *vm) {
     if (vm->nframes == 0) {
         TFrame *f = push_frame(vm);
         f->ret_pc = (size_t)-1; f->bp = 0; f->nlocals = 0; f->locals = NULL;
-        f->fn = NULL;
+        f->fn = NULL; f->ret_prog = NULL; f->is_mod = 0;
         in_top = 1;
         cur_vm = vm;
         if (setjmp(top_jb)) { in_top = 0; return -1; }
@@ -2584,6 +2796,8 @@ int tvm_run(TVM *vm) {
         /* (GC chu trình chỉ kiểm ở cạnh lùi JMP và CALL: mọi giá trị sống khi
            đó đều nằm trên stack/frame/global) */
         if (tvm_dbg_on && !dbg_hook(vm)) return -1;
+        /* gọi/return qua hàm của module khác (load) đổi vm->prog */
+        if (c != vm->prog->code) { c = vm->prog->code; n = vm->prog->len; }
         if (vm->pc >= n) { die(vm, "pc overrun"); }
         op = c[vm->pc++];
 #ifdef TVM_TRACE
@@ -3033,7 +3247,7 @@ int tvm_run(TVM *vm) {
             int32_t rel = rd_i32(c, &vm->pc);
             vm->pc = (size_t)((int64_t)vm->pc + rel);
             if (rel < 0) {
-                if (vm->prog->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
+                if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
                 /* vòng lặp nóng ở top-level: JIT vùng vòng lặp (global ghi thẳng) */
                 if (vm->nframes == 1 && vm->stop_nf == 0) {
                     TAttrIC *ic = &vm->prog->ic[jpc];
@@ -3079,7 +3293,7 @@ int tvm_run(TVM *vm) {
         case OP_CALL: {
             uint8_t k = c[vm->pc++];
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
-            if (vm->prog->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
+            if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
             call_value(vm, k);
             break;
         }
@@ -3090,7 +3304,7 @@ int tvm_run(TVM *vm) {
             const char *nm = (const char*)(c + vm->pc);
             vm->pc += len;
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
-            if (vm->prog->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
+            if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
             call_method(vm, k, nm, len, &vm->prog->ic[at]);
             break;
         }
@@ -3156,6 +3370,7 @@ int tvm_run(TVM *vm) {
             f->nupvals = nu; f->ncap = 0;
             f->upvals = nu ? (TVal*)calloc(nu, sizeof(TVal)) : NULL;
             f->ncalls = 0; f->native = NULL; f->loops = 0; f->jit_off = 0; f->jit = NULL;
+            f->prog = vm->prog;
             TVal v; v.t = T_FN; v.u.fn = f;
             gc_track(vm, T_FN, f);
             push(vm, v); break;
@@ -3301,6 +3516,7 @@ int tvm_run(TVM *vm) {
             h->sp = vm->sp; h->nframes = vm->nframes;
             h->pc = (size_t)((int64_t)vm->pc + rel);
             h->stop_nf = vm->stop_nf;
+            h->prog = vm->prog;
             if (setjmp(h->jb)) {
                 TVal v = mk_str(vm->errmsg);
                 push(vm, v);
@@ -3450,7 +3666,9 @@ int tvm_run(TVM *vm) {
             push(vm, mk_bool(res)); break;
         }
         case OP_NOP: break;
-        case OP_HALT: in_top = 0; return 0;
+        case OP_HALT:
+            if (vm->frames[vm->nframes - 1].is_mod) return 0;   /* hết top-level module */
+            in_top = 0; return 0;
         default: die(vm, "unknown opcode");
         }
     }

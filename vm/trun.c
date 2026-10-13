@@ -19,52 +19,11 @@
 #define TRUN_VERSION "2.2"
 
 static int run_tb(const char *path, char **xargv, int xargc, int dbg) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "no file %s\n", path); return 1; }
-    char magic[4];
-    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "TB01", 4)) {
-        fprintf(stderr, "bad magic\n"); fclose(f); return 1;
-    }
-    uint16_t ng = 0;
-    if (fread(&ng, 2, 1, f) != 1) { fprintf(stderr, "bad nglobals\n"); fclose(f); return 1; }
-    uint32_t len = 0;
-    if (fread(&len, 4, 1, f) != 1) { fprintf(stderr, "bad len\n"); fclose(f); return 1; }
     TProg p; memset(&p, 0, sizeof(p));
-    p.nglobals = ng;
-    p.code = (uint8_t*)malloc(len ? len : 1); p.len = len;
-    if (len && fread(p.code, 1, len, f) != len) {
-        fprintf(stderr, "short read\n"); fclose(f); free(p.code); return 1;
+    char msg[256];
+    if (tvm_read_tb(path, &p, msg, sizeof(msg)) != 0) {
+        fprintf(stderr, "%s\n", msg); return 1;
     }
-    {
-        /* bảng dòng tuỳ chọn: "LN01" u16 nfile (u16 len + tên)* u32 n (u32 pc, u32 dòng, u16 file)* */
-        char mg[4];
-        if (fread(mg, 1, 4, f) == 4 && !memcmp(mg, "LN01", 4)) {
-            uint16_t nf = 0;
-            uint32_t nl = 0;
-            int ok = fread(&nf, 2, 1, f) == 1;
-            if (ok) p.lfiles = (char**)calloc(nf ? nf : 1, sizeof(char*));
-            for (uint16_t i = 0; ok && i < nf; i++) {
-                uint16_t ln = 0;
-                ok = fread(&ln, 2, 1, f) == 1;
-                if (!ok) break;
-                p.lfiles[i] = (char*)calloc((size_t)ln + 1, 1);
-                ok = fread(p.lfiles[i], 1, ln, f) == ln;
-                p.nlfiles = (uint16_t)(i + 1);
-            }
-            if (ok) ok = fread(&nl, 4, 1, f) == 1;
-            if (ok && nl) {
-                p.lpc = (uint32_t*)malloc(sizeof(uint32_t) * nl);
-                p.lline = (uint32_t*)malloc(sizeof(uint32_t) * nl);
-                p.lfile = (uint16_t*)malloc(sizeof(uint16_t) * nl);
-                for (uint32_t i = 0; ok && i < nl; i++) {
-                    ok = fread(&p.lpc[i], 4, 1, f) == 1 && fread(&p.lline[i], 4, 1, f) == 1 &&
-                         fread(&p.lfile[i], 2, 1, f) == 1;
-                    if (ok) p.nlines = i + 1;
-                }
-            }
-        }
-    }
-    fclose(f);
     p.xargv = xargv;
     p.xargc = xargc;
     if (dbg) dbg_enable();
@@ -73,14 +32,13 @@ static int run_tb(const char *path, char **xargv, int xargc, int dbg) {
     fflush(stdout);
     if (rc) {
         const char *file; uint32_t line;
-        if (tvm_pc_line(&p, vm.errpc, &file, &line))
+        if (tvm_pc_line(vm.errprog ? vm.errprog : &p, vm.errpc, &file, &line))
             fprintf(stderr, "T error: %s\n  tại %s:%u\n", vm.errmsg, file, (unsigned)line);
         else
             fprintf(stderr, "T error: %s\n", vm.errmsg);
     }
-    tvm_free(&vm); free(p.code);
-    for (uint16_t i = 0; i < p.nlfiles; i++) free(p.lfiles[i]);
-    free(p.lfiles); free(p.lpc); free(p.lline); free(p.lfile);
+    tvm_free(&vm);
+    tvm_prog_release(&p);
     return rc ? 1 : 0;
 }
 

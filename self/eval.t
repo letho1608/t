@@ -97,7 +97,7 @@ fn env_get(env, name):
         if dict_has(slots, name):
             return slots[name]
         e = e["up"]
-    if name == "set" or name == "input" or name == "__struct" or name == "__new":
+    if name == "set" or name == "input" or name == "__struct" or name == "__new" or name == "load":
         return {"__bltin__": name}
     sb = soft_bltin(name)
     if sb != nil:
@@ -1006,6 +1006,19 @@ fn do_call(f, args, mods):
         if b == "__new":
             tp = args[0]
             return mk_rec(tp["name"], tp["fields"], args[1:], tp["m"])
+        if b == "load":
+            # module nạp lúc chạy -> bản ghi "module" (global top-level, bỏ "$"/"__type")
+            if args.len != 1 or type(args[0]) != "str":
+                raise_err("load(name str)")
+            m = load_mod(args[0], mods)
+            mut ks = []
+            mut vs = []
+            sl = m["env"]["slots"]
+            for k in sl:
+                if "$" not in k and not k.endswith("__type") and not is_module(sl[k]):
+                    ks.append(k)
+                    vs.append(sl[k])
+            return mk_rec("module", ks, vs, {})
         raise_err("bad bltin value")
     if is_module(f):
         raise_err("module not callable")

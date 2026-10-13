@@ -72,7 +72,9 @@ struct TDict {
     size_t icap;        /* kích thước idx (luỹ thừa 2) */
 };
 
+struct TProg;
 struct TFn {
+    struct TProg *prog; /* chương trình chứa code của hàm (module nạp bằng load()) */
     int32_t refc;
     int gc_mark;
     GCNode *gc_node;
@@ -141,6 +143,8 @@ typedef struct {
     uint16_t nlocals;
     uint16_t lcap;      /* capacity mảng locals (tái dùng qua các call) */
     TFn *fn;            /* hàm đang chạy (NULL ở main; retain) */
+    struct TProg *ret_prog; /* prog của bên gọi (khôi phục khi return) */
+    int is_mod;         /* frame top-level của module đang nạp (HALT = về load()) */
 } TFrame;
 
 typedef struct {
@@ -149,6 +153,7 @@ typedef struct {
     size_t nframes;
     size_t pc;
     size_t stop_nf;     /* khôi phục khi lỗi xuyên qua lời gọi lồng (native -> T) */
+    struct TProg *prog; /* prog lúc vào try */
 } THandler;
 
 /* Opcodes v1 (tcomp.py dựng OP theo đúng thứ tự này — không sửa tay số) */
@@ -270,13 +275,14 @@ enum {
 #define NAT_FLOOR 48
 #define NAT_CEIL 49
 #define NAT_PI 50
-#define NAT_NFIXED 51   /* user globals bắt đầu từ đây (tcomp.py) */
+#define NAT_LOAD 51
+#define NAT_NFIXED 52   /* user globals bắt đầu từ đây (tcomp.py) */
 
 /* Gọi lại hàm T từ trong native (map/filter/sort cmp): dừng vòng lặp khi
    số frame rơi về <= stop_nf (0 = chạy tới HALT như bình thường). */
 int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out);
 
-typedef struct {
+typedef struct TProg {
     uint8_t *code;
     size_t len;
     TVal *globals;
@@ -297,7 +303,20 @@ typedef struct {
     uint16_t *lfile;
     uint16_t nlfiles;
     char **lfiles;
+    /* bảng export (phần "EX01", có thể không có): tên global top-level -> slot */
+    uint16_t nexports;
+    char **exnames;
+    uint16_t *exslots;
+    /* module nạp lúc chạy (load): đường dẫn, bản ghi export, danh sách (từ prog gốc) */
+    char *path;
+    TVal mod_rec;
+    int loading;
+    struct TProg *next_mod;
 } TProg;
+/* đọc file .tb (TB01 + LN01/EX01 tuỳ chọn) vào p (memset trước); 0 ok, -1 lỗi (msg) */
+int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn);
+/* giải phóng phần do tvm_read_tb cấp (code, bảng dòng, export, path) */
+void tvm_prog_release(TProg *p);
 /* vị trí nguồn của pc: trả 1 + file, line nếu có bảng dòng */
 int tvm_pc_line(const TProg *p, size_t pc, const char **file, uint32_t *line);
 
@@ -315,7 +334,9 @@ struct TVM {
     size_t nframes, fcap, fmax;
     THandler *handlers;
     size_t nhandlers, hcap;
-    TProg *prog;
+    TProg *prog;        /* prog đang chạy (đổi khi gọi hàm của module khác) */
+    TProg *root;        /* chương trình chính: giữ GC + argv + danh sách module */
+    TProg *errprog;     /* prog lúc lỗi (tra bảng dòng) */
     size_t pc;
     size_t stop_nf;   /* tvm_call_value: dừng nested run khi nframes <= mốc này */
     int err;

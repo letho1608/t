@@ -32,7 +32,7 @@ fn natnames():
         "sort", "reversed", "enumerate", "zip", "map", "filter",
         "set", "input", "__struct", "__new",
         "zeros", "ones", "full", "arange", "eye", "rand", "randn", "seed",
-        "sqrt", "exp", "log", "sin", "cos", "tanh", "floor", "ceil", "pi"]
+        "sqrt", "exp", "log", "sin", "cos", "tanh", "floor", "ceil", "pi", "load"]
 
 fn build_nat():
     mut d = {}
@@ -1978,6 +1978,7 @@ fn compile_prog(cc, prog):
             if bs.len == 1 and bs[0][0] == "ret":
                 cc["fntab"][s[1]] = [s[2], bs[0][1], s[1]]
     main = new_fctx(true, 0, 0)
+    cc["main"] = main
     cc["fns"].append(main)
     prescan_globals(cc, prog[1])
     prescan(cc, prog[1])
@@ -2055,6 +2056,22 @@ fn build_from_cc(cc):
         for b in be_bytes(e[1], 4):
             out.append(b)
         for b in be_bytes(e[2], 2):
+            out.append(b)
+    # bảng export "EX01" (khớp export_table của vm/tcomp.py)
+    mut ex = []
+    for k in cc["main"]["scopes"][0]["m"]:
+        if "$" not in k and not k.endswith("__type"):
+            ex.append(k)
+    for b in [69, 88, 48, 49]:
+        out.append(b)
+    for b in be_bytes(ex.len, 2):
+        out.append(b)
+    for k in ex:
+        for b in be_bytes(k.len, 2):
+            out.append(b)
+        for q in range(k.len):
+            out.append(ord(k[q:q + 1]))
+        for b in be_bytes(cc["main"]["scopes"][0]["m"][k], 2):
             out.append(b)
     mut cs = []
     for b in out:

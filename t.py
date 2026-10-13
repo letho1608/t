@@ -1520,7 +1520,7 @@ def _tensor_ctor(fn,name):
     g.__name__=name
     return g
 
-SOFT_BUILTINS={"set":b_set,"input":b_input,"__struct":b_struct,"__new":b_new,
+SOFT_BUILTINS={"set":b_set,"input":b_input,"__struct":b_struct,"__new":b_new,"load":lambda *a: b_load(*a),
     "zeros":_tensor_ctor(lambda s: TT.full(s,0,"zeros"),"zeros"),
     "ones":_tensor_ctor(lambda s: TT.full(s,1,"ones"),"ones"),
     "full":_tensor_ctor(lambda s,v: TT.full(s,v,"full"),"full"),
@@ -1596,6 +1596,15 @@ def load_mod(dotted,env):
             run(P(lex2(f.read()),file_base(ap)).parse()[1],menv)
     finally: CUR_FILE[0]=old
     return mod
+
+def b_load(*a):
+    """load("tên"): nạp module lúc chạy (tên tính được) -> bản ghi kiểu "module"
+    chứa global top-level của module (bỏ tên ẩn "$" và "X__type")."""
+    if len(a)!=1 or not isinstance(a[0],str): raise TError("load(name str)")
+    mod=load_mod(a[0],None)
+    f={k:v for k,v in mod.env.m.items()
+       if "$" not in k and not k.endswith("__type") and not isinstance(v,Module)}
+    return TRec("module",f,{})
 
 def run_src(src,env=None):
     env=env or root_env()

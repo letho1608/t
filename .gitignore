@@ -21,3 +21,6 @@ tpkgs/
 
 # file tạm do tests/v03.t ghi khi chạy
 tests/_tmp_out.txt
+
+# module .tb do test_tcomp_t tạo cho tests/loadmod.t
+tests/*.tb

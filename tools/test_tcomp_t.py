@@ -32,12 +32,15 @@ CASES = [
     ("tests/gcstress.t", False), ("tests/tensor.t", False),
     ("tests/jitlist.t", False), ("tests/lambda.t", False),
     ("tests/jitmain.t", False), ("tests/agtest.t", False),
+    ("tests/loadmod_m.t", False), ("tests/loadmod.t", False),
 ]
+# module nạp lúc chạy bằng load() (tests/loadmod.t): phải có .tb trước khi chạy
+LOAD_MODS = ["tests/loadmod_m.t"]
 # suite chạy thêm qua evaluator self-host (eval.t bundle -> tdriver.tb trên VM C)
 EVAL_CASES = ["tests/demo.t", "tests/core.t", "tests/assert.t", "tests/closure.t",
               "tests/fstr.t", "tests/hoist.t", "tests/builtins.t", "tests/lang.t",
               "tests/tryflow.t", "tests/bytesem.t", "tests/tensor.t",
-              "tests/lambda.t"]
+              "tests/lambda.t", "tests/loadmod.t"]
 
 
 def sh(*args, **kw):
@@ -84,6 +87,9 @@ def main():
         print("FAIL bootstrap", r.stdout[-300:], r.stderr[-300:])
         return 1
     print("bootstrap tcomp.tb", os.path.getsize(s1), "bytes")
+    for src in LOAD_MODS:
+        if not compile_with(s1, src, os.path.join(ROOT, src[:-2] + ".tb"), False):
+            return 1
 
     for src, b in CASES:
         name = os.path.basename(src)
@@ -137,6 +143,18 @@ def main():
             print("FAIL gcstress voi TVM_GCTHRESH=3")
         else:
             print("OK gcstress voi GC quet day (TVM_GCTHRESH=3)")
+
+    # load(): module .tb rieng, GC quet day + JIT trong ham cua module
+    g = os.path.join(tmp, "a_loadmod.t.tb")
+    if os.path.exists(g):
+        env = dict(os.environ, TVM_GCTHRESH="3")
+        r1 = subprocess.run([TRUN, g], capture_output=True, cwd=ROOT, env=env)
+        want = sh(sys.executable, os.path.join(ROOT, "t.py"), "tests/loadmod.t")
+        if r1.returncode != 0 or r1.stdout != want.out:
+            ok = False
+            print("FAIL loadmod voi TVM_GCTHRESH=3")
+        else:
+            print("OK load() voi GC quet day (TVM_GCTHRESH=3)")
 
     # loi runtime khong bat: VM (bang dong LN01) va t.py deu bao file:dong
     em = os.path.join(tmp, "errmod.t")

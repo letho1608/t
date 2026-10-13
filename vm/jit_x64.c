@@ -155,6 +155,7 @@ typedef struct {
 
 typedef struct {
     TVM *vm;
+    TProg *prog;        /* prog chứa code đang biên dịch (fn->prog / prog main) */
     TFn *fn;
     TJitFn *jf;
     MOp *ops; int nops, capops;
@@ -355,6 +356,7 @@ static int callee_info(JC *j, TFn *F, const uint8_t *at, int k, uint8_t *retty) 
         return 1;
     }
     if (F->nargs != k) return 0;
+    if (F->prog != j->prog) return 0;   /* hàm của module khác (load): code + global khác */
     TJitFn *fj = jit_of(F);
     if (fj->estate == 0) {
         if (j->nest >= JIT_MAX_NEST) return 0;
@@ -387,8 +389,8 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
     int32_t *sv = (int32_t *)calloc((size_t)j->maxd + 2, sizeof(int32_t));
     uint8_t *lt = (uint8_t *)calloc((size_t)j->nl + 1, 1);
     int retty = JT_UNK;
-    TVal *G = j->vm->prog->globals;
-    size_t NG = j->vm->prog->nglobals;
+    TVal *G = j->prog->globals;
+    size_t NG = j->prog->nglobals;
     merge_in(j, start, 0, st, sv, lt0);
     work[nw++] = start; inq[start] = 1;
     while (nw > 0 && !j->fail) {
@@ -725,7 +727,7 @@ static int is_nat_ok(int64_t k) {
 }
 
 static int gen_body(JC *j) {
-    TVal *G = j->vm->prog->globals;
+    TVal *G = j->prog->globals;
     for (int i = 0; i < j->nops; i++) {
         MOp *m = &j->ops[i];
         AState *s = &j->in[i];
@@ -1131,9 +1133,10 @@ static int jc_setup(JC *j, TVM *vm, TFn *fn, int nest) {
     size_t beg, end;
     memset(j, 0, sizeof(*j));
     j->vm = vm; j->fn = fn; j->jf = jit_of(fn); j->nest = nest;
+    j->prog = fn->prog;
     j->nl = fn->nlocals;
-    if (!body_range(vm->prog, fn, &beg, &end)) { jc_fail(j, "không xác định thân hàm"); return 0; }
-    if (!decode(j, vm->prog, beg, end)) return 0;
+    if (!body_range(j->prog, fn, &beg, &end)) { jc_fail(j, "không xác định thân hàm"); return 0; }
+    if (!decode(j, j->prog, beg, end)) return 0;
     j->maxd = 64;
     j->in = (AState *)calloc((size_t)j->nops + 1, sizeof(AState));
     for (int i = 0; i < j->nops; i++) st_alloc(j, &j->in[i]);
@@ -1408,7 +1411,7 @@ int t_jit_osr_main(TVM *vm, size_t header, size_t end) {
         mu->prog = P; mu->header = header;
         JC j;
         memset(&j, 0, sizeof(j));
-        j.vm = vm; j.fn = NULL; j.jf = &jmain_fn; j.osr = 1; j.mainmode = 1;
+        j.vm = vm; j.prog = P; j.fn = NULL; j.jf = &jmain_fn; j.osr = 1; j.mainmode = 1;
         j.gpseudo = (int32_t *)malloc(sizeof(int32_t) * (P->nglobals ? P->nglobals : 1));
         for (size_t g = 0; g < P->nglobals; g++) j.gpseudo[g] = -1;
         int ok = decode(&j, P, header, end);
