@@ -1,0 +1,32 @@
+name: ci
+# Build VM C + chạy toàn bộ kiểm thử (tools/run_all.py) trên Linux và Windows.
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build
+        run: sh vm/build.sh
+      - name: test
+        run: python tools/run_all.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: build
+        shell: cmd
+        run: vm\build.bat
+      - name: test
+        run: python tools/run_all.py

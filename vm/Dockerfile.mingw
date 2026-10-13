@@ -1,0 +1,12 @@
+# Build Windows (PE) của trun.exe khi máy không có GCC cục bộ.
+#   docker build -t tbuild -f vm/Dockerfile.mingw .
+#   docker run --rm -v %CD%:/src tbuild \
+#       x86_64-w64-mingw32-gcc -O2 -o trun.exe vm/tvm.c vm/jit_x64.c vm/tdbg.c vm/trun.c -lm
+#
+# -O2 an toàn: vm/tvm.c đã có #pragma GCC optimize("no-inline") vì vòng lặp
+# interpreter chứa setjmp bị GCC inline hỏng (xem README "Bytecode VM").
+FROM debian:bookworm
+RUN apt-get update -qq && \
+    apt-get install -y -qq mingw-w64 >/dev/null && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src

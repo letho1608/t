@@ -1,0 +1,23 @@
+# sản phẩm build (tạo lại bằng vm/build.bat hoặc vm/build.sh)
+build/
+*.obj
+*.o
+trun
+trun.exe
+trepl.tb
+tcomp2.tb
+tcomp3.tb
+# tcomp.tb được GIỮ: compiler thuần T đã bootstrap (dịch không cần Python)
+
+# Python
+__pycache__/
+*.pyc
+
+# tpkg
+tpkgs/
+
+# trạng thái công cụ khác
+.opencode/
+
+# file tạm do tests/v03.t ghi khi chạy
+tests/_tmp_out.txt
