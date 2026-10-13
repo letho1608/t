@@ -23,11 +23,13 @@ fn keywords():
         "sort", "reversed", "enumerate", "zip", "map", "filter",
         "switch", "case", "default", "struct"]
 
+# tập keyword dựng một lần (tra dict thay vì quét list mỗi định danh)
+KWSET = {}
+for k in keywords():
+    KWSET[k] = true
+
 fn is_kw(w):
-    for k in keywords():
-        if k == w:
-            return true
-    return false
+    return w in KWSET
 
 fn scan_fstr(src, i, n, line):
     q = src[i:i + 1]

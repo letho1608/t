@@ -470,7 +470,16 @@ static TVal mk_str_uninit(size_t n) {
     v.u.str.n = n;
     return v;
 }
+/* chuỗi 1 byte dùng chung (bất biến): quét chuỗi từng ký tự s[i] / s[i:i+1] không
+   cấp phát. Cache giữ 1 ref vĩnh viễn. Ai cần sửa nội dung phải dùng mk_str_uninit. */
+static TVal str1_cache[256];
 static TVal mk_str_n(const char *s, size_t n) {
+    if (n == 1) {
+        TVal *c = &str1_cache[(unsigned char)s[0]];
+        if (c->t != T_STR) { *c = mk_str_uninit(1); c->u.str.s[0] = s[0]; }
+        (*c->u.str.refc)++;
+        return *c;
+    }
     TVal v = mk_str_uninit(n);
     if (n) memcpy(v.u.str.s, s, n);
     return v;
@@ -1481,7 +1490,7 @@ static void n_reversed(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(1);
     size_t n = seq_len(&a[0]);
     if (a[0].t == T_STR) {
-        TVal out = mk_str_n(a[0].u.str.s, n);
+        TVal out = mk_str_uninit(n);
         for (size_t i = 0; i < n; i++) out.u.str.s[i] = a[0].u.str.s[n - 1 - i];
         *r = out;
         return;
@@ -1581,7 +1590,8 @@ static void n_filter(TVM *vm, TVal *a, int argc, TVal *r) {
 static void m_str_upper(TVM *vm, TVal *a, int argc, TVal *r) {
     (void)argc;
     if (a[0].t != T_STR) die(vm, "upper()");
-    TVal v = mk_str_n(a[0].u.str.s, a[0].u.str.n);
+    TVal v = mk_str_uninit(a[0].u.str.n);
+    if (v.u.str.n) memcpy(v.u.str.s, a[0].u.str.s, v.u.str.n);
     for (size_t i = 0; i < v.u.str.n; i++) {
         char c = v.u.str.s[i];
         if (c >= 'a' && c <= 'z') v.u.str.s[i] = (char)(c - 32);
@@ -1591,7 +1601,8 @@ static void m_str_upper(TVM *vm, TVal *a, int argc, TVal *r) {
 static void m_str_lower(TVM *vm, TVal *a, int argc, TVal *r) {
     (void)argc;
     if (a[0].t != T_STR) die(vm, "lower()");
-    TVal v = mk_str_n(a[0].u.str.s, a[0].u.str.n);
+    TVal v = mk_str_uninit(a[0].u.str.n);
+    if (v.u.str.n) memcpy(v.u.str.s, a[0].u.str.s, v.u.str.n);
     for (size_t i = 0; i < v.u.str.n; i++) {
         char c = v.u.str.s[i];
         if (c >= 'A' && c <= 'Z') v.u.str.s[i] = (char)(c + 32);
@@ -2631,7 +2642,13 @@ static void prog_init_globals(TProg *p) {
         }
     }
 }
+#ifdef TVM_PROF
+static void prof_dump(void);
+#endif
 void tvm_free(TVM *vm) {
+#ifdef TVM_PROF
+    prof_dump();
+#endif
     tbuf_clear();
     size_t i;
     vm->prog = vm->root;
@@ -2975,6 +2992,43 @@ static int glob_match(const char *s, size_t n, const char *p, size_t m) {
     while (pi < m && p[pi] == '*') pi++;
     return pi == m;
 }
+#ifdef TVM_PROF
+/* profile thô (build với -DTVM_PROF): đếm lệnh theo hàm (entry) và theo opcode,
+   in top khi tvm_free. Chỉ dùng khi tối ưu VM / chương trình T. */
+static uint64_t prof_op[256], *prof_fn;
+static size_t prof_n;
+static TProg *prof_prog;
+static void prof_hit(TVM *vm, uint8_t op) {
+    TFrame *fr = &vm->frames[vm->nframes - 1];
+    size_t e = fr->fn ? (size_t)fr->fn->entry : 0;
+    prof_op[op]++;
+    if (!prof_fn) { prof_n = vm->prog->len + 1; prof_fn = (uint64_t*)calloc(prof_n, 8); prof_prog = vm->prog; }
+    if (vm->prog == prof_prog && e < prof_n) prof_fn[e]++;
+}
+static void prof_dump(void) {
+    uint64_t tot = 0;
+    for (int i = 0; i < 256; i++) tot += prof_op[i];
+    fprintf(stderr, "[prof] %llu lệnh\n", (unsigned long long)tot);
+    for (int r = 0; r < 25 && prof_fn; r++) {
+        size_t bi = 0;
+        for (size_t i = 0; i < prof_n; i++) if (prof_fn[i] > prof_fn[bi]) bi = i;
+        if (!prof_fn[bi]) break;
+        const char *f = "?"; uint32_t ln = 0;
+        tvm_pc_line(prof_prog, bi + 1, &f, &ln);
+        fprintf(stderr, "  fn@%zu %s:%u  %llu (%.1f%%)\n", bi, f, ln,
+                (unsigned long long)prof_fn[bi], 100.0 * prof_fn[bi] / (tot ? tot : 1));
+        prof_fn[bi] = 0;
+    }
+    for (int r = 0; r < 25; r++) {
+        int bi = 0;
+        for (int i = 0; i < 256; i++) if (prof_op[i] > prof_op[bi]) bi = i;
+        if (!prof_op[bi]) break;
+        fprintf(stderr, "  op %3d  %llu (%.1f%%)\n", bi, (unsigned long long)prof_op[bi],
+                100.0 * prof_op[bi] / (tot ? tot : 1));
+        prof_op[bi] = 0;
+    }
+}
+#endif
 int tvm_run(TVM *vm) {
     uint8_t *c = vm->prog->code;
     size_t n = vm->prog->len;
@@ -2991,15 +3045,19 @@ int tvm_run(TVM *vm) {
         vm->prog->ic = (TAttrIC*)calloc(n ? n : 1, sizeof(TAttrIC));
         if (!vm->prog->ic) exit(1);
     }
+    /* vm->prog chỉ đổi khi gọi/return qua hàm của module khác (load) và khi lỗi nhảy
+       về handler: nạp lại c/n ngay sau các lệnh đó (không kiểm mỗi lệnh) */
+#define RELOAD_CODE() do { c = vm->prog->code; n = vm->prog->len; } while (0)
     for (;;) {
         uint8_t op;
         /* (GC chu trình chỉ kiểm ở cạnh lùi JMP và CALL: mọi giá trị sống khi
            đó đều nằm trên stack/frame/global) */
         if (tvm_dbg_on && !dbg_hook(vm)) return -1;
-        /* gọi/return qua hàm của module khác (load) đổi vm->prog */
-        if (c != vm->prog->code) { c = vm->prog->code; n = vm->prog->len; }
         if (vm->pc >= n) { die(vm, "pc overrun"); }
         op = c[vm->pc++];
+#ifdef TVM_PROF
+        prof_hit(vm, op);
+#endif
 #ifdef TVM_TRACE
         fprintf(stderr, "[pc=%zu op=0x%02x sp=%zu fr=%zu nh=%zu]\n",
                 vm->pc - 1, op, vm->sp, vm->nframes, vm->nhandlers);
@@ -3384,7 +3442,9 @@ int tvm_run(TVM *vm) {
                 if (b >= n) b = n - 1;
             }
             TVal r; r.t = T_NIL;
-            if (cv.t == T_STR) {
+            if (cv.t == T_STR && s == 1) {          /* bước 1: copy thẳng (chuỗi 1 byte dùng chung) */
+                r = mk_str_n(cv.u.str.s + (b > a ? a : 0), b > a ? (size_t)(b - a) : 0);
+            } else if (cv.t == T_STR) {
                 Buf bb = {0,0,0};
                 if (s > 0) {
                     for (int64_t i = a; i < b; i += s) buf_c(&bb, cv.u.str.s[i]);
@@ -3467,6 +3527,7 @@ int tvm_run(TVM *vm) {
                         if (jr == 1) {
                             do_return(vm, rv);
                             if (vm->nframes <= vm->stop_nf) return 0;
+                            RELOAD_CODE();
                         }
                         /* jr == 2: deopt, vm->pc + stack đã đặt lại -> chạy tiếp */
                     }
@@ -3494,6 +3555,7 @@ int tvm_run(TVM *vm) {
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
             if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
             call_value(vm, k);
+            RELOAD_CODE();
             break;
         }
         case OP_CALLM: {
@@ -3505,6 +3567,7 @@ int tvm_run(TVM *vm) {
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
             if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
             call_method(vm, k, nm, len, &vm->prog->ic[at]);
+            RELOAD_CODE();
             break;
         }
         case OP_SETATTR: {
@@ -3520,6 +3583,7 @@ int tvm_run(TVM *vm) {
             TVal rv = pop(vm);
             do_return(vm, rv);
             if (vm->nframes <= vm->stop_nf) return 0;  /* hết nested call */
+            RELOAD_CODE();
             break;
         }
         case OP_LOAD: {
@@ -3718,6 +3782,7 @@ int tvm_run(TVM *vm) {
             h->prog = vm->prog;
             if (setjmp(h->jb)) {
                 TVal v = mk_str(vm->errmsg);
+                RELOAD_CODE();
                 push(vm, v);
             }
             break;
@@ -3756,6 +3821,7 @@ int tvm_run(TVM *vm) {
         }
         case OP_INCB_L: case OP_INCB_G: {
             uint16_t s = rd_u16(c, &vm->pc);
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
             int isg = (op == OP_INCB_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3775,6 +3841,7 @@ int tvm_run(TVM *vm) {
         }
         case OP_INC_L: case OP_INC_G: {
             uint16_t s = rd_u16(c, &vm->pc);
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
             int isg = (op == OP_INC_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3794,6 +3861,7 @@ int tvm_run(TVM *vm) {
         }
         case OP_DEC_L: case OP_DEC_G: {
             uint16_t s = rd_u16(c, &vm->pc);
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
             int isg = (op == OP_DEC_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3815,6 +3883,7 @@ int tvm_run(TVM *vm) {
             uint16_t s = rd_u16(c, &vm->pc);
             int64_t k = rd_i64(c, &vm->pc);
             int isg = (op == OP_ADDI_G);
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
                               : (s < vm->frames[vm->nframes - 1].nlocals
@@ -3837,6 +3906,7 @@ int tvm_run(TVM *vm) {
             TVal a, b, r;
             memcpy(&ds, c + vm->pc, 2); vm->pc += 2;
             memcpy(&ss, c + vm->pc, 2); vm->pc += 2;
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
             isg = (op == OP_ADDS_G || op == OP_SUBS_G);
             bop = (op == OP_ADDS_L || op == OP_ADDS_G) ? OP_ADD : OP_SUB;
             {
@@ -3864,7 +3934,11 @@ int tvm_run(TVM *vm) {
             tval_free(&a); tval_free(&b);
             push(vm, mk_bool(res)); break;
         }
-        case OP_NOP: break;
+        case OP_NOP:
+            /* đệm của superop peephole (INC_L... thay 4 lệnh, phần dư là NOP; không đích
+               nhảy nào rơi vào giữa): bỏ qua cả dải trong một lần dispatch */
+            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;
+            break;
         case OP_HALT:
             if (vm->frames[vm->nframes - 1].is_mod) return 0;   /* hết top-level module */
             in_top = 0; return 0;

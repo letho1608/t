@@ -107,6 +107,20 @@ fn be_bytes(v, n):
     if v < 0:
         neg = true
         v = 0 - v
+    if v < 9007199254740992:
+        mut m = v
+        mut fo = []
+        mut fi = 0
+        while fi < n:
+            b = m % 256
+            fo.append(b)
+            m = int((m - b) / 256)
+            fi = fi + 1
+        if m != 0:
+            raise "int quá lớn"
+        if neg:
+            return twos_neg(fo, n)
+        return fo
     s = str(v)
     if s.len > 19:
         raise "int quá lớn (int64)"
@@ -127,18 +141,22 @@ fn be_bytes(v, n):
     if not (d.len == 1 and d[0] == 0):
         raise "int quá lớn"
     if neg:
-        # two's complement: (~v) + 1, carry từ byte thấp lên cao
-        mut j = 0
-        while j < n:
-            out[j] = 255 - out[j]
-            j = j + 1
-        mut k = 0
-        while k < n:
-            out[k] = out[k] + 1
-            if out[k] < 256:
-                break
-            out[k] = 0
-            k = k + 1
+        return twos_neg(out, n)
+    return out
+
+# two's complement: (~v) + 1, carry từ byte thấp lên cao
+fn twos_neg(out, n):
+    mut j = 0
+    while j < n:
+        out[j] = 255 - out[j]
+        j = j + 1
+    mut k = 0
+    while k < n:
+        out[k] = out[k] + 1
+        if out[k] < 256:
+            break
+        out[k] = 0
+        k = k + 1
     return out
 
 fn u16_bytes(v):
@@ -250,16 +268,10 @@ fn curfn(cc):
     return cc["fns"][cc["fns"].len - 1]
 
 fn has_key(d, k):
-    for x in d.keys():
-        if x == k:
-            return true
-    return false
+    return k in d
 
 fn in_list(xs, v):
-    for x in xs:
-        if x == v:
-            return true
-    return false
+    return v in xs
 
 fn fail(msg):
     raise "tcomp: " + msg
@@ -1800,6 +1812,25 @@ fn rw_stmt(s, up, lren, am, xb, fbound, is_entry, cur):
 # ---------- peephole ----------
 fn op_size(cc, code, pc):
     o = code[pc]
+    if not has_key(cc, "opsz"):
+        cc["opsz"] = build_opsz(cc)
+    sz = cc["opsz"][o]
+    if sz != 0:
+        return sz
+    return op_size_slow(cc, code, pc)
+
+fn build_opsz(cc):
+    op = cc["op"]
+    mut t = []
+    for o in range(256):
+        if o == op["PUSH_STR"] or o == op["ATTR"] or o == op["SETATTR"] or o == op["CALLM"]:
+            t.append(0)
+        else:
+            t.append(op_size_slow(cc, [o, 0, 0, 0, 0, 0], 0))
+    return t
+
+fn op_size_slow(cc, code, pc):
+    o = code[pc]
     op = cc["op"]
     mut sz = 1
     if o == op["PUSH_INT"] or o == op["PUSH_FLOAT"]:
@@ -1826,12 +1857,14 @@ fn peephole(cc):
     code = cc["b"]
     op = cc["op"]
     n = code.len
-    mut prot = []
-    mut i = 0
-    while i < n:
-        prot.append(0)
-        i = i + 1
+    mut prot = [0] * n
     prot[0] = 1
+    OLOAD = op["LOAD"]
+    OLOADG = op["LOADG"]
+    OSTORE = op["STORE"]
+    OSTOREG = op["STOREG"]
+    OBIND = op["BIND"]
+    OBINDG = op["BINDG"]
     mut ops = []
     mut pc = 0
     while pc < n:
@@ -1850,7 +1883,12 @@ fn peephole(cc):
     mut idx = 0
     while idx < ops.len:
         mut done = false
+        mut cand = false
         if idx + 3 < ops.len:
+            c0 = ops[idx][1]
+            c3 = ops[idx + 3][1]
+            cand = (c0 == OLOAD or c0 == OLOADG) and (c3 == OSTORE or c3 == OSTOREG or c3 == OBIND or c3 == OBINDG)
+        if cand:
             a0 = ops[idx]
             a1 = ops[idx + 1]
             a2 = ops[idx + 2]
@@ -2036,8 +2074,7 @@ fn build_from_cc(cc):
     ln = cc["b"].len
     for b in be_bytes(ln, 4):
         out.append(b)
-    for b in cc["b"]:
-        out.append(b)
+    out.extend(cc["b"])
     # bảng dòng "LN01" (khớp line_table của vm/tcomp.py)
     for b in [76, 78, 48, 49]:
         out.append(b)
@@ -2078,10 +2115,8 @@ fn build_from_cc(cc):
             out.append(0)
         else:
             out.append(1)
-    mut cs = []
-    for b in out:
-        cs.append(chr(b))
-    return ["".join(cs), cc["gnames"].len]
+    chrs = [chr(i) for i in range(256)]
+    return ["".join([chrs[b] for b in out]), cc["gnames"].len]
 
 fn main_cli():
     args = argv()
