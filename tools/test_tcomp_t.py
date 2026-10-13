@@ -34,7 +34,7 @@ CASES = [
     ("tests/jitmain.t", False), ("tests/agtest.t", False),
     ("tests/loadmod_m.t", False), ("tests/loadmod.t", False),
 ]
-# module nạp lúc chạy bằng load() (tests/loadmod.t): phải có .tb trước khi chạy
+# module nạp lúc chạy bằng load() (tests/loadmod.t): VM tự dịch .t -> .tb khi chạy
 LOAD_MODS = ["tests/loadmod_m.t"]
 # suite chạy thêm qua evaluator self-host (eval.t bundle -> tdriver.tb trên VM C)
 EVAL_CASES = ["tests/demo.t", "tests/core.t", "tests/assert.t", "tests/closure.t",
@@ -87,9 +87,12 @@ def main():
         print("FAIL bootstrap", r.stdout[-300:], r.stderr[-300:])
         return 1
     print("bootstrap tcomp.tb", os.path.getsize(s1), "bytes")
+    # load() trên VM tự gọi "trun tcomp.tb mod.t mod.tb": dùng compiler vừa bootstrap
+    os.environ["TCOMP"] = s1
     for src in LOAD_MODS:
-        if not compile_with(s1, src, os.path.join(ROOT, src[:-2] + ".tb"), False):
-            return 1
+        tb = os.path.join(ROOT, src[:-2] + ".tb")
+        if os.path.exists(tb):
+            os.remove(tb)
 
     for src, b in CASES:
         name = os.path.basename(src)
@@ -155,6 +158,9 @@ def main():
             print("FAIL loadmod voi TVM_GCTHRESH=3")
         else:
             print("OK load() voi GC quet day (TVM_GCTHRESH=3)")
+    if not os.path.exists(os.path.join(ROOT, "tests", "loadmod_m.tb")):
+        ok = False
+        print("FAIL load() khong tu dich tests/loadmod_m.t")
 
     # loi runtime khong bat: VM (bang dong LN01) va t.py deu bao file:dong
     em = os.path.join(tmp, "errmod.t")

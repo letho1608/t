@@ -1597,14 +1597,29 @@ def load_mod(dotted,env):
     finally: CUR_FILE[0]=old
     return mod
 
+class ModFields:
+    """field của bản ghi module: đọc/ghi thẳng env của module (luôn là giá trị hiện tại)"""
+    __slots__=("env","keys")
+    def __init__(self,env,keys): self.env=env; self.keys=keys
+    def __contains__(self,k): return k in self.keys
+    def __getitem__(self,k): return self.env.m[k]
+    def __setitem__(self,k,v): self.env.m[k]=v
+    def items(self): return [(k,self.env.m[k]) for k in self.keys]
+    def __eq__(self,o):
+        if isinstance(o,ModFields): o=dict(o.items())
+        return dict(self.items())==o
+    def __ne__(self,o): return not self.__eq__(o)
+    __hash__=None
+
 def b_load(*a):
     """load("tên"): nạp module lúc chạy (tên tính được) -> bản ghi kiểu "module"
-    chứa global top-level của module (bỏ tên ẩn "$" và "X__type")."""
+    chứa global top-level của module (bỏ tên ẩn "$" và "X__type"); field đọc/ghi
+    thẳng global của module."""
     if len(a)!=1 or not isinstance(a[0],str): raise TError("load(name str)")
     mod=load_mod(a[0],None)
-    f={k:v for k,v in mod.env.m.items()
-       if "$" not in k and not k.endswith("__type") and not isinstance(v,Module)}
-    return TRec("module",f,{})
+    keys=[k for k,v in mod.env.m.items()
+          if "$" not in k and not k.endswith("__type") and not isinstance(v,Module)]
+    return TRec("module",ModFields(mod.env,keys),{})
 
 def run_src(src,env=None):
     env=env or root_env()

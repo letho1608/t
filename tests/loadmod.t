@@ -19,4 +19,14 @@ try:
     load("tests/khong_co_module")
 except:
     print("thiếu module: ok")
+# field sống: thấy giá trị global hiện tại của module, ghi m.X = v vào module
+print(m.LEVEL, m.set_level(5), m.LEVEL, m2.LEVEL)
+m.LEVEL = 42
+print(m.get_level(), m2.LEVEL, m["LEVEL"])
+m["LEVEL"] = 7
+print(m.get_level())
+mut tot = 0
+for i in range(3000):
+    tot += m.set_level(i) - m.LEVEL
+print(tot, m.LEVEL)
 print("xong")

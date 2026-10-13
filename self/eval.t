@@ -179,16 +179,27 @@ fn mk_rec(name, fields, vals, meths):
         i = i + 1
     return {"__trec__": true, "name": name, "f": f, "m": meths}
 
+# field của bản ghi; bản ghi module (load) lấy lại giá trị hiện tại từ env module
+fn rec_f(o):
+    if dict_has(o, "menv"):
+        sl = o["menv"]["slots"]
+        f = o["f"]
+        for k in o["keys"]:
+            f[k] = sl[k]
+    return o["f"]
+
 fn rec_set(o, k, v):
     if not dict_has(o["f"], k):
         raise o["name"] + " has no field " + str(k)
     o["f"][k] = v
+    if dict_has(o, "menv"):
+        o["menv"]["slots"][k] = v
     return nil
 
 fn rec_eq(a, b):
     if not is_rec(a) or not is_rec(b):
         return false
-    return a["name"] == b["name"] and a["f"] == b["f"]
+    return a["name"] == b["name"] and rec_f(a) == rec_f(b)
 
 fn mk_userfn(name, params, body, closure):
     return {"__tfn__": true, "name": name, "params": params, "body": body, "closure": closure}
@@ -252,7 +263,7 @@ fn attr_get(o, f):
         raise "module " + o["name"] + " has no " + f
     if is_rec(o):
         if dict_has(o["f"], f):
-            return o["f"][f]
+            return rec_f(o)[f]
         if dict_has(o["m"], f):
             return {"__tbound__": true, "fn": o["m"][f], "self": o}
         raise o["name"] + " has no ." + f
@@ -429,8 +440,9 @@ fn bltin_type(v):
 fn bltin_str(v):
     if is_rec(v):
         mut parts = []
-        for k in v["f"].keys():
-            parts.append(k + ": " + bltin_str(v["f"][k]))
+        rf = rec_f(v)
+        for k in rf.keys():
+            parts.append(k + ": " + bltin_str(rf[k]))
         return v["name"] + "{" + ", ".join(parts) + "}"
     if is_bound(v):
         return "<fn>"
@@ -923,7 +935,7 @@ fn eval_expr(e, env, mods):
         if is_rec(c):
             if not dict_has(c["f"], ix):
                 raise c["name"] + " has no field " + str(ix)
-            return c["f"][ix]
+            return rec_f(c)[ix]
         return c[ix]
     if k == "slice":
         c = eval_expr(e[1], env, mods)
@@ -1018,7 +1030,10 @@ fn do_call(f, args, mods):
                 if "$" not in k and not k.endswith("__type") and not is_module(sl[k]):
                     ks.append(k)
                     vs.append(sl[k])
-            return mk_rec("module", ks, vs, {})
+            r = mk_rec("module", ks, vs, {})
+            r["menv"] = m["env"]
+            r["keys"] = ks
+            return r
         raise_err("bad bltin value")
     if is_module(f):
         raise_err("module not callable")

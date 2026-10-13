@@ -1,6 +1,12 @@
 # module nạp lúc chạy bằng load("tests/loadmod_m") (xem tests/loadmod.t)
 VERSION = "1.0"
 mut COUNT = [0]
+mut LEVEL = 1
+fn set_level(v):
+    LEVEL = v
+    return LEVEL
+fn get_level():
+    return LEVEL
 fn sq(x):
     return x * x
 fn bump():

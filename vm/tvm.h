@@ -57,7 +57,9 @@ struct TTensor {
 #define DK_SET  1
 #define DK_REC  2   /* record: keys MƯỢN mảng tên field của kiểu; meths = kiểu (DK_TYPE) */
 #define DK_TYPE 3   /* kiểu struct: keys/vals = bảng method; fields = list tên field */
+struct TProg;
 struct TDict {
+    struct TProg *mod;  /* DK_TYPE của bản ghi module (load): field = global của prog này */
     int32_t refc;
     int gc_mark;
     GCNode *gc_node;
@@ -313,6 +315,8 @@ typedef struct TProg {
     int loading;
     struct TProg *next_mod;
 } TProg;
+/* đường dẫn trun (tự biên dịch .t cho load); trun.c đặt lúc khởi động */
+extern const char *tvm_exe_path;
 /* đọc file .tb (TB01 + LN01/EX01 tuỳ chọn) vào p (memset trước); 0 ok, -1 lỗi (msg) */
 int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn);
 /* giải phóng phần do tvm_read_tb cấp (code, bảng dòng, export, path) */

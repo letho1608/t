@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <windows.h>
 #include <io.h>
 #include <fcntl.h>
 #define TRUN_SEP '\\'
@@ -77,6 +78,19 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     int ai = 1, dbg = 0;
+#ifdef _WIN32
+    {
+        static char exe[1024];
+        DWORD k = GetModuleFileNameA(NULL, exe, sizeof(exe));
+        tvm_exe_path = (k > 0 && k < sizeof(exe)) ? exe : argv[0];
+    }
+#else
+    {
+        static char exe[1024];
+        ssize_t k = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (k > 0) { exe[k] = 0; tvm_exe_path = exe; } else tvm_exe_path = argv[0];
+    }
+#endif
 #ifdef _WIN32
     /* nhị phân: không CRLF — output phải khớp byte với t.py */
     _setmode(_fileno(stdout), _O_BINARY);

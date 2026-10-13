@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 /* Vòng lặp interpreter có setjmp/longjmp (try/except). GCC >= 12 (mingw-w64)
    inline hỏng vòng lặp này: try/except im lặng khi build -O1/-O2/-Os
@@ -565,6 +567,31 @@ static const char *rec_name(const TDict *d) {
     if (d->kind == DK_REC) return (d->meths && d->meths->rname) ? d->meths->rname : "record";
     return d->rname ? d->rname : "record";
 }
+/* bản ghi module (load): field i <-> global exslots[i] của prog module */
+static TProg *rec_mod(const TDict *d) {
+    return (d->kind == DK_REC && d->meths) ? d->meths->mod : NULL;
+}
+static void mod_pull(TDict *d, size_t i) {
+    TProg *m = rec_mod(d);
+    if (!m || i >= m->nexports || i >= d->len || m->exslots[i] >= m->nglobals) return;
+    TVal v = m->globals[m->exslots[i]];
+    if (v.t == T_CELL) v = v.u.cell->val;
+    tval_retain(&v);
+    tval_free(&d->vals[i]);
+    d->vals[i] = v;
+}
+static void mod_pull_all(TDict *d) {
+    if (!rec_mod(d)) return;
+    for (size_t i = 0; i < d->len; i++) mod_pull(d, i);
+}
+static void mod_push(TDict *d, size_t i) {
+    TProg *m = rec_mod(d);
+    if (!m || i >= m->nexports || i >= d->len || m->exslots[i] >= m->nglobals) return;
+    TVal *g = &m->globals[m->exslots[i]], v = d->vals[i];
+    tval_retain(&v);
+    if (g->t == T_CELL) { tval_free(&g->u.cell->val); g->u.cell->val = v; }
+    else { tval_free(g); *g = v; }
+}
 
 int tval_truthy(const TVal *v) {
     size_t i;
@@ -612,6 +639,7 @@ int tval_eq(const TVal *a, const TVal *b) {
         if (a->u.dict->kind != b->u.dict->kind) return 0;
         if (a->u.dict->kind == DK_TYPE) return a->u.dict == b->u.dict;
         if (a->u.dict->kind == DK_REC && strcmp(rec_name(a->u.dict), rec_name(b->u.dict)) != 0) return 0;
+        mod_pull_all(a->u.dict); mod_pull_all(b->u.dict);
         if (a->u.dict->len != b->u.dict->len) return 0;
         for (i = 0; i < a->u.dict->len; i++) {
             size_t j; int found = 0;
@@ -689,6 +717,7 @@ static void fmt_into(Buf *b, const TVal *v) {
             break;
         }
         if (d->kind == DK_REC) buf_put(b, rec_name(d), strlen(rec_name(d)));
+        mod_pull_all(d);
         buf_c(b, '{');
         for (i = 0; i < d->len; i++) {
             if (i) buf_put(b, ", ", 2);
@@ -813,7 +842,7 @@ static TDict *dict_new(void) {
     TDict *d = (TDict*)malloc(sizeof(TDict));
     d->refc = 1; d->gc_mark = 0; d->len = 0; d->cap = 4;
     d->kind = DK_DICT; d->rname = NULL; d->meths = NULL; d->fields = NULL;
-    d->idx = NULL; d->icap = 0;
+    d->idx = NULL; d->icap = 0; d->mod = NULL;
     d->keys = (TVal*)malloc(d->cap * sizeof(TVal));
     d->vals = (TVal*)malloc(d->cap * sizeof(TVal));
     if (cur_vm) gc_track(cur_vm, T_DICT, d);
@@ -1688,7 +1717,7 @@ static void n___new(TVM *vm, TVal *a, int argc, TVal *r) {
     d->vals = (TVal*)malloc((n ? n : 1) * sizeof(TVal));
     for (size_t i = 0; i < n; i++) { d->vals[i] = a[i + 1]; tval_retain(&d->vals[i]); }
     d->kind = DK_REC; d->rname = NULL; d->fields = NULL;
-    d->idx = NULL; d->icap = 0;
+    d->idx = NULL; d->icap = 0; d->mod = NULL;
     d->meths = tp; tp->refc++;
     if (cur_vm) gc_track(cur_vm, T_DICT, d);
     r->t = T_DICT; r->u.dict = d;
@@ -1944,7 +1973,7 @@ static TVal attr_value(TVM *vm, TVal *o, const char *name, size_t namelen) {
         int i = dict_find(d, &key);
         int mi = (i < 0 && d->meths) ? dict_find(d->meths, &key) : -1;
         tval_free(&key);
-        if (i >= 0) { r = d->vals[i]; tval_retain(&r); return r; }
+        if (i >= 0) { mod_pull(d, (size_t)i); r = d->vals[i]; tval_retain(&r); return r; }
         if (mi >= 0) {
             TList *pl = list_new(2);
             TVal f = d->meths->vals[mi], self = *o;
@@ -1995,6 +2024,7 @@ static void do_attr(TVM *vm, const char *name, size_t namelen, TAttrIC *ic) {
         if (ic && ic->kind == 1 && ic->key == d->meths && (size_t)ic->idx < d->len &&
             d->keys[ic->idx].u.str.n == namelen &&
             memcmp(d->keys[ic->idx].u.str.s, name, namelen) == 0) {
+            mod_pull(d, (size_t)ic->idx);
             TVal r = d->vals[ic->idx]; tval_retain(&r);
             TVal o = pop(vm); tval_free(&o);
             push(vm, r);
@@ -2289,6 +2319,60 @@ static int file_exists(const char *path) {
     fclose(f);
     return 1;
 }
+const char *tvm_exe_path = NULL;
+static double file_mtime(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    return (double)st.st_mtime;
+}
+/* tcomp.tb: $TCOMP, cạnh trun, thư mục hiện tại */
+static int find_tcomp(char *out, size_t n) {
+    const char *env = getenv("TCOMP");
+    if (env && *env && file_exists(env)) { snprintf(out, n, "%s", env); return 1; }
+    if (tvm_exe_path) {
+        const char *s1 = strrchr(tvm_exe_path, '/'), *s2 = strrchr(tvm_exe_path, '\\');
+        const char *sl = s1 > s2 ? s1 : s2;
+        if (sl) {
+            snprintf(out, n, "%.*s/tcomp.tb", (int)(sl - tvm_exe_path), tvm_exe_path);
+            if (file_exists(out)) return 1;
+        }
+    }
+    snprintf(out, n, "tcomp.tb");
+    return file_exists(out);
+}
+/* src.t mới hơn (hoặc chưa có) out.tb: dịch bằng "trun tcomp.tb src.t out.tb".
+   0 = không cần/không dịch được (không có trun/tcomp), 1 = đã dịch, -1 = lỗi biên dịch */
+static int compile_if_stale(const char *src, const char *out, char *msg, size_t msgn) {
+    char tc[1024], cmd[4096], ef[1100];
+    int rc;
+    double ts = file_mtime(src), tb = file_mtime(out);
+    if (ts < 0 || (tb >= 0 && tb >= ts)) return 0;
+    if (!tvm_exe_path || !find_tcomp(tc, sizeof(tc))) return 0;
+    snprintf(ef, sizeof(ef), "%s.err", out);
+#ifdef _WIN32
+    /* cmd /c: bọc cả lệnh trong một cặp nháy ngoài để giữ nháy bên trong */
+    snprintf(cmd, sizeof(cmd), "\"\"%s\" \"%s\" \"%s\" \"%s\" >nul 2>\"%s\"\"", tvm_exe_path, tc, src, out, ef);
+#else
+    snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\" \"%s\" >/dev/null 2>\"%s\"", tvm_exe_path, tc, src, out, ef);
+#endif
+    fflush(stdout); fflush(stderr);
+    rc = system(cmd);
+    msg[0] = 0;
+    {
+        /* dòng đầu stderr của compiler (bỏ tiền tố "T error: ") làm thông điệp lỗi */
+        FILE *f = fopen(ef, "rb");
+        if (f) {
+            if (fgets(msg, (int)msgn, f)) {
+                size_t k = strlen(msg);
+                while (k && (msg[k - 1] == '\n' || msg[k - 1] == '\r')) msg[--k] = 0;
+                if (!strncmp(msg, "T error: ", 9)) memmove(msg, msg + 9, k - 9 + 1);
+            }
+            fclose(f);
+        }
+        remove(ef);
+    }
+    return rc == 0 ? 1 : -1;
+}
 /* load("tên"): nạp tên.tb (thư mục hiện tại, rồi thư mục của chương trình chính),
    chạy top-level của nó một lần (cache theo đường dẫn) -> bản ghi kiểu "module"
    gồm các global top-level (giá trị lúc nạp xong). */
@@ -2297,12 +2381,31 @@ static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
     TProg *root = vm->root;
     if (argc != 1 || a[0].t != T_STR) die(vm, "load(name str)");
     if (a[0].u.str.n > 900) die(vm, "load: tên quá dài");
-    snprintf(path, sizeof(path), "%.*s.tb", (int)a[0].u.str.n, a[0].u.str.s);
-    if (!file_exists(path) && root->path) {
-        const char *s1 = strrchr(root->path, '/'), *s2 = strrchr(root->path, '\\');
-        const char *sl = s1 > s2 ? s1 : s2;
-        if (sl) snprintf(path, sizeof(path), "%.*s/%.*s.tb", (int)(sl - root->path), root->path,
-                         (int)a[0].u.str.n, a[0].u.str.s);
+    {
+        /* thư mục hiện tại, rồi thư mục của chương trình chính; có tên.t mới hơn
+           tên.tb (hoặc chưa có .tb) thì tự dịch trước */
+        char base[2][1024], src[1100];
+        int nb = 0;
+        snprintf(base[nb++], sizeof(base[0]), "%.*s", (int)a[0].u.str.n, a[0].u.str.s);
+        if (root->path) {
+            const char *s1 = strrchr(root->path, '/'), *s2 = strrchr(root->path, '\\');
+            const char *sl = s1 > s2 ? s1 : s2;
+            if (sl) snprintf(base[nb++], sizeof(base[0]), "%.*s/%.*s", (int)(sl - root->path), root->path,
+                             (int)a[0].u.str.n, a[0].u.str.s);
+        }
+        snprintf(path, sizeof(path), "%s.tb", base[0]);
+        for (int q = 0; q < nb; q++) {
+            snprintf(src, sizeof(src), "%s.t", base[q]);
+            snprintf(path, sizeof(path), "%s.tb", base[q]);
+            char cm[256];
+            if (compile_if_stale(src, path, cm, sizeof(cm)) < 0) {
+                const char *bn = strrchr(src, '/'), *b2 = strrchr(src, '\\');
+                if (b2 > bn) bn = b2;
+                snprintf(eb, sizeof(eb), "load: %.200s: %.200s", bn ? bn + 1 : src, cm[0] ? cm : "lỗi biên dịch");
+                die(vm, eb);
+            }
+            if (file_exists(path)) break;
+        }
     }
     for (TProg *m = root->next_mod; m; m = m->next_mod) {
         if (strcmp(m->path, path) != 0) continue;
@@ -2352,6 +2455,7 @@ static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
         targs[1].t = T_LIST; targs[1].u.list = fl;
         targs[2].t = T_DICT; targs[2].u.dict = dict_new();
         n___struct(vm, targs, 3, &tp);
+        tp.u.dict->mod = m;
         for (int i = 0; i < 3; i++) tval_free(&targs[i]);
         vals = (TVal*)malloc(sizeof(TVal) * ((size_t)ne + 1));
         vals[0] = tp;
@@ -2744,6 +2848,7 @@ static void set_attr(TVM *vm, const char *nm, size_t len, TAttrIC *ic) {
         }
         tval_free(&d->vals[fi]);
         d->vals[fi] = v;
+        mod_push(d, (size_t)fi);
         tval_free(&o);
         return;
     }
@@ -3015,6 +3120,7 @@ int tvm_run(TVM *vm) {
                     free(b.s);
                     tval_free(&ix); tval_free(&cv); die(vm, eb);
                 }
+                mod_pull(cv.u.dict, (size_t)i);
                 r = cv.u.dict->vals[i]; tval_retain(&r);
             } else if (cv.t == T_DICT) {
                 if (!hashable(&ix)) {
@@ -3031,6 +3137,7 @@ int tvm_run(TVM *vm) {
                     free(b.s);
                     tval_free(&ix); tval_free(&cv); die(vm, eb);
                 }
+                mod_pull(cv.u.dict, (size_t)i);
                 r = cv.u.dict->vals[i]; tval_retain(&r);
             } else {
                 int ok = 1; double xd = to_num(&ix, &ok);
@@ -3119,6 +3226,7 @@ int tvm_run(TVM *vm) {
                 }
                 tval_free(&cv.u.dict->vals[i]);
                 cv.u.dict->vals[i] = v;
+                mod_push(cv.u.dict, (size_t)i);
             } else if (cv.t == T_DICT && cv.u.dict->kind == DK_DICT) {
                 if (!hashable(&ix)) {
                     char eb[96];
