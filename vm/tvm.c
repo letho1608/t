@@ -763,12 +763,23 @@ int tval_eq(const TVal *a, const TVal *b) {
 
 /* số thực -> chuỗi, khớp fmt_float của t.py: số nguyên in không phần lẻ,
    còn lại dạng ngắn nhất round-trip (%.15g -> %.16g -> %.17g). */
+/* int64 -> thập phân (như "%lld", không qua printf); trả số byte, tmp >= 21 byte */
+static size_t fmt_i64(int64_t x, char *tmp) {
+    char r[24];
+    size_t k = 0, n = 0;
+    uint64_t u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+    do { r[k++] = (char)('0' + (int)(u % 10)); u /= 10; } while (u);
+    if (x < 0) tmp[n++] = '-';
+    while (k) tmp[n++] = r[--k];
+    tmp[n] = 0;
+    return n;
+}
 static void fmt_double(double x, char *tmp, size_t n) {
     if (x != x) { snprintf(tmp, n, "nan"); return; }
     if (x > 1.7976931348623157e308) { snprintf(tmp, n, "inf"); return; }
     if (x < -1.7976931348623157e308) { snprintf(tmp, n, "-inf"); return; }
-    if (x == floor(x) && fabs(x) < 9.2e18) {
-        snprintf(tmp, n, "%lld", (long long)x);
+    if (x == floor(x) && fabs(x) < 9.2e18 && n >= 21) {
+        fmt_i64((int64_t)x, tmp);
         return;
     }
     for (int p = 15; p <= 17; p++) {
@@ -795,8 +806,7 @@ static void fmt_into(Buf *b, const TVal *v) {
     case T_NIL: buf_put(b, "nil", 3); break;
     case T_BOOL: buf_put(b, v->u.b ? "true" : "false", v->u.b ? 4 : 5); break;
     case T_INT:
-        snprintf(tmp, sizeof(tmp), "%lld", (long long)v->u.i);
-        buf_put(b, tmp, strlen(tmp)); break;
+        buf_put(b, tmp, fmt_i64(v->u.i, tmp)); break;
     case T_FLOAT:
         fmt_double(v->u.f, tmp, sizeof(tmp));
         buf_put(b, tmp, strlen(tmp)); break;
@@ -849,8 +859,8 @@ static TVal fmt_str(const TVal *v) {
     if (v->t == T_STR) { TVal r = *v; (*r.u.str.refc)++; return r; }   /* chuỗi bất biến: dùng chung */
     if (v->t == T_INT || v->t == T_FLOAT) {
         char tmp[64];
-        if (v->t == T_INT) snprintf(tmp, sizeof(tmp), "%lld", (long long)v->u.i);
-        else fmt_double(v->u.f, tmp, sizeof(tmp));
+        if (v->t == T_INT) return mk_str_n(tmp, fmt_i64(v->u.i, tmp));
+        fmt_double(v->u.f, tmp, sizeof(tmp));
         return mk_str(tmp);
     }
     Buf b = {0, 0, 0};
