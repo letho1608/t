@@ -25,54 +25,84 @@ def _prod(sh):
 
 
 class _View:
-    """dữ liệu của view: khối liền [o, o + n) của list b (dùng chung với tensor gốc)"""
-    __slots__ = ("b", "o", "n")
+    """dữ liệu của view: phần tử thứ k (row-major) nằm ở b[ix[k]] — b là list của tensor
+    chủ (dùng chung bộ nhớ); off/st: vị trí phần tử đầu + bước từng trục trong b.
+    ix là range khi vùng chọn liền, list khi theo bước."""
+    __slots__ = ("b", "off", "st", "ix")
 
-    def __init__(self, b, o, n):
+    def __init__(self, b, off, st, ix):
         self.b = b
-        self.o = o
-        self.n = n
+        self.off = off
+        self.st = st
+        self.ix = ix
 
     def __len__(self):
-        return self.n
+        return len(self.ix)
 
     def __iter__(self):
-        return iter(self.b[self.o:self.o + self.n])
+        ix = self.ix
+        if isinstance(ix, range):
+            return iter(self.b[ix.start:ix.stop])
+        b = self.b
+        return iter([b[i] for i in ix])
 
     def __getitem__(self, k):
         if isinstance(k, slice):
-            return self.b[self.o:self.o + self.n][k]
-        if k < 0:
-            k += self.n
-        if k < 0 or k >= self.n:
-            raise IndexError(k)
-        return self.b[self.o + k]
+            b = self.b
+            return [b[i] for i in self.ix[k]]
+        return self.b[self.ix[k]]
 
     def __setitem__(self, k, v):
         if isinstance(k, slice):
-            ix = range(self.n)[k]
+            ix = self.ix[k]
             vs = list(v)
             if len(vs) != len(ix):
                 raise ValueError("view slice assign")
             for i, x in zip(ix, vs):
-                self.b[self.o + i] = x
+                self.b[i] = x
             return
-        if k < 0:
-            k += self.n
-        if k < 0 or k >= self.n:
-            raise IndexError(k)
-        self.b[self.o + k] = v
+        self.b[self.ix[k]] = v
 
     def __repr__(self):
         return repr(list(self))
 
 
-def view(t, off, shape):
-    """view khối liền [off, off + prod(shape)) của t (ghi qua view đổi t)"""
+def _phys(t):
+    """(list của chủ, vị trí phần tử đầu, bước từng trục) của t"""
     d = t.d
     if isinstance(d, _View):
-        return raw(_View(d.b, d.o + off, _prod(shape)), shape)
-    return raw(_View(d, off, _prod(shape)), shape)
+        return d.b, d.off, d.st
+    return d, 0, _strides(t.shape)
+
+
+def _walk(shape, off, st):
+    """vị trí (trong list của chủ) của từng phần tử, theo thứ tự row-major"""
+    pos = []
+
+    def rec(q, o):
+        if q == len(shape):
+            pos.append(o)
+            return
+        for i in range(shape[q]):
+            rec(q + 1, o + i * st[q])
+    rec(0, off)
+    return pos
+
+
+def mkview(b, off, shape, st):
+    """view shape `shape` trên list b: phần tử đầu ở off, bước st. Vùng rỗng -> tensor
+    rỗng mới; bước row-major -> range (liền); còn lại danh sách vị trí."""
+    shape = tuple(shape)
+    st = tuple(st)
+    n = _prod(shape)
+    if n == 0:
+        return raw([], shape)
+    rm = _strides(shape)
+    if all(sh <= 1 or a == r for sh, a, r in zip(shape, st, rm)):
+        ix = range(off, off + n)
+    else:
+        ix = _walk(shape, off, st)
+    return raw(_View(b, off, st, ix), shape)
 
 
 class Tensor:
@@ -405,44 +435,55 @@ def getitem(t, i):
     n = t.shape[0]
     if i < 0 or i >= n:
         raise TensorError("index %d out of range (len %d)" % (i, n))
+    b, off, st = _phys(t)
+    off += i * st[0]
     if t.ndim == 1:
-        return t.d[i]
-    step = _prod(t.shape[1:])
-    return view(t, i * step, t.shape[1:])     # hàng i: khối liền -> view
+        return b[off]
+    return mkview(b, off, t.shape[1:], st[1:])     # hàng i -> view
+
+
+def _assign(t, b, shape, off, st, v, scalar_shape1):
+    """gán v vào vùng (shape, off, st) trên list b của chủ t"""
+    if isinstance(v, Tensor):
+        if v.shape != (shape if (shape or not scalar_shape1) else (1,)):
+            raise TensorError("tensor assign shape")
+        vals = list(v.d)          # chép trước: nguồn có thể chồng lên đích
+        for p, x in zip(_walk(shape, off, st), vals):
+            b[p] = x
+        return
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise TensorError("tensor assign")
+    x = float(v)
+    for p in _walk(shape, off, st):
+        b[p] = x
 
 
 def setitem(t, i, v):
     n = t.shape[0]
     if i < 0 or i >= n:
         raise TensorError("assign range")
+    b, off, st = _phys(t)
+    off += i * st[0]
     if t.ndim == 1:
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise TensorError("tensor assign")
-        t.d[i] = float(v)
+        b[off] = float(v)
         return
-    step = _prod(t.shape[1:])
-    if isinstance(v, Tensor):
-        if v.shape != t.shape[1:]:
-            raise TensorError("tensor assign shape")
-        t.d[i * step:(i + 1) * step] = list(v.d)
-    else:
-        x = _num(v)
-        for q in range(step):
-            t.d[i * step + q] = x
+    _assign(t, b, t.shape[1:], off, st[1:], v, False)
 
 
-def _multi_pos(t, key):
-    """chỉ số nhiều trục: int chọn (bỏ trục), nil giữ cả trục; thiếu trục cuối = giữ.
-    -> (shape kết quả, danh sách vị trí phẳng theo thứ tự row-major)"""
+def _select(t, key):
+    """vùng chọn của key: int chọn (bỏ trục), nil / [lo, hi, step] giữ trục; thiếu
+    trục cuối = giữ. -> (list của chủ, shape, vị trí phần tử đầu, bước)"""
     if len(key) > t.ndim:
         raise TensorError("too many indices")
-    st = _strides(t.shape)
-    base = 0
-    axes = []        # (trục, danh sách chỉ số) của các trục giữ lại
+    b, off, st0 = _phys(t)
+    shape, st = [], []
     for ax in range(t.ndim):
         k = key[ax] if ax < len(key) else None
         if k is None:
-            axes.append((ax, list(range(t.shape[ax]))))
+            shape.append(t.shape[ax])
+            st.append(st0[ax])
             continue
         if isinstance(k, list):
             if len(k) != 3:
@@ -452,66 +493,40 @@ def _multi_pos(t, key):
                     raise TensorError("slice int")
             if k[2] == 0:
                 raise TensorError("slice step 0")
-            axes.append((ax, list(range(t.shape[ax]))[k[0]:k[1]:k[2]]))
+            r = range(t.shape[ax])[k[0]:k[1]:k[2]]
+            if len(r):
+                off += r.start * st0[ax]
+            shape.append(len(r))
+            st.append(st0[ax] * r.step)
             continue
         if isinstance(k, bool) or not isinstance(k, int):
             raise TensorError("index int")
         if k < 0 or k >= t.shape[ax]:
             raise TensorError("index %d out of range (len %d)" % (k, t.shape[ax]))
-        base += k * st[ax]
-    shape = tuple(len(ix) for _, ix in axes)
-    pos = []
-    def rec(q, off):
-        if q == len(axes):
-            pos.append(off)
-            return
-        a, ix = axes[q]
-        for i in ix:
-            rec(q + 1, off + i * st[a])
-    if _prod(shape):
-        rec(0, base)
-    return shape, pos
+        off += k * st0[ax]
+    return b, tuple(shape), off, tuple(st)
 
 
 def get_multi(t, key):
-    shape, pos = _multi_pos(t, key)
+    b, shape, off, st = _select(t, key)
     if not shape:
-        return t.d[pos[0]]
-    # vùng chọn là một khối liền (row-major) -> view; ngược lại bản sao
-    if pos and all(p == pos[0] + i for i, p in enumerate(pos)):
-        return view(t, pos[0], shape)
-    return raw([t.d[p] for p in pos], shape)
+        return b[off]
+    return mkview(b, off, shape, st)      # luôn là view (liền / theo bước)
 
 
 def set_multi(t, key, v):
-    shape, pos = _multi_pos(t, key)
-    if isinstance(v, Tensor):
-        if v.shape != (shape if shape else (1,)):
-            raise TensorError("tensor assign shape")
-        for p, x in zip(pos, v.d):
-            t.d[p] = x
-        return
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise TensorError("tensor assign")
-    x = float(v)
-    for p in pos:
-        t.d[p] = x
+    b, shape, off, st = _select(t, key)
+    _assign(t, b, shape, off, st, v, True)
 
 
 def slice0(t, lo, hi, st):
     if st == 0:
         raise TensorError("slice step 0")
-    idx = list(range(t.shape[0]))[lo:hi:st]
-    # các hàng liền nhau, tăng dần -> view (dùng chung bộ nhớ)
-    if idx and all(i == idx[0] + q for q, i in enumerate(idx)):
-        return view(t, idx[0] * _prod(t.shape[1:]), (len(idx),) + t.shape[1:])
-    if t.ndim == 1:
-        return raw([t.d[i] for i in idx], (len(idx),))
-    step = _prod(t.shape[1:])
-    d = []
-    for i in idx:
-        d.extend(t.d[i * step:(i + 1) * step])
-    return raw(d, (len(idx),) + t.shape[1:])
+    r = range(t.shape[0])[lo:hi:st]
+    b, off, st0 = _phys(t)
+    if len(r):
+        off += r.start * st0[0]
+    return mkview(b, off, (len(r),) + t.shape[1:], (st0[0] * r.step,) + tuple(st0[1:]))
 
 
 def reshape(t, args):
@@ -531,31 +546,17 @@ def reshape(t, args):
         sh[sh.index(-1)] = len(t.d) // rest
     if _prod(sh) != len(t.d):
         raise TensorError("reshape shape")
-    return raw(list(t.d), sh)
+    d = t.d
+    if not isinstance(d, _View) or isinstance(d.ix, range):     # liền -> view
+        bb, off, _ = _phys(t)
+        return mkview(bb, off, sh, _strides(sh))
+    return raw(list(d), sh)
 
 
 def transpose(t):
-    if t.ndim == 1:
-        return raw(list(t.d), t.shape)
-    sh = t.shape[::-1]
-    st = _strides(t.shape)[::-1]
-    n = len(t.d)
-    out = [0.0] * n
-    nd = len(sh)
-    cnt = [0] * nd
-    off = 0
-    for k in range(n):
-        out[k] = t.d[off]
-        j = nd - 1
-        while j >= 0:
-            cnt[j] += 1
-            off += st[j]
-            if cnt[j] < sh[j]:
-                break
-            off -= st[j] * cnt[j]
-            cnt[j] = 0
-            j -= 1
-    return raw(out, sh)
+    """view: đảo shape và bước"""
+    b, off, st = _phys(t)
+    return mkview(b, off, t.shape[::-1], st[::-1])
 
 
 def tolist(t):

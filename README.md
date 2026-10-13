@@ -112,9 +112,10 @@ w = randn([4, 2]) * 0.1         # ngẫu nhiên tất định (splitmix64), gi�
 - `t[i]` trên tensor n-chiều trả về **view** của hàng (dùng chung bộ nhớ:
   `t[i][j] = v` đổi `t`); `t[i] = hàng|số` để gán cả hàng.
   Chỉ số nhiều trục: `t[i, j]`, `t[:, j]` (cả cột), `t[1, :] = tensor([...])`,
-  khoảng theo từng trục `t[0:2, 1:3]`, `t[::-1, 0]`. Vùng chọn là khối liền
-  (`t[i]`, `t[a:b]`, `t[i, j:k]`) → view; còn lại (cột, bước ≠ 1) → bản sao.
-  Cần bản độc lập thì `.copy()`.
+  khoảng theo từng trục `t[0:2, 1:3]`, `t[::-1, 0]`. Mọi chỉ số/lát cắt (kể cả
+  cột `t[:, j]`, bước `t[::2]`, bước âm), `.T`/`transpose()` và `reshape` của tensor
+  liền đều là **view** như numpy (ghi qua view đổi gốc). `flatten()`, `copy()` và
+  phép toán luôn tạo tensor mới. Cần bản độc lập thì `.copy()`.
 - VM C và `t.py` (`ttensor.py`) khớp **từng bit** (cộng tuần tự, `@` tích luỹ theo
   k tăng dần); `tools/test_tensor.py` còn đối chiếu 38 phép với numpy.
 - Ví dụ học máy: `tests/tensor.t` (MLP học XOR), `bench/nn.t`.

@@ -167,3 +167,46 @@ fn view_demo():
     return t[2]
 keep = view_demo()
 print(keep, keep.sum())
+# view theo bước: cột, bước != 1, bước âm, transpose, reshape (khớp numpy)
+fn strided_demo():
+    t = arange(12).reshape(3, 4)
+    c = t[:, 1]
+    print(c, c.sum(), c.tolist(), 5.0 in c)
+    t[0, 1] = 100
+    print(c, -c, c * 2, c == tensor([100, 5, 9]))
+    c[2] = -9
+    print(t)
+    e = t[::2]
+    e[1, 0] = 77
+    print(t[2], e)
+    rv = t[:, ::-1]
+    print(rv[0], rv[:, 0])
+    rv[1, 0] = 0
+    print(t[1])
+    tt = t.T
+    print(tt.shape, tt[1], tt[:, 0])
+    tt[0, 2] = 555
+    print(t[2, 0], tt @ tensor([1, 0, 0]))
+    s2 = t[::2, 1::2]
+    print(s2, s2.shape, s2.T)
+    s2[1, 1] = 3.5
+    print(t[2])
+    t[:, 2] = tensor([1, 2, 3])
+    print(c.copy(), t[:, 2])
+    t[1:3, :] = t[0:2]
+    print(t)
+    a = arange(6).reshape(1, 6)
+    a[:, 1:] = a[:, :5]
+    print(a)
+    g = arange(8)
+    h = g[::-2]
+    h[0] = 70
+    print(g, h, h.reshape(2, 2))
+    m = g.reshape(2, 4)
+    m[0, 0] = -1
+    print(g[0], m.T.reshape(8))
+    print(t[:, 5:5], t[0:0].shape, t[:, ::3].tolist())
+    print(tt.T == t, tt.sum(0), tt.sum(1), tt.max())
+    return t[:, 3]
+kc = strided_demo()
+print(kc, kc.mean())

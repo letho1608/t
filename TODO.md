@@ -78,6 +78,8 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | R1 | `load("tên")`: import động lúc chạy, tên tính được; VM nạp `tên.tb` riêng (phần `EX01`) | ✅ `tests/loadmod.t` (4 runtime) |
 | R3 | `load()`: field sống (đọc global hiện tại, `m.X = v` ghi vào module); VM tự dịch `tên.t` khi `.tb` thiếu/cũ | ✅ `tests/loadmod.t` |
 | G3 | Tensor view: `t[i]`, `t[a:b]`, `t[i, j]`… khi vùng chọn là khối liền thì dùng chung bộ nhớ | ✅ `tests/tensor.t` |
+| G4 | View theo bước: cột `t[:, j]`, `t[::2]`, bước âm, `.T`, `reshape` (như numpy) | ✅ `tests/tensor.t` |
+| G5 | `m.X = v` trên module của `load()` tôn trọng `mut` (let/fn/struct báo lỗi) | ✅ `tests/loadmod.t` |
 
 Lỗi có sẵn sửa thêm: compiler T không tìm module khi đường dẫn dùng `\`; bundler của
 compiler Python không đổi tên hàm lồng trong hàm của module; thông điệp
@@ -103,7 +105,7 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 
 | # | Hạng mục | Ghi chú |
 |---|---|---|
-| G4 | View theo bước (cột `t[:, j]`, `t[::2]`) | hiện là bản sao; view chỉ cho khối liền |
+| — | (trống) | |
 
 ## 3. Giới hạn đã biết (không phải bug)
 
@@ -111,6 +113,5 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 |---|---|
 | Biến `for` khai báo **sau** hàm thì closure không capture | `tests/hoist.t` khoá hành vi |
 | `==`/`!=` trên tensor so toàn bộ (bool) | so từng phần tử: `.eq()` / `.ne()`; `< > <= >=` là từng phần tử |
-| Tensor: view chỉ khi vùng chọn là **khối liền** (row-major) | `t[i]`, `t[a:b]`, `t[i, j:k]` là view; cột `t[:, j]`, bước `t[::2]`, `reshape`, `flatten`, `copy()` là bản sao |
 | `mem()` trên `t.py`/`eval.t` trả `objs=0, gc=0` | chỉ `trun` có số liệu GC thật |
 | Thông điệp vài lỗi hiếm (vd unhashable key) khác chữ giữa runtime | output bình thường khớp từng byte |

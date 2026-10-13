@@ -409,10 +409,13 @@ Tên `$...` không lex được nên không đụng tên người dùng.
 - Lát cắt nhiều trục: mỗi trục trong `t[...]` là số (chọn, bỏ trục), `nil`/`:`
   (cả trục) hoặc `[lo, hi, step]` (parse từ `lo:hi:step`, phần trống = `nil`;
   ngữ nghĩa slice của Python, kể cả âm và step âm).
-- View: kết quả chỉ số/lát cắt tensor mà các phần tử được chọn nằm liền nhau, tăng
-  dần trong bộ nhớ row-major (`t[i]`, `t[a:b]`, `t[i, j:k]`, ...) dùng chung bộ nhớ
-  với tensor gốc (ghi qua view đổi gốc và ngược lại; view giữ gốc sống). Ngoài ra
-  (cột, bước ≠ 1, vùng rỗng) là bản sao. Phép toán luôn tạo tensor mới.
+- View (như numpy): mọi kết quả chỉ số/lát cắt tensor còn ≥ 1 trục (`t[i]`,
+  `t[a:b:s]`, `t[:, j]`, `t[::-1, 1::2]`, ...), `.T`/`transpose()` và `reshape` của
+  tensor liền dùng chung bộ nhớ với tensor gốc (ghi qua view đổi gốc và ngược lại;
+  view giữ gốc sống). Vùng rỗng, `reshape` của view theo bước, `flatten()`, `copy()`
+  và mọi phép toán tạo tensor mới. Gán `t[vùng] = u` khi `u` chồng lên vùng đích
+  chép `u` trước (như numpy). VM: view theo bước giữ cache dày, gom lại khi tensor
+  chủ đã bị ghi (bộ đếm phiên bản).
 - `load(tên)`: builtin mềm (NAT 51). Trả bản ghi kiểu `"module"` với field = global
   top-level của module (bỏ tên chứa `$` và `X__type`); đọc field = giá trị global
   hiện tại, ghi field (`m.X = v`, `m["X"] = v`) = ghi global của module (global

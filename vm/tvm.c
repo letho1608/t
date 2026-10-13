@@ -500,6 +500,7 @@ void tval_free(TVal *v) {
             TTensor *b = v->u.ten->base;
             if (b) {                      /* view: nhả tensor sở hữu bộ nhớ */
                 TVal bv; bv.t = T_TENSOR; bv.u.ten = b;
+                if (v->u.ten->sv) free(v->u.ten->d);     /* cache của view theo bước */
                 free(v->u.ten);
                 tval_free(&bv);
             } else {
@@ -1207,6 +1208,7 @@ static int val_cmp(TVal *a, TVal *b) {
     return 2;   /* không so sánh được */
 }
 /* lấy phần tử thứ i của list/tensor (trả 1 nếu hợp lệ) */
+static void ten_sync(const TTensor *t);
 static int seq_get(TVal *s, size_t i, TVal *out) {
     if (s->t == T_LIST) {
         if (i >= s->u.list->len) return 0;
@@ -1215,6 +1217,7 @@ static int seq_get(TVal *s, size_t i, TVal *out) {
     }
     if (s->t == T_TENSOR) {
         if (i >= s->u.ten->len) return 0;
+        ten_sync(s->u.ten);
         *out = mk_float(s->u.ten->d[i]);
         return 1;
     }
@@ -1576,6 +1579,7 @@ static void m_str_join(TVM *vm, TVal *a, int argc, TVal *r) {
         }
     } else if (a[1].t == T_TENSOR) {
         char tmp[32];
+        ten_sync(a[1].u.ten);
         for (size_t i = 0; i < a[1].u.ten->len; i++) {
             if (i) buf_put(&b, a[0].u.str.s, a[0].u.str.n);
             double x = a[1].u.ten->d[i];
@@ -1921,6 +1925,7 @@ static int val_in(TVM *vm, TVal *a, TVal *b) {
     if (b->t == T_TENSOR) {
         int ok = 1; double x = to_num(a, &ok);
         if (!ok) return 0;
+        ten_sync(b->u.ten);
         for (size_t i = 0; i < b->u.ten->len; i++) if (b->u.ten->d[i] == x) return 1;
         return 0;
     }
@@ -3052,6 +3057,7 @@ int tvm_run(TVM *vm) {
             else if (a.t == T_FLOAT) { double x = a.u.f; tval_free(&a); push(vm, mk_float(-x)); }
             else if (a.t == T_TENSOR) {
                 TTensor *t = ten_alloc(a.u.ten->ndim, a.u.ten->shape);
+                ten_sync(a.u.ten);
                 for (size_t i = 0; i < t->len; i++) t->d[i] = -a.u.ten->d[i];
                 tval_free(&a);
                 push(vm, ten_val(t));
@@ -3333,35 +3339,11 @@ int tvm_run(TVM *vm) {
                 }
                 r.t = T_LIST; r.u.list = l;
             } else {
-                /* tensor: cắt theo trục 0 (hàng) */
-                size_t cap = 16, cnt = 0;
-                int64_t *ixs = (int64_t*)malloc(sizeof(int64_t) * cap);
-                if (s > 0) {
-                    for (int64_t i = a; i < b; i += s) {
-                        if (cnt >= cap) { cap *= 2; ixs = (int64_t*)realloc(ixs, sizeof(int64_t) * cap); }
-                        ixs[cnt++] = i;
-                    }
-                } else {
-                    for (int64_t i = a; i > b; i += s) {
-                        if (cnt >= cap) { cap *= 2; ixs = (int64_t*)realloc(ixs, sizeof(int64_t) * cap); }
-                        ixs[cnt++] = i;
-                    }
-                }
-                {
-                    /* các hàng liền nhau, tăng dần -> view (dùng chung bộ nhớ) */
-                    int cont = cnt > 0;
-                    for (size_t q = 1; cont && q < cnt; q++) cont = ixs[q] == ixs[0] + (int64_t)q;
-                    if (cont) {
-                        const TTensor *T0 = cv.u.ten;
-                        size_t sh[TMAXDIM], step = sh_prod(T0->shape + 1, T0->ndim - 1);
-                        sh[0] = cnt;
-                        for (int q = 1; q < T0->ndim; q++) sh[q] = T0->shape[q];
-                        r = ten_val(ten_view(T0, (size_t)ixs[0] * step, T0->ndim, sh));
-                    } else {
-                        r = ten_val(ten_take0(cv.u.ten, ixs, cnt));
-                    }
-                }
-                free(ixs);
+                /* tensor: cắt theo trục 0 (hàng a, a+s, ...) -> view */
+                size_t cnt = 0;
+                if (s > 0) { for (int64_t i = a; i < b; i += s) cnt++; }
+                else { for (int64_t i = a; i > b; i += s) cnt++; }
+                r = ten_val(ten_rows(cv.u.ten, a, s, cnt));
             }
             tval_free(&st); tval_free(&hi); tval_free(&lo); tval_free(&cv);
             push(vm, r); break;

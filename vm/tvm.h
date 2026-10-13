@@ -48,10 +48,15 @@ struct TList {
 struct TTensor {
     int32_t refc;
     size_t len;         /* tổng số phần tử */
-    double *d;          /* row-major (view: trỏ vào bộ nhớ của base) */
+    double *d;          /* row-major dày (view liền: trỏ vào bộ nhớ của base;
+                           view theo bước: cache, xem ten_sync) */
     TTensor *base;      /* view: tensor sở hữu bộ nhớ (giữ ref); NULL = tự sở hữu */
     int ndim;           /* 1..8 */
     size_t shape[8];
+    int sv;             /* 1 = view theo bước: phần tử ở base->d[off + Σ i_k*st[k]] */
+    size_t off;
+    ptrdiff_t st[8];
+    uint64_t ver;       /* chủ bộ nhớ: tăng mỗi lần ghi; view theo bước: ver của cache */
 };
 
 #define DK_DICT 0

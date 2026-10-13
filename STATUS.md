@@ -18,6 +18,8 @@
   field module sống; `test_tcomp_t` 25 suite, eval.t 13 suite, kèm GC quét dày).
 - Tensor view cho vùng chọn liền khối (`t[i]`, `t[a:b]`, `t[i, j:k]`): `bench/nn.t`
   0.550s → 0.51s. Git: mỗi tính năng một commit.
+- View theo bước như numpy (cột, bước ≠ 1, bước âm, `.T`, `reshape`); `m.X = v` trên
+  module tôn trọng `mut`.
 
 ## v2.2 — hoàn thiện mục còn thiếu + JIT mở rộng + tensor thật
 

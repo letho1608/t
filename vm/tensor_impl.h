@@ -24,27 +24,112 @@ static TTensor *ten_alloc(int nd, const size_t *sh) {
     t->d = (double*)malloc(sizeof(double) * (t->len ? t->len : 1));
     if (!t->d) exit(1);
     t->base = NULL;
+    t->sv = 0;
+    t->off = 0;
+    t->ver = 0;
     return t;
 }
-/* view: khối liền [off, off + prod(sh)) của t, dùng chung bộ nhớ (ghi qua view
-   đổi t). Luôn trỏ thẳng về tensor sở hữu bộ nhớ (view của view không xích). */
-static TTensor *ten_view(const TTensor *t, size_t off, int nd, const size_t *sh) {
-    TTensor *own = t->base ? t->base : (TTensor*)t;
+/* ---------- view ----------
+   chủ bộ nhớ: base == NULL, d riêng, ver tăng mỗi lần ghi (ten_wrote).
+   view liền (sv = 0): d = base->d + off, dữ liệu dùng chung trực tiếp.
+   view theo bước (sv = 1): phần tử (i0, i1, ...) nằm ở base->d[off + Σ ik*st[k]];
+   d là cache row-major, ten_sync gom lại khi ver != base->ver. Mọi chỗ đọc d phải
+   ten_sync trước; mọi chỗ ghi đi thẳng vào bộ nhớ của chủ (ten_phys) rồi ten_wrote.
+   View luôn trỏ thẳng về chủ (view của view không xích). */
+static TTensor *ten_owner(const TTensor *t) { return t->base ? t->base : (TTensor*)t; }
+static void ten_rowmajor(const size_t *sh, int nd, ptrdiff_t *st) {
+    ptrdiff_t acc = 1;
+    for (int i = nd - 1; i >= 0; i--) { st[i] = acc; acc *= (ptrdiff_t)sh[i]; }
+}
+/* vị trí của phần tử đầu + bước từng trục, tính trong bộ nhớ của chủ */
+static size_t ten_phys(const TTensor *t, ptrdiff_t *st) {
+    if (t->sv) {
+        for (int i = 0; i < t->ndim; i++) st[i] = t->st[i];
+        return t->off;
+    }
+    ten_rowmajor(t->shape, t->ndim, st);
+    return t->base ? (size_t)(t->d - t->base->d) : 0;
+}
+static void ten_wrote(TTensor *t) { ten_owner(t)->ver++; }
+/* vị trí (trong bộ nhớ của chủ) của từng phần tử, theo thứ tự row-major */
+static void ten_walk(int nd, const size_t *sh, size_t off, const ptrdiff_t *st, size_t *pos) {
+    size_t n = sh_prod(sh, nd), cnt[TMAXDIM];
+    ptrdiff_t p = (ptrdiff_t)off;
+    for (int j = 0; j < nd; j++) cnt[j] = 0;
+    for (size_t k = 0; k < n; k++) {
+        pos[k] = (size_t)p;
+        for (int j = nd - 1; j >= 0; j--) {
+            p += st[j];
+            if (++cnt[j] < sh[j]) break;
+            p -= st[j] * (ptrdiff_t)cnt[j];
+            cnt[j] = 0;
+        }
+    }
+}
+static void ten_sync(const TTensor *t) {
+    TTensor *v = (TTensor*)t;
+    if (!v->sv || v->ver == v->base->ver) return;
+    {
+        const double *src = v->base->d;
+        size_t cnt[TMAXDIM];
+        ptrdiff_t p = (ptrdiff_t)v->off;
+        int nd = v->ndim;
+        for (int j = 0; j < nd; j++) cnt[j] = 0;
+        for (size_t k = 0; k < v->len; k++) {
+            v->d[k] = src[p];
+            for (int j = nd - 1; j >= 0; j--) {
+                p += v->st[j];
+                if (++cnt[j] < v->shape[j]) break;
+                p -= v->st[j] * (ptrdiff_t)cnt[j];
+                cnt[j] = 0;
+            }
+        }
+    }
+    v->ver = v->base->ver;
+}
+/* view của t: shape sh, phần tử đầu ở vị trí off (bộ nhớ của chủ), bước st.
+   Vùng rỗng -> tensor rỗng mới; bước row-major -> view liền; còn lại view theo bước. */
+static TTensor *ten_mkview(const TTensor *t, size_t off, int nd, const size_t *sh, const ptrdiff_t *st) {
+    TTensor *own = ten_owner(t);
+    size_t n = sh_prod(sh, nd);
+    ptrdiff_t rm[TMAXDIM];
+    int cont = 1;
+    if (n == 0) return ten_alloc(nd, sh);
+    ten_rowmajor(sh, nd, rm);
+    for (int i = 0; i < nd; i++) if (sh[i] > 1 && st[i] != rm[i]) cont = 0;
     TTensor *v = (TTensor*)malloc(sizeof(TTensor));
     if (!v) exit(1);
     v->refc = 1;
     v->ndim = nd;
-    for (int i = 0; i < nd; i++) v->shape[i] = sh[i];
-    v->len = sh_prod(sh, nd);
-    v->d = t->d + off;
+    for (int i = 0; i < nd; i++) { v->shape[i] = sh[i]; v->st[i] = st[i]; }
+    v->len = n;
     v->base = own;
+    v->off = off;
+    v->sv = !cont;
+    if (cont) v->d = own->d + off;
+    else {
+        v->d = (double*)malloc(sizeof(double) * n);
+        if (!v->d) exit(1);
+        v->ver = own->ver - 1;      /* cache chưa có -> lần đọc đầu sẽ gom */
+    }
     own->refc++;
     return v;
+}
+/* hàng a, a+s, ... (cnt hàng) của t -> view */
+static TTensor *ten_rows(const TTensor *t, int64_t a, int64_t s, size_t cnt) {
+    ptrdiff_t st[TMAXDIM];
+    size_t sh[TMAXDIM], off = ten_phys(t, st);
+    for (int q = 0; q < t->ndim; q++) sh[q] = t->shape[q];
+    sh[0] = cnt;
+    if (cnt) off = (size_t)((ptrdiff_t)off + (ptrdiff_t)a * st[0]);
+    st[0] *= (ptrdiff_t)s;
+    return ten_mkview(t, off, t->ndim, sh, st);
 }
 static TTensor *ten_alloc1(size_t n) { return ten_alloc(1, &n); }
 static TVal ten_val(TTensor *t) { TVal v; v.t = T_TENSOR; v.u.ten = t; return v; }
 static TTensor *ten_copy(const TTensor *a) {
     TTensor *t = ten_alloc(a->ndim, a->shape);
+    ten_sync(a);
     if (a->len) memcpy(t->d, a->d, sizeof(double) * a->len);
     return t;
 }
@@ -74,11 +159,13 @@ static void ten_fmt_rec(Buf *b, const TTensor *t, size_t off, int dim) {
 static void ten_fmt(Buf *b, const TTensor *t) {
     for (int i = 0; i + 1 < t->ndim; i++)
         if (t->shape[i] == 0) { buf_put(b, "[]", 2); return; }
+    ten_sync(t);
     ten_fmt_rec(b, t, 0, 0);
 }
 static int ten_eq(const TTensor *a, const TTensor *b) {
     if (a->ndim != b->ndim) return 0;
     for (int i = 0; i < a->ndim; i++) if (a->shape[i] != b->shape[i]) return 0;
+    ten_sync(a); ten_sync(b);
     for (size_t i = 0; i < a->len; i++) if (a->d[i] != b->d[i]) return 0;
     return 1;
 }
@@ -204,6 +291,8 @@ static double ten_apply(int op, double x, double y) {
 }
 /* phép từng phần tử: tensor/số với tensor/số (ít nhất 1 tensor) */
 static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
+    if (a->t == T_TENSOR) ten_sync(a->u.ten);
+    if (b->t == T_TENSOR) ten_sync(b->u.ten);
     if (a->t != T_TENSOR || b->t != T_TENSOR) {
         int ok = 1;
         const TTensor *t = a->t == T_TENSOR ? a->u.ten : b->u.ten;
@@ -241,6 +330,7 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
 
 /* ---------- @ ---------- */
 static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
+    ten_sync(a); ten_sync(b);
     if (a->ndim == 1 && b->ndim == 1) {
         if (a->len != b->len) die(vm, "matmul shape");
         double acc = 0.0;
@@ -279,207 +369,158 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
 /* ---------- chỉ số theo trục 0 ---------- */
 static TVal ten_getitem(TVM *vm, const TTensor *t, int64_t i) {
     size_t n = ten_len0(t);
+    ptrdiff_t st[TMAXDIM];
+    size_t off;
     if (i < 0 || (uint64_t)i >= n) {
         char eb[96];
         snprintf(eb, sizeof(eb), "index %lld out of range (len %zu)", (long long)i, n);
         die(vm, eb);
     }
-    if (t->ndim <= 1) return mk_float(t->d[i]);
-    {
-        /* hàng i: khối liền -> view */
-        size_t step = sh_prod(t->shape + 1, t->ndim - 1);
-        return ten_val(ten_view(t, (size_t)i * step, t->ndim - 1, t->shape + 1));
-    }
+    off = ten_phys(t, st);
+    off = (size_t)((ptrdiff_t)off + (ptrdiff_t)i * st[0]);
+    if (t->ndim <= 1) return mk_float(ten_owner(t)->d[off]);
+    return ten_val(ten_mkview(t, off, t->ndim - 1, t->shape + 1, st + 1));   /* hàng i -> view */
 }
-/* trả 0 nếu lỗi (thông điệp vào eb) */
-static int ten_setitem(TTensor *t, int64_t i, const TVal *v, char *eb, size_t ebn) {
-    size_t n = ten_len0(t);
-    if (i < 0 || (uint64_t)i >= n) { snprintf(eb, ebn, "assign range"); return 0; }
-    if (t->ndim <= 1) {
-        int ok = 1;
-        double x = to_num(v, &ok);
-        if (!ok || v->t == T_BOOL) { snprintf(eb, ebn, "tensor assign"); return 0; }
-        t->d[i] = x;
-        return 1;
-    }
-    {
-        size_t step = sh_prod(t->shape + 1, t->ndim - 1);
-        if (v->t == T_TENSOR) {
-            const TTensor *s = v->u.ten;
-            int ok = s->ndim == t->ndim - 1;
-            for (int q = 0; ok && q < s->ndim; q++) ok = s->shape[q] == t->shape[q + 1];
-            if (!ok) { snprintf(eb, ebn, "tensor assign shape"); return 0; }
-            if (step) memmove(t->d + (size_t)i * step, s->d, sizeof(double) * step);
-            return 1;
-        }
-        {
-            int ok = 1;
-            double x = to_num(v, &ok);
-            if (!ok || v->t == T_BOOL) { snprintf(eb, ebn, "tensor assign"); return 0; }
-            for (size_t q = 0; q < step; q++) t->d[(size_t)i * step + q] = x;
-            return 1;
-        }
-    }
-}
-/* chỉ số nhiều trục t[[i, nil, ...]]: int chọn (bỏ trục), nil giữ cả trục,
-   thiếu trục cuối = giữ. Trả số vị trí (cấp *pos) + shape kết quả; lỗi -> die */
-/* chỉ số của khoảng lo:hi:step trên trục dài n (ngữ nghĩa slice của Python) */
-static size_t slice_ix(int64_t n, const TVal *lo, const TVal *hi, const TVal *sp, int64_t *out) {
-    int64_t s = sp->t == T_INT ? sp->u.i : 1, a, b;
-    size_t c = 0;
-    if (lo->t == T_NIL) a = s > 0 ? 0 : n - 1;
-    else { a = lo->u.i; if (a < 0) a += n; }
-    if (hi->t == T_NIL) b = s > 0 ? n : -1;
-    else { b = hi->u.i; if (b < 0) b += n; }
-    if (s > 0) {
-        if (a < 0) a = 0;
-        if (a > n) a = n;
-        if (b < 0) b = 0;
-        if (b > n) b = n;
-        for (int64_t i = a; i < b; i += s) out[c++] = i;
-    } else {
-        if (a < -1) a = -1;
-        if (a >= n) a = n - 1;
-        if (b < -1) b = -1;
-        if (b >= n) b = n - 1;
-        for (int64_t i = a; i > b; i += s) out[c++] = i;
-    }
-    return c;
-}
-static size_t ten_multi_pos(TVM *vm, const TTensor *t, const TList *key, int *rnd, size_t *rsh,
-                            size_t **pos) {
-    size_t st[TMAXDIM], acc = 1, base = 0, cnt[TMAXDIM];
-    int kept[TMAXDIM], nk = 0;
-    int64_t *ix[TMAXDIM];
-    char eb[96];
-    if ((int)key->len > t->ndim) die(vm, "too many indices");
-    for (int i = t->ndim - 1; i >= 0; i--) { st[i] = acc; acc *= t->shape[i]; }
-    for (int ax = 0; ax < t->ndim; ax++) {
-        const TVal *k = (size_t)ax < key->len ? &key->items[ax] : NULL;
-        int64_t n = (int64_t)t->shape[ax];
-        if (!k || k->t == T_NIL || k->t == T_LIST) {
-            int64_t *lst = (int64_t*)malloc(sizeof(int64_t) * (size_t)(n ? n : 1));
-            size_t c;
-            if (!k || k->t == T_NIL) {
-                for (int64_t i = 0; i < n; i++) lst[i] = i;
-                c = (size_t)n;
-            } else {
-                const TList *sl = k->u.list;
-                if (sl->len != 3) { free(lst); for (int q = 0; q < nk; q++) free(ix[q]); die(vm, "slice [lo, hi, step]"); }
-                for (int q = 0; q < 3; q++)
-                    if (sl->items[q].t != T_NIL && sl->items[q].t != T_INT) {
-                        free(lst); for (int z = 0; z < nk; z++) free(ix[z]); die(vm, "slice int");
-                    }
-                if (sl->items[2].t == T_INT && sl->items[2].u.i == 0) {
-                    free(lst); for (int z = 0; z < nk; z++) free(ix[z]); die(vm, "slice step 0");
-                }
-                c = slice_ix(n, &sl->items[0], &sl->items[1], &sl->items[2], lst);
-            }
-            ix[nk] = lst;
-            rsh[nk] = c;
-            kept[nk++] = ax;
-            continue;
-        }
-        if (k->t != T_INT) { for (int q = 0; q < nk; q++) free(ix[q]); die(vm, "index int"); }
-        if (k->u.i < 0 || (uint64_t)k->u.i >= t->shape[ax]) {
-            for (int q = 0; q < nk; q++) free(ix[q]);
-            snprintf(eb, sizeof(eb), "index %lld out of range (len %zu)", (long long)k->u.i, t->shape[ax]);
-            die(vm, eb);
-        }
-        base += (size_t)k->u.i * st[ax];
-    }
-    size_t n = 1;
-    for (int q = 0; q < nk; q++) { n *= rsh[q]; cnt[q] = 0; }
-    *rnd = nk;
-    size_t *p = (size_t*)malloc(sizeof(size_t) * (n ? n : 1));
-    for (size_t w = 0; w < n; w++) {
-        size_t off = base;
-        for (int q = 0; q < nk; q++) off += (size_t)ix[q][cnt[q]] * st[kept[q]];
-        p[w] = off;
-        for (int q = nk - 1; q >= 0; q--) {
-            if (++cnt[q] < rsh[q]) break;
-            cnt[q] = 0;
-        }
-    }
-    for (int q = 0; q < nk; q++) free(ix[q]);
-    *pos = p;
-    return n;
-}
-static TVal ten_get_multi(TVM *vm, const TTensor *t, const TList *key) {
-    size_t sh[TMAXDIM], *pos;
-    int nd;
-    size_t n = ten_multi_pos(vm, t, key, &nd, sh, &pos);
-    if (nd == 0) { double x = t->d[pos[0]]; free(pos); return mk_float(x); }
-    {
-        /* vùng chọn là một khối liền (row-major) -> view; ngược lại bản sao */
-        int cont = n > 0;
-        for (size_t i = 1; cont && i < n; i++) cont = pos[i] == pos[0] + i;
-        if (cont) {
-            TTensor *v = ten_view(t, pos[0], nd, sh);
-            free(pos);
-            return ten_val(v);
-        }
-    }
-    TTensor *r = ten_alloc(nd, sh);
-    for (size_t i = 0; i < n; i++) r->d[i] = t->d[pos[i]];
-    free(pos);
-    return ten_val(r);
-}
-/* trả 0 + eb nếu lỗi kiểu/shape giá trị */
-static int ten_set_multi(TVM *vm, TTensor *t, const TList *key, const TVal *v, char *eb, size_t ebn) {
-    size_t sh[TMAXDIM], *pos;
-    int nd;
-    size_t n = ten_multi_pos(vm, t, key, &nd, sh, &pos);
+/* gán v vào vùng (nd, sh, off, st) của t; nd == 0 = một phần tử (tensor v phải
+   shape [1]). Trả 0 + eb nếu lỗi kiểu/shape. */
+static int ten_assign(TTensor *t, int nd, const size_t *sh, size_t off, const ptrdiff_t *st,
+                      const TVal *v, int scalar_shape1, char *eb, size_t ebn) {
+    double *D = ten_owner(t)->d;
+    size_t n = sh_prod(sh, nd);
+    size_t *pos = (size_t*)malloc(sizeof(size_t) * (n ? n : 1));
+    if (!pos) exit(1);
     if (v->t == T_TENSOR) {
         const TTensor *s = v->u.ten;
-        int ok = nd == 0 ? (s->ndim == 1 && s->shape[0] == 1) : s->ndim == nd;
-        for (int q = 0; ok && nd && q < nd; q++) ok = s->shape[q] == sh[q];
+        int ok = nd == 0 ? (scalar_shape1 && s->ndim == 1 && s->shape[0] == 1) : s->ndim == nd;
+        for (int q = 0; ok && q < nd; q++) ok = s->shape[q] == sh[q];
         if (!ok) { free(pos); snprintf(eb, ebn, "tensor assign shape"); return 0; }
-        for (size_t i = 0; i < n; i++) t->d[pos[i]] = s->d[i];
+        ten_sync(s);
+        ten_walk(nd, sh, off, st, pos);
+        if (!s->sv && ten_owner(s) == ten_owner(t)) {     /* nguồn chồng lên đích: chép trước */
+            double *tmp = (double*)malloc(sizeof(double) * (n ? n : 1));
+            if (!tmp) exit(1);
+            memcpy(tmp, s->d, sizeof(double) * n);
+            for (size_t i = 0; i < n; i++) D[pos[i]] = tmp[i];
+            free(tmp);
+        } else {
+            for (size_t i = 0; i < n; i++) D[pos[i]] = s->d[i];
+        }
     } else {
         int ok = 1;
         double x = to_num(v, &ok);
         if (!ok || v->t == T_BOOL) { free(pos); snprintf(eb, ebn, "tensor assign"); return 0; }
-        for (size_t i = 0; i < n; i++) t->d[pos[i]] = x;
+        ten_walk(nd, sh, off, st, pos);
+        for (size_t i = 0; i < n; i++) D[pos[i]] = x;
     }
     free(pos);
+    ten_wrote(t);
     return 1;
 }
-
-/* lát cắt theo trục 0 với danh sách chỉ số */
-static TTensor *ten_take0(const TTensor *t, const int64_t *ix, size_t cnt) {
-    size_t step = t->ndim <= 1 ? 1 : sh_prod(t->shape + 1, t->ndim - 1);
-    size_t sh[TMAXDIM];
-    int nd = t->ndim ? t->ndim : 1;
-    sh[0] = cnt;
-    for (int q = 1; q < nd; q++) sh[q] = t->shape[q];
-    TTensor *r = ten_alloc(nd, sh);
-    for (size_t k = 0; k < cnt; k++)
-        if (step) memcpy(r->d + k * step, t->d + (size_t)ix[k] * step, sizeof(double) * step);
-    return r;
+/* trả 0 nếu lỗi (thông điệp vào eb) */
+static int ten_setitem(TTensor *t, int64_t i, const TVal *v, char *eb, size_t ebn) {
+    size_t n = ten_len0(t);
+    ptrdiff_t st[TMAXDIM];
+    size_t off;
+    if (i < 0 || (uint64_t)i >= n) { snprintf(eb, ebn, "assign range"); return 0; }
+    off = ten_phys(t, st);
+    off = (size_t)((ptrdiff_t)off + (ptrdiff_t)i * st[0]);
+    if (t->ndim <= 1) {
+        int ok = 1;
+        double x = to_num(v, &ok);
+        if (!ok || v->t == T_BOOL) { snprintf(eb, ebn, "tensor assign"); return 0; }
+        ten_owner(t)->d[off] = x;
+        ten_wrote(t);
+        return 1;
+    }
+    return ten_assign(t, t->ndim - 1, t->shape + 1, off, st + 1, v, 0, eb, ebn);
+}
+/* vùng chọn của key: int chọn (bỏ trục), nil/[lo, hi, step] giữ trục -> shape rsh
+   (rnd trục), phần tử đầu ở *off, bước rst (bộ nhớ của chủ); lỗi -> die */
+static void ten_select(TVM *vm, const TTensor *t, const TList *key, int *rnd, size_t *rsh,
+                       size_t *off, ptrdiff_t *rst) {
+    ptrdiff_t st[TMAXDIM];
+    ptrdiff_t p;
+    int nk = 0, empty = 0;
+    char eb[96];
+    if ((int)key->len > t->ndim) die(vm, "too many indices");
+    p = (ptrdiff_t)ten_phys(t, st);
+    for (int ax = 0; ax < t->ndim; ax++) {
+        const TVal *k = (size_t)ax < key->len ? &key->items[ax] : NULL;
+        int64_t n = (int64_t)t->shape[ax];
+        if (!k || k->t == T_NIL) {
+            rsh[nk] = (size_t)n;
+            rst[nk++] = st[ax];
+            continue;
+        }
+        if (k->t == T_LIST) {
+            const TList *sl = k->u.list;
+            int64_t a, s, c = 0, b;
+            if (sl->len != 3) die(vm, "slice [lo, hi, step]");
+            for (int q = 0; q < 3; q++)
+                if (sl->items[q].t != T_NIL && sl->items[q].t != T_INT) die(vm, "slice int");
+            if (sl->items[2].t == T_INT && sl->items[2].u.i == 0) die(vm, "slice step 0");
+            /* ngữ nghĩa slice của Python: phần tử đầu a, bước s, c phần tử */
+            s = sl->items[2].t == T_INT ? sl->items[2].u.i : 1;
+            if (sl->items[0].t == T_NIL) a = s > 0 ? 0 : n - 1;
+            else { a = sl->items[0].u.i; if (a < 0) a += n; }
+            if (sl->items[1].t == T_NIL) b = s > 0 ? n : -1;
+            else { b = sl->items[1].u.i; if (b < 0) b += n; }
+            if (s > 0) {
+                if (a < 0) a = 0;
+                if (a > n) a = n;
+                if (b < 0) b = 0;
+                if (b > n) b = n;
+                if (b > a) c = (b - a + s - 1) / s;
+            } else {
+                if (a < -1) a = -1;
+                if (a >= n) a = n - 1;
+                if (b < -1) b = -1;
+                if (b >= n) b = n - 1;
+                if (a > b) c = (a - b + (-s) - 1) / (-s);
+            }
+            if (c) p += (ptrdiff_t)a * st[ax];
+            else empty = 1;
+            rsh[nk] = (size_t)c;
+            rst[nk++] = st[ax] * (ptrdiff_t)s;
+            continue;
+        }
+        if (k->t != T_INT) die(vm, "index int");
+        if (k->u.i < 0 || (uint64_t)k->u.i >= t->shape[ax]) {
+            snprintf(eb, sizeof(eb), "index %lld out of range (len %zu)", (long long)k->u.i, t->shape[ax]);
+            die(vm, eb);
+        }
+        p += (ptrdiff_t)k->u.i * st[ax];
+    }
+    (void)empty;
+    *rnd = nk;
+    *off = (size_t)p;
+}
+static TVal ten_get_multi(TVM *vm, const TTensor *t, const TList *key) {
+    size_t sh[TMAXDIM], off;
+    ptrdiff_t st[TMAXDIM];
+    int nd;
+    ten_select(vm, t, key, &nd, sh, &off, st);
+    if (nd == 0) return mk_float(ten_owner(t)->d[off]);
+    return ten_val(ten_mkview(t, off, nd, sh, st));      /* luôn là view (liền / theo bước) */
+}
+/* trả 0 + eb nếu lỗi kiểu/shape giá trị */
+static int ten_set_multi(TVM *vm, TTensor *t, const TList *key, const TVal *v, char *eb, size_t ebn) {
+    size_t sh[TMAXDIM], off;
+    ptrdiff_t st[TMAXDIM];
+    int nd;
+    ten_select(vm, t, key, &nd, sh, &off, st);
+    return ten_assign(t, nd, sh, off, st, v, 1, eb, ebn);
 }
 
-/* ---------- reshape / transpose / tolist ---------- */
+
+/* ---------- transpose (view: đảo shape + bước) / tolist ---------- */
 static TTensor *ten_transpose(const TTensor *t) {
-    if (t->ndim <= 1) return ten_copy(t);
-    size_t sh[TMAXDIM], st0[TMAXDIM], st[TMAXDIM], cnt[TMAXDIM];
+    size_t sh[TMAXDIM];
+    ptrdiff_t st0[TMAXDIM], st[TMAXDIM];
+    size_t off = ten_phys(t, st0);
     int nd = t->ndim;
-    size_t acc = 1;
-    for (int i = nd - 1; i >= 0; i--) { st0[i] = acc; acc *= t->shape[i]; }
-    for (int i = 0; i < nd; i++) { sh[i] = t->shape[nd - 1 - i]; st[i] = st0[nd - 1 - i]; cnt[i] = 0; }
-    TTensor *r = ten_alloc(nd, sh);
-    size_t off = 0;
-    for (size_t k = 0; k < r->len; k++) {
-        r->d[k] = t->d[off];
-        for (int j = nd - 1; j >= 0; j--) {
-            cnt[j]++;
-            off += st[j];
-            if (cnt[j] < sh[j]) break;
-            off -= st[j] * cnt[j];
-            cnt[j] = 0;
-        }
-    }
-    return r;
+    for (int i = 0; i < nd; i++) { sh[i] = t->shape[nd - 1 - i]; st[i] = st0[nd - 1 - i]; }
+    return ten_mkview(t, off, nd, sh, st);
 }
 static TVal ten_tolist_rec(const TTensor *t, size_t off, int dim) {
     size_t n = t->shape[dim];
@@ -532,6 +573,7 @@ static const char *red_name(int kind) {
 }
 static void ten_reduce(TVM *vm, int kind, TVal *a, int argc, TVal *r) {
     const TTensor *t = a[0].u.ten;
+    ten_sync(t);
     int err;
     char eb[64];
     if (argc == 1) {
@@ -586,6 +628,7 @@ static double un_apply(int k, double x) {
 }
 static TTensor *ten_unary(const TTensor *t, int k) {
     TTensor *r = ten_alloc(t->ndim, t->shape);
+    ten_sync(t);
     for (size_t i = 0; i < t->len; i++) r->d[i] = un_apply(k, t->d[i]);
     return r;
 }
@@ -653,7 +696,15 @@ static void m_ten_reshape(TVM *vm, TVal *a, int argc, TVal *r) {
         rest *= sh[neg];
     }
     if (rest != t->len) die(vm, "reshape shape");
+    if (!t->sv) {               /* liền -> view (dùng chung bộ nhớ) */
+        ptrdiff_t st[TMAXDIM], rm[TMAXDIM];
+        size_t off = ten_phys(t, st);
+        ten_rowmajor(sh, n, rm);
+        *r = ten_val(ten_mkview(t, off, n, sh, rm));
+        return;
+    }
     TTensor *o = ten_alloc(n, sh);
+    ten_sync(t);
     if (t->len) memcpy(o->d, t->d, sizeof(double) * t->len);
     *r = ten_val(o);
 }
@@ -661,10 +712,15 @@ static void m_ten_transpose(TVM *vm, TVal *a, int argc, TVal *r) { NARG(1); *r =
 static void m_ten_flatten(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(1);
     TTensor *o = ten_alloc1(a[0].u.ten->len);
+    ten_sync(a[0].u.ten);
     if (o->len) memcpy(o->d, a[0].u.ten->d, sizeof(double) * o->len);
     *r = ten_val(o);
 }
-static void m_ten_tolist(TVM *vm, TVal *a, int argc, TVal *r) { NARG(1); *r = ten_tolist_rec(a[0].u.ten, 0, 0); }
+static void m_ten_tolist(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(1);
+    ten_sync(a[0].u.ten);
+    *r = ten_tolist_rec(a[0].u.ten, 0, 0);
+}
 static void m_ten_copy(TVM *vm, TVal *a, int argc, TVal *r) { NARG(1); *r = ten_val(ten_copy(a[0].u.ten)); }
 static void m_ten_dot(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(2);
@@ -678,6 +734,7 @@ static void m_ten_clip(TVM *vm, TVal *a, int argc, TVal *r) {
     if (!ok1 || !ok2 || a[1].t == T_BOOL || a[2].t == T_BOOL) die(vm, "tensor() numbers");
     const TTensor *t = a[0].u.ten;
     TTensor *o = ten_alloc(t->ndim, t->shape);
+    ten_sync(t);
     for (size_t i = 0; i < t->len; i++) {
         double x = t->d[i];
         o->d[i] = x < lo ? lo : (x > hi ? hi : x);
@@ -689,6 +746,7 @@ static void m_ten_softmax(TVM *vm, TVal *a, int argc, TVal *r) {
     const TTensor *t = a[0].u.ten;
     size_t n = t->shape[t->ndim - 1];
     TTensor *o = ten_alloc(t->ndim, t->shape);
+    ten_sync(t);
     if (n == 0) { *r = ten_val(o); return; }
     for (size_t off = 0; off < t->len; off += n) {
         double m = t->d[off];
@@ -709,6 +767,7 @@ static void m_ten_ne(TVM *vm, TVal *a, int argc, TVal *r) { ten_cmp_m(vm, a, arg
 static void m_ten_item(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(1);
     if (a[0].u.ten->len != 1) die(vm, "item() cần tensor 1 phần tử");
+    ten_sync(a[0].u.ten);
     *r = mk_float(a[0].u.ten->d[0]);
 }
 
