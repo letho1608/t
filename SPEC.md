@@ -406,6 +406,15 @@ Tên `$...` không lex được nên không đụng tên người dùng.
 - JIT vòng lặp top-level: vùng [đầu vòng, sau JMP lùi); global trong vùng là "local
   giả" đọc/ghi thẳng `TVal` (guard tag; ô cũ phải vô hướng); nhảy ra ngoài vùng
   hoặc guard hỏng → deopt (đẩy stack ảo, đặt pc).
+- Lát cắt nhiều trục: mỗi trục trong `t[...]` là số (chọn, bỏ trục), `nil`/`:`
+  (cả trục) hoặc `[lo, hi, step]` (parse từ `lo:hi:step`, phần trống = `nil`;
+  ngữ nghĩa slice của Python, kể cả âm và step âm). Kết quả là bản sao.
+- `load(tên)`: builtin mềm (NAT 51). Trả bản ghi kiểu `"module"` với field = global
+  top-level của module (bỏ tên chứa `$` và `X__type`), giá trị chụp lúc top-level
+  chạy xong; nạp một lần theo đường dẫn, nạp vòng là lỗi. `.tb` kèm phần `"EX01"`
+  sau `LN01`: u16 n + (u16 len + tên + u16 slot)*. VM: mỗi hàm nhớ prog của nó,
+  gọi/return/try đổi prog hiện hành; global của module là gốc GC; JIT không gọi
+  thẳng hàm thuộc prog khác.
 
 ### 21.5 VM / JIT
 

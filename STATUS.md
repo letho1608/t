@@ -7,12 +7,15 @@
 
 ## v2.3 — số dòng lỗi runtime, lambda/comprehension, autograd, JIT top-level
 
-- `python tools/run_all.py` → ALL-GREEN (Windows + Linux gcc 13); `test_tcomp_t` 23 suite,
+- `python tools/run_all.py` → ALL-GREEN (Windows + Linux gcc 13); `test_tcomp_t` 25 suite,
   compiler Python == compiler T từng byte (kể cả bảng dòng `LN01`).
 - Lỗi runtime: `T error: <msg>` + `  tại <file>:<dòng>` ở `trun` và `t.py`.
 - Cú pháp: lambda `fn(x): e`, list/dict comprehension (nhiều `for`/`if`), tensor `t[i, j]`/`t[:, j]`.
 - `std/autograd.t`: reverse-mode autodiff trên tensor (kiểm sai phân hữu hạn, MLP XOR).
 - JIT vòng lặp top-level: `bench/loop.t` 0.377s → 0.033s (CPython 0.494s).
+- Tensor lát cắt nhiều trục `t[0:2, 1:3]`, `t[::-1, 0]` (khớp numpy).
+- `load("tên")`: import động lúc chạy (VM nạp `.tb` riêng; `test_tcomp_t` 25 suite,
+  eval.t 13 suite, kèm chạy với GC quét dày). Git: mỗi tính năng một commit.
 
 ## v2.2 — hoàn thiện mục còn thiếu + JIT mở rộng + tensor thật
 

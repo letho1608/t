@@ -74,10 +74,13 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | L6 | `fn(x): e` (lambda), `[e for x in xs if c]`, `{k: v for ...}` (desugar thành hàm ẩn) | ✅ `tests/lambda.t` |
 | G1 | Tensor chỉ số nhiều trục `t[i, j]`, `t[:, j]`, gán vùng; autograd `std/autograd.t` | ✅ `tests/tensor.t`, `tests/agtest.t` |
 | J2 | JIT vòng lặp top-level (global ghi thẳng, lối ra = deopt về pc) | ✅ loop nhanh hơn CPython 14× (`tests/jitmain.t`) |
+| G2 | Lát cắt theo nhiều trục `t[0:2, 1:3]`, `t[::-1, 0]` (ngữ nghĩa slice của Python) | ✅ `tests/tensor.t` |
+| R1 | `load("tên")`: import động lúc chạy, tên tính được; VM nạp `tên.tb` riêng (phần `EX01`) | ✅ `tests/loadmod.t` (4 runtime) |
 
 Lỗi có sẵn sửa thêm: compiler T không tìm module khi đường dẫn dùng `\`; bundler của
 compiler Python không đổi tên hàm lồng trong hàm của module; thông điệp
-"unhashable dict key" khác nhau giữa VM và t.py.
+"unhashable dict key" khác nhau giữa VM và t.py; `vm/build.bat` lưu xuống dòng LF
+khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `.gitattributes`).
 
 ### 1.5 Sửa lỗi có sẵn phát hiện khi làm v2.2
 
@@ -98,8 +101,8 @@ compiler Python không đổi tên hàm lồng trong hàm của module; thông �
 
 | # | Hạng mục | Ghi chú |
 |---|---|---|
-| R1 | `import` động lúc chạy (nạp `.tb` riêng / tên module tính lúc chạy) | hiện gộp lúc build, đủ cho mọi import tĩnh |
-| G2 | Tensor view không sao chép (`t[i]` hiện là bản sao), lát cắt `a:b` theo nhiều trục | `t[i, j]`, `t[:, j]` đã có |
+| R3 | `load()` tự biên dịch `.t` khi chưa có `.tb` | hiện VM cần `tên.tb` dịch sẵn (`trun tcomp.tb tên.t tên.tb`) |
+| G3 | Tensor view không sao chép | **cố ý giữ bản sao** (xem §3): tránh aliasing khó đoán và giữ 4 runtime khớp từng bit |
 
 ## 3. Giới hạn đã biết (không phải bug)
 
@@ -107,6 +110,7 @@ compiler Python không đổi tên hàm lồng trong hàm của module; thông �
 |---|---|
 | Biến `for` khai báo **sau** hàm thì closure không capture | `tests/hoist.t` khoá hành vi |
 | `==`/`!=` trên tensor so toàn bộ (bool) | so từng phần tử: `.eq()` / `.ne()`; `< > <= >=` là từng phần tử |
-| `t[i]` trên tensor n-chiều là bản sao | `t[i][j] = v` không đổi `t`; dùng `t[i] = hàng` |
+| `t[i]` / `t[a:b, j]` trên tensor là bản sao (thiết kế, không phải view) | `t[i][j] = v` không đổi `t`; dùng `t[i, j] = v` hoặc `t[i] = hàng` |
+| Bản ghi của `load()` chụp giá trị global lúc nạp xong | gán lại global trong module sau đó không hiện ra; list/dict/struct dùng chung tham chiếu nên vẫn thấy thay đổi |
 | `mem()` trên `t.py`/`eval.t` trả `objs=0, gc=0` | chỉ `trun` có số liệu GC thật |
 | Thông điệp vài lỗi hiếm (vd unhashable key) khác chữ giữa runtime | output bình thường khớp từng byte |

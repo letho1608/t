@@ -73,11 +73,16 @@ một dòng `return` đã được inline, VM báo dòng ở chỗ gọi).
 Có sẵn: `fn` + closure, `if/elif/else`, `while`, `for`, `break/continue`,
 `try/except "mẫu*"` (+ biến `err`), `raise`, `assert`, f-string, dict, slice
 (`a[::-1]`), số `0x/0b/0o/1e-5/1_000`, `import` / `from ... import`.
+`import` gộp module lúc build; **`load("tên")`** nạp module lúc chạy (tên tính được),
+trả bản ghi kiểu `"module"`: `m = load("plugins/" + ten)` rồi `m.f(x)`, `m.HANG`.
+`t.py`/eval.t nạp `tên.t`; VM nạp `tên.tb` (thư mục hiện tại rồi thư mục của
+chương trình chính) — dịch trước bằng `trun tcomp.tb tên.t tên.tb`. Nạp một lần
+(cache theo đường dẫn); lỗi trong module báo đúng `tại tên.t:dòng`.
 `%` theo ngữ nghĩa floor như Python (`-7 % 3 == 2`) ở mọi runtime.
 
 Builtin: `range len str int float type tensor open read write close ord chr
 argv print mem f64bits abs round min max sum any all sort reversed enumerate
-zip map filter`; builtin "mềm" (có thể đặt tên trùng để che): `set input
+zip map filter`; builtin "mềm" (có thể đặt tên trùng để che): `set input load
 zeros ones full arange eye rand randn seed sqrt exp log sin cos tanh floor ceil pi`.
 Method: str `upper lower split join strip find replace startswith endswith`,
 list `append pop clear insert extend index`, dict `keys values get items has remove`,
@@ -103,7 +108,9 @@ w = randn([4, 2]) * 0.1         # ngẫu nhiên tất định (splitmix64), gi�
   (có/không `axis`), `reshape transpose flatten tolist copy dot clip softmax item
   eq ne exp log sqrt tanh sin cos abs relu sigmoid floor ceil`.
 - `t[i]` trên tensor n-chiều trả về **bản sao** của hàng; `t[i] = hàng|số` để gán.
-  Chỉ số nhiều trục: `t[i, j]`, `t[:, j]` (cả cột), `t[1, :] = tensor([...])`.
+  Chỉ số nhiều trục: `t[i, j]`, `t[:, j]` (cả cột), `t[1, :] = tensor([...])`,
+  khoảng theo từng trục `t[0:2, 1:3]`, `t[::-1, 0]`. Kết quả luôn là bản sao
+  (không có view) — cố ý, để không có aliasing ngầm.
 - VM C và `t.py` (`ttensor.py`) khớp **từng bit** (cộng tuần tự, `@` tích luỹ theo
   k tăng dần); `tools/test_tensor.py` còn đối chiếu 38 phép với numpy.
 - Ví dụ học máy: `tests/tensor.t` (MLP học XOR), `bench/nn.t`.
@@ -170,7 +177,7 @@ semver + ghi `CHANGELOG.md` (lấy từ git log nếu có).
 ## Kiểm thử
 
 `python tools/run_all.py` chạy: `test_ops` (đồng bộ 74 opcode + 51 native giữa
-`vm/tvm.h`, `vm/tcomp.py`, `self/tcomp.t`), `test_tcomp_t` (23 suite: compiler T
+`vm/tvm.h`, `vm/tcomp.py`, `self/tcomp.t`), `test_tcomp_t` (25 suite: compiler T
 == t.py, fixed point, compiler Python == compiler T từng byte, eval.t trên VM,
 GC quét dày, UTF-8), `test_dbg`, `test_lsp`, `test_tpkg`, `test_jit`,
 `test_tensor`, và mọi `tests/*.t` qua `t.py`. CI: `.github/workflows/ci.yml`
