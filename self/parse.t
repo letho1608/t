@@ -15,6 +15,8 @@ fn is_kw(t, w):
 # Bracket-aware + string-aware (khớp t.py): dòng nối trong (... [...] {...})
 # không gây IND/DED; '#' trong string được giữ; tab nở thành 4 spaces.
 fn strip_comment(ln):
+    if ln.find("#") < 0:
+        return ln       # không có '#': vòng dưới cũng trả nguyên dòng
     mut q = ""
     mut i = 0
     mut n = ln.len
@@ -38,6 +40,9 @@ fn strip_comment(ln):
     return ln
 
 fn bracket_delta(code):
+    # không nháy / '#': đếm ngoặc thẳng (split của host), khỏi quét từng ký tự
+    if code.find("\"") < 0 and code.find("'") < 0 and code.find("#") < 0:
+        return code.split("(").len + code.split("[").len + code.split("{").len - code.split(")").len - code.split("]").len - code.split("}").len
     mut q = ""
     mut d = 0
     mut i = 0

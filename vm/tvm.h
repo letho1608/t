@@ -13,7 +13,7 @@
 #ifdef _MSC_VER
 #define TVM_INLINE static __forceinline
 #else
-#define TVM_INLINE static inline
+#define TVM_INLINE static inline __attribute__((always_inline))
 #endif
 
 typedef enum {

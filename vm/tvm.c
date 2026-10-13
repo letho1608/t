@@ -420,15 +420,19 @@ size_t tvm_oplen(const uint8_t *c, size_t n, size_t pc) {
 }
 
 /* ---------- stack ---------- */
-static void push(TVM *vm, TVal v) {
-    if (vm->sp >= vm->cap) {
-        vm->cap *= 2;
-        vm->stack = (TVal*)realloc(vm->stack, vm->cap * sizeof(TVal));
-        if (!vm->stack) exit(1);
-    }
+static void stack_grow(TVM *vm) {
+    vm->cap *= 2;
+    vm->stack = (TVal*)realloc(vm->stack, vm->cap * sizeof(TVal));
+    if (!vm->stack) exit(1);
+}
+TVM_INLINE void push(TVM *vm, TVal v) {
+    if (vm->sp >= vm->cap) stack_grow(vm);
     vm->stack[vm->sp++] = v;
 }
-static TVal pop(TVM *vm) { return vm->stack[--vm->sp]; }
+TVM_INLINE TVal pop(TVM *vm) { return vm->stack[--vm->sp]; }
+/* nil/bool/int/float không đếm tham chiếu: bỏ qua lời gọi ở đường nóng */
+#define TV_FREE(p) do { if ((p)->t > T_FLOAT) tval_free(p); } while (0)
+#define TV_RETAIN(p) do { if ((p)->t > T_FLOAT) tval_retain(p); } while (0)
 void tvm_push(TVM *vm, TVal v) { push(vm, v); }
 
 /* ---------- readers ---------- */
@@ -2276,7 +2280,10 @@ static void cmpop(TVM *vm, int op) {
     }
     if (op == OP_EQ) res = tval_eq(&a, &b);
     else if (op == OP_NE) res = !tval_eq(&a, &b);
-    else {
+    else if (a.t == T_INT && b.t == T_INT) {
+        int64_t x = a.u.i, y = b.u.i;
+        res = op == OP_LT ? x < y : op == OP_GT ? x > y : op == OP_LE ? x <= y : x >= y;
+    } else {
         int oka = 1, okb = 1;
         double x = to_num(&a, &oka), y = to_num(&b, &okb);
         if (oka && okb) {
@@ -2296,7 +2303,7 @@ static void cmpop(TVM *vm, int op) {
             tval_free(&a); tval_free(&b); die(vm, "compare here");
         }
     }
-    tval_free(&a); tval_free(&b);
+    TV_FREE(&a); TV_FREE(&b);
     push(vm, mk_bool(res));
 }
 
@@ -2317,7 +2324,7 @@ static TFrame *push_frame(TVM *vm) {    if (vm->nframes >= vm->fcap) {
 }
 static void free_frame(TVM *vm) {
     TFrame *f = &vm->frames[--vm->nframes];
-    for (uint16_t i = 0; i < f->nlocals; i++) tval_free(&f->locals[i]);
+    for (uint16_t i = 0; i < f->nlocals; i++) TV_FREE(&f->locals[i]);
     /* giữ mảng locals (lcap) để call sau tái dùng; free thật ở tvm_free */
     f->nlocals = 0;
     if (f->fn) {
@@ -2722,7 +2729,7 @@ TVM_INLINE TVal slot_get(TVM *vm, int isg, uint16_t s) {
         v = (sp->t == T_CELL) ? sp->u.cell->val : *sp;
     }
     if (v.t == T_UNDEF) die(vm, "undef variable");
-    tval_retain(&v);
+    TV_RETAIN(&v);
     return v;
 }
 TVM_INLINE void slot_set(TVM *vm, int isg, uint16_t s, TVal v) {
@@ -2778,7 +2785,7 @@ static void do_return(TVM *vm, TVal rv) {
            vm->handlers[vm->nhandlers - 1].nframes >= vm->nframes)
         vm->nhandlers--;
     free_frame(vm);
-    while (vm->sp > bp) tval_free(&vm->stack[--vm->sp]);
+    while (vm->sp > bp) { --vm->sp; TV_FREE(&vm->stack[vm->sp]); }
     vm->sp = bp;
     vm->pc = rpc;
     if (rprog) vm->prog = rprog;
@@ -3209,6 +3216,11 @@ int tvm_run(TVM *vm) {
                 double x = a->u.f, y = b->u.f;
                 r = op == OP_LT ? x < y : op == OP_GT ? x > y : op == OP_LE ? x <= y :
                     op == OP_GE ? x >= y : op == OP_EQ ? x == y : x != y;
+            } else if (a->t == T_STR && b->t == T_STR && (op == OP_EQ || op == OP_NE)) {
+                int eq = a->u.str.refc == b->u.str.refc ||
+                         (a->u.str.n == b->u.str.n && memcmp(a->u.str.s, b->u.str.s, a->u.str.n) == 0);
+                r = op == OP_EQ ? eq : !eq;
+                tval_free(a); tval_free(b);
             } else { cmpop(vm, op); break; }
             a->t = T_BOOL; a->u.b = r; vm->sp--;
             break;
