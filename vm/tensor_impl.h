@@ -7,6 +7,13 @@
  */
 
 #define TMAXDIM 8
+/* output luôn là buffer mới (không chồng input): restrict cho phép gcc -O2 vector hoá
+   mà không cần kiểm alias lúc chạy */
+#ifdef _MSC_VER
+#define TRESTRICT __restrict
+#else
+#define TRESTRICT restrict
+#endif
 
 static size_t sh_prod(const size_t *sh, int nd) {
     size_t n = 1;
@@ -257,7 +264,7 @@ static void ten_bshape(TVM *vm, const TTensor *a, const TTensor *b, int *ndo, si
 }
 #define TOP_EQ 1001   /* .eq() / .ne() từng phần tử (== của ngôn ngữ so cả tensor) */
 #define TOP_NE 1002
-static double ten_apply(int op, double x, double y) {
+TVM_INLINE double ten_apply(int op, double x, double y) {
     switch (op) {
     case OP_ADD: return x + y;
     case OP_SUB: return x - y;
@@ -281,7 +288,8 @@ static double ten_apply(int op, double x, double y) {
     else if (sx == 0 && sy == 1) { double x0 = X[0]; for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, x0, Y[i]); } \
     else for (size_t i = 0; i < n; i++) R[i] = ten_apply(OPC, X[i * sx], Y[i * sy]); \
 } while (0)
-static void ten_kern(int op, double *R, const double *X, size_t sx, const double *Y, size_t sy, size_t n) {
+static void ten_kern(int op, double *TRESTRICT R, const double *TRESTRICT X, size_t sx,
+                     const double *TRESTRICT Y, size_t sy, size_t n) {
     switch (op) {
     case OP_ADD: TK_LOOP(OP_ADD); break;
     case OP_SUB: TK_LOOP(OP_SUB); break;
@@ -349,7 +357,9 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
 
 /* ---------- @ ---------- */
 static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
-    ten_sync(a); ten_sync(b);
+    /* A đọc theo bước (không cần gom view theo bước); B cần hàng liền -> sync */
+    ten_sync(b);
+    if (a->ndim == 1) ten_sync(a);
     if (a->ndim == 1 && b->ndim == 1) {
         if (a->len != b->len) die(vm, "matmul shape");
         double acc = 0.0;
@@ -367,17 +377,32 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
         else if (b->ndim == 1) { sh[0] = m; nd = 1; }
         else { sh[0] = m; sh[1] = n; nd = 2; }
         TTensor *r = ten_alloc(nd, sh);
-        double *C = r->d;
-        const double *A = a->d, *B = b->d;
+        double *TRESTRICT C = r->d;
+        const double *TRESTRICT B = b->d;
+        const double *A;
+        ptrdiff_t sa0, sa1;
+        if (a->ndim == 1) { A = a->d; sa0 = 0; sa1 = 1; }
+        else if (a->sv) { A = a->base->d + a->off; sa0 = a->st[0]; sa1 = a->st[1]; }
+        else { A = a->d; sa0 = (ptrdiff_t)k; sa1 = 1; }
+        /* mỗi C[i,j] = 0.0 + Σ_q A[i,q]*B[q,j] cộng theo q tăng dần (trùng bit với
+           bản tham chiếu). n == 1: tích vô hướng từng hàng; còn lại thứ tự i-k-j,
+           vòng j trong cùng chạy liên tục bộ nhớ (vector hoá được) */
+        if (n == 1) {
+            for (size_t i = 0; i < m; i++) {
+                const double *Ai = A + (ptrdiff_t)i * sa0;
+                double acc = 0.0;
+                for (size_t q = 0; q < k; q++) acc += Ai[(ptrdiff_t)q * sa1] * B[q];
+                C[i] = acc;
+            }
+            return ten_val(r);
+        }
         for (size_t i = 0; i < m * n; i++) C[i] = 0.0;
-        /* thứ tự i-k-j: mỗi C[i,j] cộng dồn theo k tăng dần (trùng bit với bản
-           tham chiếu), vòng j trong cùng chạy liên tục bộ nhớ (vector hoá được) */
         for (size_t i = 0; i < m; i++) {
-            double *Ci = C + i * n;
-            const double *Ai = A + i * k;
+            double *TRESTRICT Ci = C + i * n;
+            const double *Ai = A + (ptrdiff_t)i * sa0;
             for (size_t q = 0; q < k; q++) {
-                double aiq = Ai[q];
-                const double *Bq = B + q * n;
+                double aiq = Ai[(ptrdiff_t)q * sa1];
+                const double *TRESTRICT Bq = B + q * n;
                 for (size_t j = 0; j < n; j++) Ci[j] += aiq * Bq[j];
             }
         }
@@ -630,7 +655,7 @@ static void ten_reduce(TVM *vm, int kind, TVal *a, int argc, TVal *r) {
 
 /* ---------- hàm từng phần tử ---------- */
 enum { U_EXP, U_LOG, U_SQRT, U_TANH, U_SIN, U_COS, U_ABS, U_RELU, U_SIGMOID, U_FLOOR, U_CEIL };
-static double un_apply(int k, double x) {
+TVM_INLINE double un_apply(int k, double x) {
     switch (k) {
     case U_EXP: return exp(x);
     case U_LOG: return x > 0 ? log(x) : (x == 0 ? -HUGE_VAL : NAN);
@@ -647,8 +672,8 @@ static double un_apply(int k, double x) {
 }
 static TTensor *ten_unary(const TTensor *t, int k) {
     TTensor *r = ten_alloc(t->ndim, t->shape);
-    double *R = r->d;
-    const double *X = t->d;
+    double *TRESTRICT R = r->d;
+    const double *TRESTRICT X = t->d;
     size_t n = t->len;
     ten_sync(t);
     /* switch ngoài vòng lặp (un_apply với k hằng được gập lại) */

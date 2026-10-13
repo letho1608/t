@@ -6,7 +6,11 @@
 set -e
 cd "$(dirname "$0")/.."
 CC="${CC:-cc}"
-CFLAGS="${CFLAGS:--O2 -std=c99 -Wall}"
+# gcc 12+ ở -O2 chỉ vector hoá vòng lặp biết trước số lần lặp ("very-cheap"): kernel
+# tensor cần cost model động (phép cộng dồn vẫn tuần tự -> kết quả trùng bit)
+VEC=""
+if $CC --version 2>/dev/null | grep -q "Free Software Foundation"; then VEC=" -fvect-cost-model=dynamic"; fi
+CFLAGS="${CFLAGS:--O2$VEC -std=c99 -Wall}"
 echo "[build] $CC $CFLAGS"
 $CC $CFLAGS -o trun vm/tvm.c vm/jit_x64.c vm/tdbg.c vm/trun.c -lm
 echo "[build] OK: ./trun"
