@@ -141,3 +141,29 @@ for i in range(4):
         ok += 1
 print("XOR dung", ok, "/ 4")
 print("TENSOR OK")
+
+# view: hàng / khối liền dùng chung bộ nhớ với tensor gốc; cột / bước != 1 là bản sao
+fn view_demo():
+    t = arange(12).reshape(3, 4)
+    r = t[1]
+    r[0] = 99
+    print(t)
+    t[1, 2] = -1
+    print(r)
+    u = t[1, :]
+    u[3] = 7
+    print(t[1], t[1, 1:3])
+    c = t[:, 0]
+    c[0] = 1000
+    print(t[0], c)
+    b = t[0:2]
+    b[0, 0] = 50
+    print(t[0], t[::2][0])
+    t3 = zeros([2, 2, 3])
+    p = t3[1][0]
+    p[2] = 5
+    print(t3)
+    print(r * 2, r.sum(), r.shape, r.copy())
+    return t[2]
+keep = view_demo()
+print(keep, keep.sum())

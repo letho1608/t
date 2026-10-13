@@ -23,7 +23,23 @@ static TTensor *ten_alloc(int nd, const size_t *sh) {
     t->len = sh_prod(sh, nd);
     t->d = (double*)malloc(sizeof(double) * (t->len ? t->len : 1));
     if (!t->d) exit(1);
+    t->base = NULL;
     return t;
+}
+/* view: khối liền [off, off + prod(sh)) của t, dùng chung bộ nhớ (ghi qua view
+   đổi t). Luôn trỏ thẳng về tensor sở hữu bộ nhớ (view của view không xích). */
+static TTensor *ten_view(const TTensor *t, size_t off, int nd, const size_t *sh) {
+    TTensor *own = t->base ? t->base : (TTensor*)t;
+    TTensor *v = (TTensor*)malloc(sizeof(TTensor));
+    if (!v) exit(1);
+    v->refc = 1;
+    v->ndim = nd;
+    for (int i = 0; i < nd; i++) v->shape[i] = sh[i];
+    v->len = sh_prod(sh, nd);
+    v->d = t->d + off;
+    v->base = own;
+    own->refc++;
+    return v;
 }
 static TTensor *ten_alloc1(size_t n) { return ten_alloc(1, &n); }
 static TVal ten_val(TTensor *t) { TVal v; v.t = T_TENSOR; v.u.ten = t; return v; }
@@ -270,10 +286,9 @@ static TVal ten_getitem(TVM *vm, const TTensor *t, int64_t i) {
     }
     if (t->ndim <= 1) return mk_float(t->d[i]);
     {
+        /* hàng i: khối liền -> view */
         size_t step = sh_prod(t->shape + 1, t->ndim - 1);
-        TTensor *r = ten_alloc(t->ndim - 1, t->shape + 1);
-        if (step) memcpy(r->d, t->d + (size_t)i * step, sizeof(double) * step);
-        return ten_val(r);
+        return ten_val(ten_view(t, (size_t)i * step, t->ndim - 1, t->shape + 1));
     }
 }
 /* trả 0 nếu lỗi (thông điệp vào eb) */
@@ -395,6 +410,16 @@ static TVal ten_get_multi(TVM *vm, const TTensor *t, const TList *key) {
     int nd;
     size_t n = ten_multi_pos(vm, t, key, &nd, sh, &pos);
     if (nd == 0) { double x = t->d[pos[0]]; free(pos); return mk_float(x); }
+    {
+        /* vùng chọn là một khối liền (row-major) -> view; ngược lại bản sao */
+        int cont = n > 0;
+        for (size_t i = 1; cont && i < n; i++) cont = pos[i] == pos[0] + i;
+        if (cont) {
+            TTensor *v = ten_view(t, pos[0], nd, sh);
+            free(pos);
+            return ten_val(v);
+        }
+    }
     TTensor *r = ten_alloc(nd, sh);
     for (size_t i = 0; i < n; i++) r->d[i] = t->d[pos[i]];
     free(pos);

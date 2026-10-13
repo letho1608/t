@@ -76,6 +76,8 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | J2 | JIT vòng lặp top-level (global ghi thẳng, lối ra = deopt về pc) | ✅ loop nhanh hơn CPython 14× (`tests/jitmain.t`) |
 | G2 | Lát cắt theo nhiều trục `t[0:2, 1:3]`, `t[::-1, 0]` (ngữ nghĩa slice của Python) | ✅ `tests/tensor.t` |
 | R1 | `load("tên")`: import động lúc chạy, tên tính được; VM nạp `tên.tb` riêng (phần `EX01`) | ✅ `tests/loadmod.t` (4 runtime) |
+| R3 | `load()`: field sống (đọc global hiện tại, `m.X = v` ghi vào module); VM tự dịch `tên.t` khi `.tb` thiếu/cũ | ✅ `tests/loadmod.t` |
+| G3 | Tensor view: `t[i]`, `t[a:b]`, `t[i, j]`… khi vùng chọn là khối liền thì dùng chung bộ nhớ | ✅ `tests/tensor.t` |
 
 Lỗi có sẵn sửa thêm: compiler T không tìm module khi đường dẫn dùng `\`; bundler của
 compiler Python không đổi tên hàm lồng trong hàm của module; thông điệp
@@ -101,8 +103,7 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 
 | # | Hạng mục | Ghi chú |
 |---|---|---|
-| R3 | `load()` tự biên dịch `.t` khi chưa có `.tb` | hiện VM cần `tên.tb` dịch sẵn (`trun tcomp.tb tên.t tên.tb`) |
-| G3 | Tensor view không sao chép | **cố ý giữ bản sao** (xem §3): tránh aliasing khó đoán và giữ 4 runtime khớp từng bit |
+| G4 | View theo bước (cột `t[:, j]`, `t[::2]`) | hiện là bản sao; view chỉ cho khối liền |
 
 ## 3. Giới hạn đã biết (không phải bug)
 
@@ -110,7 +111,7 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 |---|---|
 | Biến `for` khai báo **sau** hàm thì closure không capture | `tests/hoist.t` khoá hành vi |
 | `==`/`!=` trên tensor so toàn bộ (bool) | so từng phần tử: `.eq()` / `.ne()`; `< > <= >=` là từng phần tử |
-| `t[i]` / `t[a:b, j]` trên tensor là bản sao (thiết kế, không phải view) | `t[i][j] = v` không đổi `t`; dùng `t[i, j] = v` hoặc `t[i] = hàng` |
-| Bản ghi của `load()` chụp giá trị global lúc nạp xong | gán lại global trong module sau đó không hiện ra; list/dict/struct dùng chung tham chiếu nên vẫn thấy thay đổi |
+| Tensor: view chỉ khi vùng chọn là **khối liền** (row-major) | `t[i]`, `t[a:b]`, `t[i, j:k]` là view; cột `t[:, j]`, bước `t[::2]`, `reshape`, `flatten`, `copy()` là bản sao |
+| `m.X = v` trên module của `load()` bỏ qua `mut` | field của bản ghi luôn ghi được (như struct) |
 | `mem()` trên `t.py`/`eval.t` trả `objs=0, gc=0` | chỉ `trun` có số liệu GC thật |
 | Thông điệp vài lỗi hiếm (vd unhashable key) khác chữ giữa runtime | output bình thường khớp từng byte |

@@ -497,7 +497,14 @@ void tval_free(TVal *v) {
         break;
     case T_TENSOR:
         if (v->u.ten && --(v->u.ten->refc) == 0) {
-            free(v->u.ten->d); free(v->u.ten);
+            TTensor *b = v->u.ten->base;
+            if (b) {                      /* view: nhả tensor sở hữu bộ nhớ */
+                TVal bv; bv.t = T_TENSOR; bv.u.ten = b;
+                free(v->u.ten);
+                tval_free(&bv);
+            } else {
+                free(v->u.ten->d); free(v->u.ten);
+            }
         }
         break;
     case T_DICT:
@@ -3320,7 +3327,20 @@ int tvm_run(TVM *vm) {
                         ixs[cnt++] = i;
                     }
                 }
-                r = ten_val(ten_take0(cv.u.ten, ixs, cnt));
+                {
+                    /* các hàng liền nhau, tăng dần -> view (dùng chung bộ nhớ) */
+                    int cont = cnt > 0;
+                    for (size_t q = 1; cont && q < cnt; q++) cont = ixs[q] == ixs[0] + (int64_t)q;
+                    if (cont) {
+                        const TTensor *T0 = cv.u.ten;
+                        size_t sh[TMAXDIM], step = sh_prod(T0->shape + 1, T0->ndim - 1);
+                        sh[0] = cnt;
+                        for (int q = 1; q < T0->ndim; q++) sh[q] = T0->shape[q];
+                        r = ten_val(ten_view(T0, (size_t)ixs[0] * step, T0->ndim, sh));
+                    } else {
+                        r = ten_val(ten_take0(cv.u.ten, ixs, cnt));
+                    }
+                }
                 free(ixs);
             }
             tval_free(&st); tval_free(&hi); tval_free(&lo); tval_free(&cv);

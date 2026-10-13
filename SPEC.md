@@ -408,10 +408,16 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   hoặc guard hỏng → deopt (đẩy stack ảo, đặt pc).
 - Lát cắt nhiều trục: mỗi trục trong `t[...]` là số (chọn, bỏ trục), `nil`/`:`
   (cả trục) hoặc `[lo, hi, step]` (parse từ `lo:hi:step`, phần trống = `nil`;
-  ngữ nghĩa slice của Python, kể cả âm và step âm). Kết quả là bản sao.
+  ngữ nghĩa slice của Python, kể cả âm và step âm).
+- View: kết quả chỉ số/lát cắt tensor mà các phần tử được chọn nằm liền nhau, tăng
+  dần trong bộ nhớ row-major (`t[i]`, `t[a:b]`, `t[i, j:k]`, ...) dùng chung bộ nhớ
+  với tensor gốc (ghi qua view đổi gốc và ngược lại; view giữ gốc sống). Ngoài ra
+  (cột, bước ≠ 1, vùng rỗng) là bản sao. Phép toán luôn tạo tensor mới.
 - `load(tên)`: builtin mềm (NAT 51). Trả bản ghi kiểu `"module"` với field = global
-  top-level của module (bỏ tên chứa `$` và `X__type`), giá trị chụp lúc top-level
-  chạy xong; nạp một lần theo đường dẫn, nạp vòng là lỗi. `.tb` kèm phần `"EX01"`
+  top-level của module (bỏ tên chứa `$` và `X__type`); đọc field = giá trị global
+  hiện tại, ghi field (`m.X = v`, `m["X"] = v`) = ghi global của module; nạp một
+  lần theo đường dẫn, nạp vòng là lỗi. VM: `tên.t` mới hơn `tên.tb` thì tự chạy
+  `trun tcomp.tb tên.t tên.tb`; lỗi biên dịch thành lỗi `load: tên.t: ...`. `.tb` kèm phần `"EX01"`
   sau `LN01`: u16 n + (u16 len + tên + u16 slot)*. VM: mỗi hàm nhớ prog của nó,
   gọi/return/try đổi prog hiện hành; global của module là gốc GC; JIT không gọi
   thẳng hàm thuộc prog khác.

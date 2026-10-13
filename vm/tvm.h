@@ -48,7 +48,8 @@ struct TList {
 struct TTensor {
     int32_t refc;
     size_t len;         /* tổng số phần tử */
-    double *d;          /* row-major */
+    double *d;          /* row-major (view: trỏ vào bộ nhớ của base) */
+    TTensor *base;      /* view: tensor sở hữu bộ nhớ (giữ ref); NULL = tự sở hữu */
     int ndim;           /* 1..8 */
     size_t shape[8];
 };

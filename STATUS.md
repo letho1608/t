@@ -14,8 +14,10 @@
 - `std/autograd.t`: reverse-mode autodiff trên tensor (kiểm sai phân hữu hạn, MLP XOR).
 - JIT vòng lặp top-level: `bench/loop.t` 0.377s → 0.033s (CPython 0.494s).
 - Tensor lát cắt nhiều trục `t[0:2, 1:3]`, `t[::-1, 0]` (khớp numpy).
-- `load("tên")`: import động lúc chạy (VM nạp `.tb` riêng; `test_tcomp_t` 25 suite,
-  eval.t 13 suite, kèm chạy với GC quét dày). Git: mỗi tính năng một commit.
+- `load("tên")`: import động lúc chạy (VM nạp `.tb` riêng, tự dịch `.t` khi cần;
+  field module sống; `test_tcomp_t` 25 suite, eval.t 13 suite, kèm GC quét dày).
+- Tensor view cho vùng chọn liền khối (`t[i]`, `t[a:b]`, `t[i, j:k]`): `bench/nn.t`
+  0.550s → 0.51s. Git: mỗi tính năng một commit.
 
 ## v2.2 — hoàn thiện mục còn thiếu + JIT mở rộng + tensor thật
 
