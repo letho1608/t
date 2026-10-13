@@ -76,6 +76,7 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | J2 | JIT vòng lặp top-level (global ghi thẳng, lối ra = deopt về pc) | ✅ loop nhanh hơn CPython 14× (`tests/jitmain.t`) |
 | J3 | JIT đọc field số + gọi method struct (record mượn, guard kiểu/tag) | ✅ ~13× so với interpreter (`tests/jitrec.t`) |
 | J4 | VM giữ `pc` trong thanh ghi ở vòng dispatch | ✅ loop/sieve nhanh hơn 10–13% (không JIT) |
+| J5 | JIT tối đa 4 bản đặc hoá / hàm (mỗi bộ kiểu đối số một bản) | ✅ `tests/jitrec.t` (P int + P float) |
 | G2 | Lát cắt theo nhiều trục `t[0:2, 1:3]`, `t[::-1, 0]` (ngữ nghĩa slice của Python) | ✅ `tests/tensor.t` |
 | R1 | `load("tên")`: import động lúc chạy, tên tính được; VM nạp `tên.tb` riêng (phần `EX01`) | ✅ `tests/loadmod.t` (4 runtime) |
 | R3 | `load()`: field sống (đọc global hiện tại, `m.X = v` ghi vào module); VM tự dịch `tên.t` khi `.tb` thiếu/cũ | ✅ `tests/loadmod.t` |
@@ -108,7 +109,6 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 | # | Hạng mục | Ghi chú |
 |---|---|---|
 | G6 | JIT tạo / gán record, chuỗi, dict (cần đếm tham chiếu trong code máy) | hiện chạy ở interpreter |
-| G7 | JIT nhiều bản đặc hoá cho một hàm (mỗi hàm chỉ 1 bộ kiểu đối số) | kiểu khác -> interpreter |
 
 ## 3. Giới hạn đã biết (không phải bug)
 

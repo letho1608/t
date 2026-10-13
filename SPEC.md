@@ -440,6 +440,8 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   của vòng lặp top-level); `ATTR` đọc `vals[i]` + guard tag; `CALLM` gọi thẳng code
   JIT của method; vòng lặp main được ghi lại global record nếu là cùng con trỏ
   (biến tạm của inliner). `CALLM` của interpreter cũng đếm/JIT method nóng.
+- Tối đa 4 bản đặc hoá entry mỗi hàm (theo bộ kiểu đối số); lời gọi chọn bản khớp,
+  code JIT gọi thẳng bản khớp kiểu tĩnh; bộ kiểu hỏng được nhớ (không thử lại).
 - Vòng dispatch giữ `pc` ở biến cục bộ; `vm->pc` ghi sau mỗi opcode và đồng bộ
   quanh CALL/CALLM/RET/OSR/try/debugger.
 

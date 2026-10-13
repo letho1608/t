@@ -124,14 +124,22 @@ typedef struct {
     int nsave;                  /* số qword frame cần chép khi deopt */
 } JitOsr;
 
-typedef struct TJitFn {
-    int estate;                 /* entry: 0 chưa, 1 đang biên dịch, 2 ok, 3 hỏng */
+/* một bản đặc hoá entry theo bộ kiểu đối số */
+#define JIT_MAX_SPEC 4
+typedef struct {
+    int estate;                 /* 1 đang biên dịch, 2 ok, 3 hỏng / đã tắt */
     uint8_t argty[256];
-    int nargs;
     uint8_t retty;
     void *entry;
     JitUnit unit;
     int aborts;
+} JitSpec;
+
+typedef struct TJitFn {
+    JitSpec spec[JIT_MAX_SPEC];
+    int nspec;
+    int nargs;
+    int aborts;                 /* OSR */
     JitOsr osr[JIT_MAX_OSR];
     int nosr;
     TFn **callees;              /* giữ ref: code native nhảy thẳng vào chúng */
@@ -169,6 +177,7 @@ typedef struct {
     TProg *prog;        /* prog chứa code đang biên dịch (fn->prog / prog main) */
     TFn *fn;
     TJitFn *jf;
+    JitSpec *sp;        /* bản đặc hoá entry đang biên dịch (NULL: OSR / main) */
     MOp *ops; int nops, capops;
     int nl;             /* nlocals */
     int maxd;
@@ -360,11 +369,22 @@ static int merge_in(JC *j, int i, int depth, const uint8_t *st, const int32_t *s
 
 static int compile_entry(TVM *vm, TFn *fn, const uint8_t *argty, int nest);
 
+/* bản đặc hoá của fj đúng bộ kiểu at (mọi trạng thái), NULL nếu chưa có */
+static JitSpec *spec_find(TJitFn *fj, const uint8_t *at, int k) {
+    for (int q = 0; q < fj->nspec; q++)
+        if (memcmp(fj->spec[q].argty, at, (size_t)k) == 0) return &fj->spec[q];
+    return NULL;
+}
+/* lời gọi F(at) có phải là đệ quy vào chính bản đang biên dịch? */
+static int is_self_spec(JC *j, TFn *F, const uint8_t *at, int k) {
+    return j->fn && F == j->fn && j->sp && j->sp->estate == 1 &&
+           memcmp(j->sp->argty, at, (size_t)k) == 0;
+}
+
 /* kiểu trả về + kiểu đối số của callee F (biên dịch nếu cần) */
 static int callee_info(JC *j, TFn *F, const uint8_t *at, int k, uint8_t *retty) {
-    if (j->fn && F == j->fn && j->jf->estate == 1) {
+    if (is_self_spec(j, F, at, k)) {
         /* đệ quy chính nó trong lúc đang biên dịch entry */
-        for (int i = 0; i < k; i++) if (at[i] != j->jf->argty[i]) return 0;
         *retty = (uint8_t)j->self_retty_guess;
         j->used_guess = 1;
         return 1;
@@ -372,14 +392,20 @@ static int callee_info(JC *j, TFn *F, const uint8_t *at, int k, uint8_t *retty) 
     if (F->nargs != k) return 0;
     if (F->prog != j->prog) return 0;   /* hàm của module khác (load): code + global khác */
     TJitFn *fj = jit_of(F);
-    if (fj->estate == 0) {
+    JitSpec *sp = spec_find(fj, at, k);
+    if (!sp) {
         if (j->nest >= JIT_MAX_NEST) return 0;
         if (!compile_entry(j->vm, F, at, j->nest + 1)) return 0;
+        sp = spec_find(fj, at, k);
     }
-    if (fj->estate != 2) return 0;
-    for (int i = 0; i < k; i++) if (at[i] != fj->argty[i]) return 0;
-    *retty = fj->retty;
+    if (!sp || sp->estate != 2) return 0;
+    *retty = sp->retty;
     return 1;
+}
+/* entry native của callee F(at) đã biên dịch (codegen) */
+static void *callee_entry(TFn *F, const uint8_t *at, int k) {
+    JitSpec *sp = spec_find((TJitFn *)F->jit, at, k);
+    return sp ? sp->entry : NULL;
 }
 
 static int is_num(uint8_t t) { return t == JT_I || t == JT_F; }
@@ -1057,12 +1083,11 @@ static int gen_body(JC *j) {
             TFn *F = shape_method(shape_of(st[fd]), c + 6, (uint32_t)rd32(c + 2));
             if (JIT_SYSV) { eb3(j, 0x48, 0x8D, 0xBC); eb(j, 0x24); e32(j, SLOT(j, fd)); eb3(j, 0x48, 0x89, 0xDE); }
             else { eb3(j, 0x48, 0x8D, 0x8C); eb(j, 0x24); e32(j, SLOT(j, fd)); eb3(j, 0x48, 0x89, 0xDA); }
-            if (j->fn && F == j->fn && j->jf->estate == 1) {
+            if (is_self_spec(j, F, st + fd, k + 1)) {
                 eb(j, 0xE8);
                 e32(j, (int32_t)(0 - (int64_t)(j->n + 4)));
             } else {
-                TJitFn *fj = (TJitFn *)F->jit;
-                mov_rax_imm(j, (int64_t)(intptr_t)fj->entry);
+                mov_rax_imm(j, (int64_t)(intptr_t)callee_entry(F, st + fd, k + 1));
                 eb2(j, 0xFF, 0xD0);
                 keep_callee(j, F);
             }
@@ -1142,12 +1167,11 @@ static int gen_body(JC *j) {
                 /* arg1 = &slot(fd+1), arg2 = ctx */
                 if (JIT_SYSV) { eb3(j, 0x48, 0x8D, 0xBC); eb(j, 0x24); e32(j, SLOT(j, fd + 1)); eb3(j, 0x48, 0x89, 0xDE); }
                 else { eb3(j, 0x48, 0x8D, 0x8C); eb(j, 0x24); e32(j, SLOT(j, fd + 1)); eb3(j, 0x48, 0x89, 0xDA); }
-                if (j->fn && F == j->fn && j->jf->estate == 1) {
+                if (is_self_spec(j, F, st + fd + 1, k)) {
                     eb(j, 0xE8);                    /* call rel32 -> đầu entry (offset 0) */
                     e32(j, (int32_t)(0 - (int64_t)(j->n + 4)));
                 } else {
-                    TJitFn *fj = (TJitFn *)F->jit;
-                    mov_rax_imm(j, (int64_t)(intptr_t)fj->entry);
+                    mov_rax_imm(j, (int64_t)(intptr_t)callee_entry(F, st + fd + 1, k));
                     eb2(j, 0xFF, 0xD0);
                     keep_callee(j, F);
                 }
@@ -1282,13 +1306,18 @@ static void set_frame(JC *j) {
 /* biên dịch entry đặc hoá theo argty */
 static int compile_entry(TVM *vm, TFn *fn, const uint8_t *argty, int nest) {
     TJitFn *jf = jit_of(fn);
+    JitSpec *sp = spec_find(jf, argty, fn->nargs);
     JC j;
-    if (jf->estate != 0) return jf->estate == 2;
-    if (getenv("TVM_NOJIT")) { jf->estate = 3; fn->jit_off |= 3; return 0; }
-    jf->estate = 1;
+    if (sp) return sp->estate == 2;
+    if (getenv("TVM_NOJIT")) { fn->jit_off |= 3; return 0; }
+    if (jf->nspec >= JIT_MAX_SPEC) { fn->jit_off |= 1; return 0; }
+    sp = &jf->spec[jf->nspec++];
+    memset(sp, 0, sizeof(*sp));
+    sp->estate = 1;
     jf->nargs = fn->nargs;
-    memcpy(jf->argty, argty, (size_t)fn->nargs);
+    memcpy(sp->argty, argty, (size_t)fn->nargs);
     int ok = jc_setup(&j, vm, fn, nest);
+    j.sp = sp;
     uint8_t *lt = (uint8_t *)calloc((size_t)fn->nlocals + 1, 1);
     for (int i = 0; i < fn->nargs && i < fn->nlocals; i++) lt[i] = argty[i];
     uint8_t retty = JT_UNK;
@@ -1306,20 +1335,24 @@ static int compile_entry(TVM *vm, TFn *fn, const uint8_t *argty, int nest) {
         }
     }
     if (ok) {
-        jf->retty = retty;
+        sp->retty = retty;
         set_frame(&j);
         prologue(&j, argty, fn->nargs);
-        ok = gen_body(&j) && finish(&j, &jf->unit);
+        ok = gen_body(&j) && finish(&j, &sp->unit);
     }
     if (!ok && getenv("TVM_JITLOG"))
         fprintf(stderr, "[jit] entry fail @%d: %s\n", fn->entry, j.why ? j.why : "?");
     jc_free(&j);
     free(lt);
-    if (!ok) { jf->estate = 3; fn->jit_off |= 1; return 0; }
-    jf->entry = jf->unit.mem;
-    jf->estate = 2;
-    fn->native = jf->entry;
-    if (getenv("TVM_JITLOG")) fprintf(stderr, "[jit] entry ok @%d (%zu bytes)\n", fn->entry, jf->unit.size);
+    if (!ok) {
+        sp->estate = 3;             /* nhớ bộ kiểu hỏng (không thử lại) */
+        if (jf->nspec >= JIT_MAX_SPEC) fn->jit_off |= 1;
+        return 0;
+    }
+    sp->entry = sp->unit.mem;
+    sp->estate = 2;
+    if (!fn->native) fn->native = sp->entry;    /* cờ "có bản native" */
+    if (getenv("TVM_JITLOG")) fprintf(stderr, "[jit] entry ok @%d (%zu bytes)\n", fn->entry, sp->unit.size);
     return 1;
 }
 
@@ -1364,13 +1397,17 @@ static int ty_ok(const TVal *v, uint8_t want) {
     return tag_ty(v->t) == want;
 }
 
+/* đếm lời gọi qua interpreter; đủ nóng thì biên dịch bản đặc hoá cho bộ kiểu hiện
+   tại. Đã có bản native (kiểu lần này không khớp): chỉ xét lại mỗi 256 lần (tính
+   kiểu list phải quét phần tử). */
 void t_jit_maybe(TVM *vm, TFn *fn, TVal *args) {
     uint8_t at[256];
-    if (fn->native || (fn->jit_off & 1)) return;
+    if (fn->jit_off & 1) return;
     if (++fn->ncalls < JIT_THRESHOLD) return;
+    if (fn->native && (fn->ncalls & 255)) return;
     for (int i = 0; i < fn->nargs; i++) {
         at[i] = val_ty(&args[i]);
-        if (at[i] == JT_UNK) { fn->jit_off |= 1; return; }
+        if (at[i] == JT_UNK) { if (!fn->native) fn->jit_off |= 1; return; }
     }
     compile_entry(vm, fn, at, 0);
 }
@@ -1407,21 +1444,33 @@ static TVal bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
 int t_jit_call(TVM *vm, TFn *fn, TVal *args, int argc, TVal *ret) {
     TJitFn *jf = (TJitFn *)fn->jit;
     int64_t in[256];
+    JitSpec *sp = NULL;
     (void)vm;
-    if (!fn->native || !jf || jf->estate != 2 || argc != jf->nargs) return 0;
-    for (int i = 0; i < argc; i++) {
-        if (!ty_ok(&args[i], jf->argty[i])) return 0;
-        in[i] = val_bits(&args[i]);
+    if (!fn->native || !jf || argc != jf->nargs) return 0;
+    for (int q = 0; q < jf->nspec && !sp; q++) {
+        JitSpec *c = &jf->spec[q];
+        int i;
+        if (c->estate != 2) continue;
+        for (i = 0; i < argc; i++) if (!ty_ok(&args[i], c->argty[i])) break;
+        if (i == argc) sp = c;
     }
+    if (!sp) return 0;
+    for (int i = 0; i < argc; i++) in[i] = val_bits(&args[i]);
     JitCtx ctx;
     ctx.abort = 0; ctx.deopt_id = 0; ctx.save = NULL;
     ctx.stack_limit = (char *)((uintptr_t)&ctx - JIT_STACK_BUDGET);
-    int64_t r = ((JitEntry)jf->entry)(in, &ctx);
+    int64_t r = ((JitEntry)sp->entry)(in, &ctx);
     if (ctx.abort) {
-        if (++jf->aborts > JIT_MAX_ABORTS) { fn->native = NULL; fn->jit_off |= 1; }
+        if (++sp->aborts > JIT_MAX_ABORTS) {
+            /* bản này huỷ quá nhiều: tắt nó (code vẫn giữ: callee khác có thể nhảy vào) */
+            int live = 0;
+            sp->estate = 3;
+            for (int q = 0; q < jf->nspec; q++) if (jf->spec[q].estate == 2) live = 1;
+            if (!live) { fn->native = NULL; fn->jit_off |= 1; }
+        }
         return 0;
     }
-    return to_ret(jf->retty, r, ret);
+    return to_ret(sp->retty, r, ret);
 }
 
 int t_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret) {
@@ -1638,7 +1687,8 @@ void t_jit_free_fn(TFn *fn) {
     fn->native = NULL;
     if (!jf) return;
     fn->jit = NULL;
-    if (jf->unit.mem) jit_free_exec(jf->unit.mem, jf->unit.size);
+    for (int q = 0; q < jf->nspec; q++)
+        if (jf->spec[q].unit.mem) jit_free_exec(jf->spec[q].unit.mem, jf->spec[q].unit.size);
     for (int i = 0; i < jf->nosr; i++) {
         if (jf->osr[i].unit.mem) jit_free_exec(jf->osr[i].unit.mem, jf->osr[i].unit.size);
         free(jf->osr[i].lty);

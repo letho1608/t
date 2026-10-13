@@ -134,7 +134,8 @@ guard từng lần truy cập, **đọc field số của struct** (`p.x`) và **
 (`p.norm2()`, phân giải tĩnh theo kiểu) trên record mượn (đối số / global), guard
 kiểu struct + tag field. Tạo / gán record vẫn chạy ở interpreter.
 
-- Kích hoạt: hàm được gọi ≥ 50 lần (đặc hoá theo kiểu đối số), hoặc **OSR** khi
+- Kích hoạt: hàm được gọi ≥ 50 lần (đặc hoá theo kiểu đối số, tối đa 4 bản mỗi
+  hàm), hoặc **OSR** khi
   một vòng lặp trong hàm chạy ≥ 2000 vòng (kể cả hàm chỉ gọi 1 lần), hoặc vòng lặp
   **top-level** chạy ≥ 2000 vòng (global đọc/ghi thẳng bộ nhớ có guard; thoát vòng
   lặp = deopt về đúng pc).

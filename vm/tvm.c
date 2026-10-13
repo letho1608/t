@@ -1240,6 +1240,7 @@ int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out) {
     if (f->native) {          /* fn đã JIT thành native: gọi thẳng, không lặp lại */
         TVal rv; rv.t = T_NIL;
         if (t_jit_call(vm, f, args, argc, &rv)) { *out = rv; return 1; }
+        if (argc == f->nargs) t_jit_maybe(vm, f, args);    /* bộ kiểu mới: bản đặc hoá khác */
     }
     if (argc != f->nargs) die(vm, "call arity");
     size_t sp0 = vm->sp, pc0 = vm->pc, nf0 = vm->nframes, stop0 = vm->stop_nf;
@@ -2834,7 +2835,9 @@ static void call_value(TVM *vm, uint8_t k) {
                         push(vm, rv);
                         return;
                     }
-                    /* deopt: rẽ interpreter bên dưới */
+                    /* kiểu không khớp bản nào / deopt: có thể biên dịch bản đặc hoá
+                       mới cho bộ kiểu này, rồi rẽ interpreter bên dưới */
+                    t_jit_maybe(vm, f, &vm->stack[vm->sp - k]);
                 }
                 TFrame *fr = push_frame(vm);
                 size_t bp = vm->sp - k - 1;
@@ -2939,6 +2942,7 @@ static void call_method(TVM *vm, uint8_t k, const char *nm, size_t len, TAttrIC 
                     push(vm, rv);
                     return;
                 }
+                t_jit_maybe(vm, f, &vm->stack[bp]);    /* bộ kiểu mới */
             }
             enter_fn(vm, f, bp, k + 1);
             return;
