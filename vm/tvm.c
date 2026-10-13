@@ -657,11 +657,15 @@ static const char *rec_name(const TDict *d) {
     return d->rname ? d->rname : "record";
 }
 /* bản ghi module (load): field i <-> global exslots[i] của prog module */
-static TProg *rec_mod(const TDict *d) {
+TVM_INLINE TProg *rec_mod(const TDict *d) {
     return (d->kind == DK_REC && d->meths) ? d->meths->mod : NULL;
 }
-static void mod_pull(TDict *d, size_t i) {
+static void mod_pull_slow(TDict *d, size_t i, TProg *m);
+TVM_INLINE void mod_pull(TDict *d, size_t i) {
     TProg *m = rec_mod(d);
+    if (m) mod_pull_slow(d, i, m);       /* bản ghi thường (struct): không làm gì */
+}
+static void mod_pull_slow(TDict *d, size_t i, TProg *m) {
     if (!m || i >= m->nexports || i >= d->len || m->exslots[i] >= m->nglobals) return;
     TVal v = m->globals[m->exslots[i]];
     if (v.t == T_CELL) v = v.u.cell->val;
@@ -2119,6 +2123,11 @@ static TVal attr_value(TVM *vm, TVal *o, const char *name, size_t namelen) {
     }
     return r;
 }
+/* so tên ngắn (field/method) không qua memcmp của libc */
+TVM_INLINE int name_eq(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
 static void do_attr(TVM *vm, const char *name, size_t namelen, TAttrIC *ic) {
     TVal *ov = &vm->stack[vm->sp - 1];
     /* inline cache: field record theo kiểu */
@@ -2126,11 +2135,11 @@ static void do_attr(TVM *vm, const char *name, size_t namelen, TAttrIC *ic) {
         TDict *d = ov->u.dict;
         if (ic && ic->kind == 1 && ic->key == d->meths && (size_t)ic->idx < d->len &&
             d->keys[ic->idx].u.str.n == namelen &&
-            memcmp(d->keys[ic->idx].u.str.s, name, namelen) == 0) {
+            name_eq(d->keys[ic->idx].u.str.s, name, namelen)) {
             mod_pull(d, (size_t)ic->idx);
-            TVal r = d->vals[ic->idx]; tval_retain(&r);
-            TVal o = pop(vm); tval_free(&o);
-            push(vm, r);
+            TVal r = d->vals[ic->idx]; TV_RETAIN(&r);
+            tval_free(ov);
+            *ov = r;
             return;
         }
         if (ic && d->len < 64) {
@@ -2895,7 +2904,7 @@ static void call_method(TVM *vm, uint8_t k, const char *nm, size_t len, TAttrIC 
         int mi = -1;
         if (ic->kind == 2 && ic->key == tp && tp && (size_t)ic->idx < tp->len &&
             tp->keys[ic->idx].t == T_STR && tp->keys[ic->idx].u.str.n == len &&
-            memcmp(tp->keys[ic->idx].u.str.s, nm, len) == 0) mi = ic->idx;
+            name_eq(tp->keys[ic->idx].u.str.s, nm, len)) mi = ic->idx;
         else if (tp) {
             int isfield = 0;
             for (size_t i = 0; i < rec->len; i++)
@@ -3767,7 +3776,25 @@ int tvm_run(TVM *vm) {
             if (vm->pc + len > n) die(vm, "bad attr");
             const char *nm = (const char*)(c + vm->pc);
             vm->pc += len;
-            do_attr(vm, nm, len, &vm->prog->ic[vm->pc - len - 5]);
+            {
+                /* đường nhanh: field struct trúng inline cache (không phải module) */
+                TAttrIC *ic = &vm->prog->ic[vm->pc - len - 5];
+                TVal *ov = &vm->stack[vm->sp - 1];
+                if (ic->kind == 1 && ov->t == T_DICT) {
+                    TDict *d = ov->u.dict;
+                    if (d->kind == DK_REC && d->meths && ic->key == d->meths && !d->meths->mod &&
+                        (size_t)ic->idx < d->len && d->keys[ic->idx].u.str.n == len &&
+                        name_eq(d->keys[ic->idx].u.str.s, nm, len)) {
+                        TVal r = d->vals[ic->idx];
+                        TV_RETAIN(&r);
+                        if (d->refc > 1) d->refc--;          /* còn ref khác: chỉ giảm */
+                        else tval_free(ov);
+                        *ov = r;
+                        break;
+                    }
+                }
+                do_attr(vm, nm, len, ic);
+            }
             break;
         }
         case OP_RAISE: {
