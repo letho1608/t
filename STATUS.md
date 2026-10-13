@@ -1,9 +1,28 @@
-# Ngôn ngữ T — Báo cáo trạng thái v2.2 (2026-10-13)
+# Ngôn ngữ T — Báo cáo trạng thái v2.4 (2026-10-13)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`python tools/run_all.py` → ALL-GREEN** trên
 > Windows (MSVC 19.44) và Linux (gcc 13, Docker `gcc:13` + `python:3.12-slim`):
 > 7 bộ test + mọi `tests/*.t`; 4 runtime khớp từng byte; JIT x86-64 cả 2 ABI;
 > tensor n-chiều khớp numpy. (Các mục v2.0/v2.1 phía dưới giữ làm lịch sử.)
+
+## v2.4 — view theo bước, module tôn trọng mut, tối ưu toàn diện
+
+- Tensor: mọi chỉ số/lát cắt (cột, bước ≠ 1, bước âm), `.T`, `reshape` của tensor
+  liền là **view** như numpy (VM: cache dày + bộ đếm phiên bản của chủ bộ nhớ).
+- `load()`: `m.X = v` báo `X immutable (use mut)` với global `let`/`fn`/`struct`
+  (EX01 thêm cờ mut).
+- Tensor: kernel từng phần tử tách `switch` khỏi vòng lặp, broadcast theo trục trong
+  cùng, pool buffer, matmul đọc A theo bước + `n == 1` thành tích vô hướng, gcc bật
+  vector hoá động. `bench/nn`: 0.55s → 0.20s (Windows), 0.52s → 0.32s (Linux).
+- VM: pool khối nhỏ (GCNode, vỏ list/dict/native, cell, chuỗi ngắn); superop bỏ qua
+  đệm NOP (trước đây 27% lệnh thực thi là NOP); push/pop inline; bỏ refcount cho
+  số; `==` chuỗi nhanh; field struct trúng inline cache ngay trong `OP_ATTR`; in số
+  nguyên không qua printf; chuỗi 1 byte dùng chung. Interpreter (không JIT)
+  nhanh hơn 15–30%; dict 0.81× → 0.48×, method 0.71× → 0.48× CPython.
+- Compiler T tự host: 0.95s → 0.43s khi dịch chính nó (keyword tra dict, `in` thay
+  vòng lặp, bảng kích thước opcode, `be_bytes` đường nhanh, peephole kiểm opcode
+  trước). Output byte-identical, fixed point giữ.
+- `-DTVM_PROF`: profile số lệnh theo hàm T và theo opcode.
 
 ## v2.3 — số dòng lỗi runtime, lambda/comprehension, autograd, JIT top-level
 

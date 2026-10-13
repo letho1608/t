@@ -1,4 +1,4 @@
-# T language — README (v2.3: JIT x86-64 + tensor n-chiều + autograd)
+# T language — README (v2.4: JIT x86-64 + tensor n-chiều (view như numpy) + autograd)
 
 Ngôn ngữ T: cú pháp Python/Go-like (thụt lề), tensor là kiểu nguyên thủy,
 AI-first. Bốn runtime cho output **giống nhau từng byte**:
@@ -144,23 +144,24 @@ guard từng lần truy cập.
 - Windows (Win64 ABI) + Linux/macOS (System V). `TVM_NOJIT=1` tắt,
   `TVM_JITLOG=1` in hàm được biên dịch, `TVM_JITDUMP=dir` ghi mã máy.
 
-## Hiệu năng (`python bench/bench.py`, Windows, CPython 3.10, tốt nhất 3 lần)
+## Hiệu năng (`python bench/bench.py`, Windows, CPython 3.10, tốt nhất 7 lần)
 
 | Bài | T (trun) | CPython | T/Py |
 |---|---:|---:|---:|
-| fib(30) đệ quy | 0.018s | 0.277s | 0.06× |
-| vòng lặp toàn cục 5M | 0.033s | 0.494s | 0.07× |
-| vòng lặp trong hàm 10M | 0.045s | 0.741s | 0.06× |
-| mandelbrot (float) | 0.036s | 0.406s | 0.09× |
-| sàng nguyên tố 2M (list) | 0.098s | 0.515s | 0.19× |
-| dict + chuỗi | 0.129s | 0.159s | 0.81× |
-| struct + method | 0.125s | 0.176s | 0.71× |
-| matmul 120×120 ×20 | 0.022s | 2.227s (list Python) | 0.01× |
-| MLP 512×16→64→1, 300 bước | 0.550s | 0.718s (**numpy**) | 0.77× |
+| fib(30) đệ quy | 0.024s | 0.377s | 0.06× |
+| vòng lặp toàn cục 5M | 0.041s | 0.629s | 0.07× |
+| vòng lặp trong hàm 10M | 0.054s | 0.974s | 0.06× |
+| mandelbrot (float) | 0.043s | 0.496s | 0.09× |
+| sàng nguyên tố 2M (list) | 0.129s | 0.625s | 0.21× |
+| dict + chuỗi | 0.100s | 0.208s | 0.48× |
+| struct + method | 0.108s | 0.223s | 0.48× |
+| matmul 120×120 ×20 | 0.029s | 2.858s (list Python) | 0.01× |
+| MLP 512×16→64→1, 300 bước | 0.246s | 0.947s (**numpy**) | 0.26× |
 
-Thời gian tính cả khởi động tiến trình. Trên Linux với CPython 3.12 (nhanh hơn
-3.10), các bài số học/JIT/sieve/matmul vẫn vượt xa; dict/method/nn chậm hơn
-CPython 3.12 / numpy+OpenBLAS khoảng 1.2–1.8×.
+Thời gian tính cả khởi động tiến trình (máy đo lúc có tải; tỷ lệ T/Py ổn định giữa
+các lần chạy). Linux (gcc 13, CPython 3.12 + numpy): số học/JIT/sieve/matmul vượt
+xa; MLP 0.32s so với numpy 0.43s; dict/method ngang CPython 3.12 (±20%).
+Compiler T tự host dịch chính nó trong 0.43s (compiler Python 0.36s).
 
 ## Công cụ
 
