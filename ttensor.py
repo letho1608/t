@@ -387,34 +387,38 @@ def _multi_pos(t, key):
         raise TensorError("too many indices")
     st = _strides(t.shape)
     base = 0
-    kept = []
+    axes = []        # (trục, danh sách chỉ số) của các trục giữ lại
     for ax in range(t.ndim):
         k = key[ax] if ax < len(key) else None
         if k is None:
-            kept.append(ax)
+            axes.append((ax, list(range(t.shape[ax]))))
+            continue
+        if isinstance(k, list):
+            if len(k) != 3:
+                raise TensorError("slice [lo, hi, step]")
+            for x in k:
+                if x is not None and (isinstance(x, bool) or not isinstance(x, int)):
+                    raise TensorError("slice int")
+            if k[2] == 0:
+                raise TensorError("slice step 0")
+            axes.append((ax, list(range(t.shape[ax]))[k[0]:k[1]:k[2]]))
             continue
         if isinstance(k, bool) or not isinstance(k, int):
             raise TensorError("index int")
         if k < 0 or k >= t.shape[ax]:
             raise TensorError("index %d out of range (len %d)" % (k, t.shape[ax]))
         base += k * st[ax]
-    shape = tuple(t.shape[a] for a in kept)
+    shape = tuple(len(ix) for _, ix in axes)
     pos = []
-    n = _prod(shape)
-    cnt = [0] * len(kept)
-    off = base
-    for _ in range(n):
-        pos.append(off)
-        j = len(kept) - 1
-        while j >= 0:
-            a = kept[j]
-            cnt[j] += 1
-            off += st[a]
-            if cnt[j] < t.shape[a]:
-                break
-            off -= st[a] * cnt[j]
-            cnt[j] = 0
-            j -= 1
+    def rec(q, off):
+        if q == len(axes):
+            pos.append(off)
+            return
+        a, ix = axes[q]
+        for i in ix:
+            rec(q + 1, off + i * st[a])
+    if _prod(shape):
+        rec(0, base)
     return shape, pos
 
 

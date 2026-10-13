@@ -86,6 +86,8 @@ def main():
             ("A[::-1]", lambda: A[::-1]), ("eye(3) @ A", lambda: np.eye(3) @ A),
             ("A[:, 1]", lambda: A[:, 1]), ("W[1, :, 2]", lambda: W[1, :, 2]),
             ("W[:, 2]", lambda: W[:, 2]), ("A[2, 3]", lambda: A[2, 3]),
+            ("A[0:2, 1:3]", lambda: A[0:2, 1:3]), ("W[:, ::-1, 1]", lambda: W[:, ::-1, 1]),
+            ("A[1, -2:]", lambda: A[1, -2:]), ("W[1, 0:3:2, ::3]", lambda: W[1, 0:3:2, ::3]),
         ]
         for i, (e, _) in enumerate(cases):
             src.append("print(%s)" % e)

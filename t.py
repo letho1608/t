@@ -183,6 +183,19 @@ class P:
     def _next_is(self,ty,val):
         u=self.t[self.i+1] if self.i+1<len(self.t) else None
         return u is not None and u.type==ty and u.val==val
+    def _axis_item(self):
+        nil=("lit",None)
+        lo=None
+        if not self.at(":"): lo=self.expr()
+        if not self.at(":"): return lo
+        self.i+=1
+        hi=None; st=None
+        if not (self.at(":") or self.at(",") or self.at("]")): hi=self.expr()
+        if self.at(":"):
+            self.i+=1
+            if not (self.at(",") or self.at("]")): st=self.expr()
+        if lo is None and hi is None and st is None: return nil
+        return ("list",[lo or nil,hi or nil,st or nil])
     def _comma_ahead(self):
         # có ',' ở tầng ngoài cùng trước ']' khớp không?
         d=0; j=self.i
@@ -484,12 +497,11 @@ class P:
             elif self.pk().type=="OP" and self.pk().val=="[":
                 self.i+=1
                 if self._comma_ahead():
-                    # t[i, j] / t[:, j]: chỉ số nhiều trục -> t[[i, j]] (":" riêng = nil)
+                    # t[i, j] / t[:, j] / t[0:2, ::-1]: chỉ số nhiều trục -> t[[...]]
+                    # mỗi trục: số (chọn), nil (cả trục) hoặc [lo, hi, step] (khoảng)
                     items=[]
                     while True:
-                        if self.at(":") and (self._next_is("OP",",") or self._next_is("OP","]")):
-                            self.i+=1; items.append(("lit",None))
-                        else: items.append(self.expr())
+                        items.append(self._axis_item())
                         if self.at(","): self.i+=1; continue
                         break
                     self.eat("OP","]"); e=("idx",e,("list",items))

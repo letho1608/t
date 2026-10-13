@@ -71,6 +71,13 @@ g[1, 1] = 5
 g[:, 0] = 7
 g[2, :] = tensor([1, 2, 3])
 print(g, g[2, 1], g[:, 2].sum())
+# lát cắt theo nhiều trục (bản sao), cận âm như Python
+s6 = arange(24).reshape(4, 6)
+print(s6[0:2, 1], s6[:, 1:3], s6[::-1, 0], s6[1:3, ::2], s6[3, -3:], s6[:, ::-2].shape)
+mut z4 = zeros([4, 4])
+z4[1:3, 1:3] = 1
+z4[0, ::2] = tensor([7, 8])
+print(z4)
 
 # --- ngẫu nhiên tất định (splitmix64) ---
 seed(7)

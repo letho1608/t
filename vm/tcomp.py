@@ -1657,6 +1657,9 @@ def main():
     except CErr as ex:
         print(str(ex), file=sys.stderr)
         raise SystemExit(1)
+    except SyntaxError as ex:
+        print(f"tcomp: {ex}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

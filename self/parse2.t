@@ -577,12 +577,7 @@ fn parse_post(st):
             mut items = []
             mut more = true
             while more:
-                nx = st[0][st[1] + 1]
-                if is_op(st[0][st[1]], ":") and (is_op(nx, ",") or is_op(nx, "]")):
-                    st[1] = st[1] + 1
-                    items.append(["lit", "nil"])
-                else:
-                    items.append(parse_expr(st))
+                items.append(parse_axis_item(st))
                 if is_op(st[0][st[1]], ","):
                     st[1] = st[1] + 1
                 else:
@@ -622,6 +617,29 @@ fn parse_post(st):
         else:
             go = false
     return e
+
+# một trục trong chỉ số nhiều trục: số | nil (":") | ["list", [lo, hi, step]]
+fn parse_axis_item(st):
+    nilv = ["lit", "nil"]
+    mut lo = nil
+    if not is_op(st[0][st[1]], ":"):
+        lo = parse_expr(st)
+    if not is_op(st[0][st[1]], ":"):
+        return lo
+    st[1] = st[1] + 1
+    mut hi = nil
+    mut sp = nil
+    t = st[0][st[1]]
+    if not (is_op(t, ":") or is_op(t, ",") or is_op(t, "]")):
+        hi = parse_expr(st)
+    if is_op(st[0][st[1]], ":"):
+        st[1] = st[1] + 1
+        t2 = st[0][st[1]]
+        if not (is_op(t2, ",") or is_op(t2, "]")):
+            sp = parse_expr(st)
+    if lo == nil and hi == nil and sp == nil:
+        return nilv
+    return ["list", [lo if lo != nil else nilv, hi if hi != nil else nilv, sp if sp != nil else nilv]]
 
 # có ',' ở tầng ngoài cùng trước ']' khớp không? (bắt đầu từ chỉ số j)
 fn comma_ahead(st, j):

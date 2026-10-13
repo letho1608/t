@@ -308,39 +308,85 @@ static int ten_setitem(TTensor *t, int64_t i, const TVal *v, char *eb, size_t eb
 }
 /* chỉ số nhiều trục t[[i, nil, ...]]: int chọn (bỏ trục), nil giữ cả trục,
    thiếu trục cuối = giữ. Trả số vị trí (cấp *pos) + shape kết quả; lỗi -> die */
+/* chỉ số của khoảng lo:hi:step trên trục dài n (ngữ nghĩa slice của Python) */
+static size_t slice_ix(int64_t n, const TVal *lo, const TVal *hi, const TVal *sp, int64_t *out) {
+    int64_t s = sp->t == T_INT ? sp->u.i : 1, a, b;
+    size_t c = 0;
+    if (lo->t == T_NIL) a = s > 0 ? 0 : n - 1;
+    else { a = lo->u.i; if (a < 0) a += n; }
+    if (hi->t == T_NIL) b = s > 0 ? n : -1;
+    else { b = hi->u.i; if (b < 0) b += n; }
+    if (s > 0) {
+        if (a < 0) a = 0;
+        if (a > n) a = n;
+        if (b < 0) b = 0;
+        if (b > n) b = n;
+        for (int64_t i = a; i < b; i += s) out[c++] = i;
+    } else {
+        if (a < -1) a = -1;
+        if (a >= n) a = n - 1;
+        if (b < -1) b = -1;
+        if (b >= n) b = n - 1;
+        for (int64_t i = a; i > b; i += s) out[c++] = i;
+    }
+    return c;
+}
 static size_t ten_multi_pos(TVM *vm, const TTensor *t, const TList *key, int *rnd, size_t *rsh,
                             size_t **pos) {
     size_t st[TMAXDIM], acc = 1, base = 0, cnt[TMAXDIM];
     int kept[TMAXDIM], nk = 0;
+    int64_t *ix[TMAXDIM];
     char eb[96];
     if ((int)key->len > t->ndim) die(vm, "too many indices");
     for (int i = t->ndim - 1; i >= 0; i--) { st[i] = acc; acc *= t->shape[i]; }
     for (int ax = 0; ax < t->ndim; ax++) {
         const TVal *k = (size_t)ax < key->len ? &key->items[ax] : NULL;
-        if (!k || k->t == T_NIL) { kept[nk++] = ax; continue; }
-        if (k->t != T_INT) die(vm, "index int");
+        int64_t n = (int64_t)t->shape[ax];
+        if (!k || k->t == T_NIL || k->t == T_LIST) {
+            int64_t *lst = (int64_t*)malloc(sizeof(int64_t) * (size_t)(n ? n : 1));
+            size_t c;
+            if (!k || k->t == T_NIL) {
+                for (int64_t i = 0; i < n; i++) lst[i] = i;
+                c = (size_t)n;
+            } else {
+                const TList *sl = k->u.list;
+                if (sl->len != 3) { free(lst); for (int q = 0; q < nk; q++) free(ix[q]); die(vm, "slice [lo, hi, step]"); }
+                for (int q = 0; q < 3; q++)
+                    if (sl->items[q].t != T_NIL && sl->items[q].t != T_INT) {
+                        free(lst); for (int z = 0; z < nk; z++) free(ix[z]); die(vm, "slice int");
+                    }
+                if (sl->items[2].t == T_INT && sl->items[2].u.i == 0) {
+                    free(lst); for (int z = 0; z < nk; z++) free(ix[z]); die(vm, "slice step 0");
+                }
+                c = slice_ix(n, &sl->items[0], &sl->items[1], &sl->items[2], lst);
+            }
+            ix[nk] = lst;
+            rsh[nk] = c;
+            kept[nk++] = ax;
+            continue;
+        }
+        if (k->t != T_INT) { for (int q = 0; q < nk; q++) free(ix[q]); die(vm, "index int"); }
         if (k->u.i < 0 || (uint64_t)k->u.i >= t->shape[ax]) {
+            for (int q = 0; q < nk; q++) free(ix[q]);
             snprintf(eb, sizeof(eb), "index %lld out of range (len %zu)", (long long)k->u.i, t->shape[ax]);
             die(vm, eb);
         }
         base += (size_t)k->u.i * st[ax];
     }
     size_t n = 1;
-    for (int q = 0; q < nk; q++) { rsh[q] = t->shape[kept[q]]; n *= rsh[q]; cnt[q] = 0; }
+    for (int q = 0; q < nk; q++) { n *= rsh[q]; cnt[q] = 0; }
     *rnd = nk;
     size_t *p = (size_t*)malloc(sizeof(size_t) * (n ? n : 1));
-    size_t off = base;
     for (size_t w = 0; w < n; w++) {
+        size_t off = base;
+        for (int q = 0; q < nk; q++) off += (size_t)ix[q][cnt[q]] * st[kept[q]];
         p[w] = off;
         for (int q = nk - 1; q >= 0; q--) {
-            int a = kept[q];
-            cnt[q]++;
-            off += st[a];
-            if (cnt[q] < t->shape[a]) break;
-            off -= st[a] * cnt[q];
+            if (++cnt[q] < rsh[q]) break;
             cnt[q] = 0;
         }
     }
+    for (int q = 0; q < nk; q++) free(ix[q]);
     *pos = p;
     return n;
 }
