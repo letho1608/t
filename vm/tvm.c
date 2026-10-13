@@ -61,6 +61,39 @@ static void die(TVM *vm, const char *msg) {
     exit(1);
 }
 
+/* ---------- pool khối nhỏ ----------
+   Object sống ngắn (GCNode, vỏ list/dict/native, cell, chuỗi ngắn) được cấp/nhả liên
+   tục; malloc/free của CRT (nhất là Windows) đắt hơn nhiều so với lấy từ free-list.
+   Lớp 16 byte tới PK_MAX; nhả phải đưa đúng kích thước lúc cấp. Bộ nhớ của pool
+   không trả lại hệ điều hành (dùng lại cho lần cấp sau). */
+#define PK_MAX 256
+typedef struct PkFree { struct PkFree *next; } PkFree;
+static PkFree *pk_list[PK_MAX / 16 + 1];
+static void *pk_alloc(size_t sz) {
+    size_t c = (sz + 15) >> 4;
+    PkFree *p;
+    if (c == 0 || c > PK_MAX / 16) return malloc(sz);
+    p = pk_list[c];
+    if (p) { pk_list[c] = p->next; return p; }
+    {
+        size_t bs = c << 4, nb = 32768 / bs;
+        char *ch = (char*)malloc(nb * bs);
+        if (!ch) return NULL;
+        for (size_t i = nb - 1; i >= 1; i--) {
+            PkFree *f = (PkFree*)(ch + i * bs);
+            f->next = pk_list[c]; pk_list[c] = f;
+        }
+        return ch;
+    }
+}
+static void pk_free(void *p, size_t sz) {
+    size_t c = (sz + 15) >> 4;
+    if (!p) return;
+    if (c == 0 || c > PK_MAX / 16) { free(p); return; }
+    ((PkFree*)p)->next = pk_list[c];
+    pk_list[c] = (PkFree*)p;
+}
+
 /* ---------- GC mark-sweep (chu trình; refcount xử lý còn lại) ---------- */
 #define GC_THRESHOLD_DEFAULT 65536
 static size_t gc_threshold = GC_THRESHOLD_DEFAULT;   /* TVM_GCTHRESH=n để thử GC dày */
@@ -71,12 +104,12 @@ static void gc_unlink(TVM *vm, GCNode *nd) {
     if (nd->prev) nd->prev->next = nd->next;
     else vm->root->gc_head = nd->next;
     if (nd->next) nd->next->prev = nd->prev;
-    free(nd);
+    pk_free(nd, sizeof(GCNode));
     vm->root->gc_tracked--;
 }
 
 static void gc_track(TVM *vm, int type, void *ptr) {
-    GCNode *nd = (GCNode*)malloc(sizeof(GCNode));
+    GCNode *nd = (GCNode*)pk_alloc(sizeof(GCNode));
     if (!nd) return;
     nd->type = type; nd->ptr = ptr;
     nd->prev = NULL; nd->next = vm->root->gc_head;
@@ -203,13 +236,13 @@ static void gc_clear_contents(GCNode *nd) {
 }
 /* pha 4: giải phóng vỏ object (nội dung đã nhả) */
 static void gc_free_shell(int type, void *ptr) {
-    if (type == T_LIST) { TList *l = (TList*)ptr; free(l->items); free(l); }
+    if (type == T_LIST) { TList *l = (TList*)ptr; free(l->items); pk_free(l, sizeof(TList)); }
     else if (type == T_DICT) {
         TDict *d = (TDict*)ptr;
         if (d->kind != DK_REC) free(d->keys);
-        free(d->vals); free(d->rname); free(d->idx); free(d);
+        free(d->vals); free(d->rname); free(d->idx); pk_free(d, sizeof(TDict));
     } else if (type == T_FN) { TFn *f = (TFn*)ptr; free(f->upvals); free(f); }
-    else free(ptr);
+    else pk_free(ptr, sizeof(TNative));
 }
 static void gc_collect(TVM *vm) {
     size_t i, ng = 0, cap = 0;
@@ -428,7 +461,7 @@ static TVal mk_float(double f) { TVal v; v.t = T_FLOAT; v.u.f = f; return v; }
    u.str.refc trỏ đầu khối (free khối qua refc), u.str.s trỏ vào phần byte */
 static TVal mk_str_uninit(size_t n) {
     TVal v; v.t = T_STR;
-    int32_t *blk = (int32_t*)malloc(8 + n + 1);
+    int32_t *blk = (int32_t*)pk_alloc(8 + n + 1);
     if (!blk) exit(1);
     blk[0] = 1; blk[1] = 0;
     v.u.str.refc = blk;
@@ -444,7 +477,7 @@ static TVal mk_str_n(const char *s, size_t n) {
 }
 static TVal mk_str(const char *s) { return mk_str_n(s, strlen(s)); }
 static TList *list_new(size_t cap) {
-    TList *l = (TList*)malloc(sizeof(TList));
+    TList *l = (TList*)pk_alloc(sizeof(TList));
     l->refc = 1; l->gc_mark = 0; l->len = 0; l->cap = cap ? cap : 4;
     l->items = (TVal*)malloc(l->cap * sizeof(TVal));
     if (cur_vm) gc_track(cur_vm, T_LIST, l);
@@ -520,14 +553,14 @@ void tval_free(TVal *v) {
     switch (v->t) {
     case T_STR:
         if (v->u.str.refc && --(*v->u.str.refc) == 0) {
-            free(v->u.str.refc);          /* khối chung (refc + hash + byte) */
+            pk_free(v->u.str.refc, 8 + v->u.str.n + 1);   /* khối chung (refc + hash + byte) */
         }
         break;
     case T_LIST:
         if (v->u.list && --(v->u.list->refc) == 0) {
             if (cur_vm) gc_untrack(cur_vm, T_LIST, v->u.list);
             for (i = 0; i < v->u.list->len; i++) tval_free(&v->u.list->items[i]);
-            free(v->u.list->items); free(v->u.list);
+            free(v->u.list->items); pk_free(v->u.list, sizeof(TList));
         }
         break;
     case T_TENSOR:
@@ -564,7 +597,7 @@ void tval_free(TVal *v) {
             free(dd->rname);
             free(dd->idx);
             if (dd->kind != DK_REC) free(dd->keys);
-            free(dd->vals); free(dd);
+            free(dd->vals); pk_free(dd, sizeof(TDict));
         }
         break;
     case T_FN:
@@ -583,7 +616,7 @@ void tval_free(TVal *v) {
         if (v->u.nat && --(v->u.nat->refc) == 0) {
             if (cur_vm) gc_untrack(cur_vm, T_NATIVE, v->u.nat);
             if (v->u.nat->has_obj) tval_free(&v->u.nat->obj);
-            free(v->u.nat);
+            pk_free(v->u.nat, sizeof(TNative));
         }
         break;
     case T_FILE:
@@ -595,7 +628,7 @@ void tval_free(TVal *v) {
     case T_CELL:
         if (v->u.cell && --(v->u.cell->refc) == 0) {
             tval_free(&v->u.cell->val);
-            free(v->u.cell);
+            pk_free(v->u.cell, sizeof(TCell));
         }
         break;
     case T_UNDEF: break;
@@ -890,7 +923,7 @@ static int dict_find(TDict *d, const TVal *k) {
     return -1;
 }
 static TDict *dict_new(void) {
-    TDict *d = (TDict*)malloc(sizeof(TDict));
+    TDict *d = (TDict*)pk_alloc(sizeof(TDict));
     d->refc = 1; d->gc_mark = 0; d->len = 0; d->cap = 4;
     d->kind = DK_DICT; d->rname = NULL; d->meths = NULL; d->fields = NULL;
     d->idx = NULL; d->icap = 0; d->mod = NULL;
@@ -965,7 +998,7 @@ static const char *tname_of(const TVal *v) {
 
 /* ---------- natives ---------- */
 static TVal mk_native(TNativeFn fn, const char *name) {
-    TNative *n = (TNative*)malloc(sizeof(TNative));
+    TNative *n = (TNative*)pk_alloc(sizeof(TNative));
     n->refc = 1; n->gc_mark = 0; n->fn = fn; n->has_obj = 0; n->name = name;
     n->obj.t = T_NIL;
     TVal v; v.t = T_NATIVE; v.u.nat = n;
@@ -973,7 +1006,7 @@ static TVal mk_native(TNativeFn fn, const char *name) {
     return v;
 }
 static TVal mk_bound(TNativeFn fn, const char *name, TVal obj) {
-    TNative *n = (TNative*)malloc(sizeof(TNative));
+    TNative *n = (TNative*)pk_alloc(sizeof(TNative));
     n->refc = 1; n->gc_mark = 0; n->fn = fn; n->has_obj = 1; n->name = name;
     n->obj = obj; tval_retain(&n->obj);
     TVal v; v.t = T_NATIVE; v.u.nat = n;
@@ -1764,7 +1797,7 @@ static void n___new(TVM *vm, TVal *a, int argc, TVal *r) {
     TDict *tp = a[0].u.dict;
     size_t n = tp->fields->len;
     if ((size_t)argc != n + 1) die(vm, "__new arity");
-    TDict *d = (TDict*)malloc(sizeof(TDict));
+    TDict *d = (TDict*)pk_alloc(sizeof(TDict));
     d->refc = 1; d->gc_mark = 0; d->gc_node = NULL;
     d->len = n; d->cap = n;
     d->keys = tp->fields->items;
@@ -2638,7 +2671,7 @@ void tvm_free(TVM *vm) {
             GCNode *nd = (GCNode*)vm->root->gc_head;
             while (nd) {
                 GCNode *nx = nd->next;
-                free(nd);
+                pk_free(nd, sizeof(GCNode));
                 nd = nx;
             }
             vm->root->gc_head = NULL;
@@ -3554,7 +3587,7 @@ int tvm_run(TVM *vm) {
             if (slot->t == T_CELL) {
                 cell = slot->u.cell;
             } else {
-                cell = (TCell*)malloc(sizeof(TCell));
+                cell = (TCell*)pk_alloc(sizeof(TCell));
                 cell->refc = 0;             /* 1 cho slot + 1 cho fn (dưới) */
                 cell->val = *slot;          /* MOVE ownership từ slot */
                 slot->t = T_CELL; slot->u.cell = cell;
@@ -3595,7 +3628,7 @@ int tvm_run(TVM *vm) {
             if (gp->t == T_CELL) {
                 cell = gp->u.cell;
             } else {
-                cell = (TCell*)malloc(sizeof(TCell));
+                cell = (TCell*)pk_alloc(sizeof(TCell));
                 cell->refc = 1;
                 cell->val = *gp;   /* MOVE ownership từ global */
                 gp->t = T_CELL; gp->u.cell = cell;
