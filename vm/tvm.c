@@ -3057,6 +3057,11 @@ static void prof_dump(void) {
 int tvm_run(TVM *vm) {
     uint8_t *c = vm->prog->code;
     size_t n = vm->prog->len;
+    /* pc ở biến cục bộ (thanh ghi). vm->pc được ghi sau mỗi lần đọc opcode (lỗi báo
+       đúng dòng) và đồng bộ đầy đủ quanh lệnh gọi/return/OSR/try (SAVE_PC/LOAD_PC) */
+    size_t pc = vm->pc;
+#define SAVE_PC() (vm->pc = pc)
+#define LOAD_PC() (pc = vm->pc)
     /* frame main: chỉ lần chạy ngoài cùng (tvm_call_value gọi lại lồng nhau) */
     if (vm->nframes == 0) {
         TFrame *f = push_frame(vm);
@@ -3077,42 +3082,47 @@ int tvm_run(TVM *vm) {
         uint8_t op;
         /* (GC chu trình chỉ kiểm ở cạnh lùi JMP và CALL: mọi giá trị sống khi
            đó đều nằm trên stack/frame/global) */
-        if (tvm_dbg_on && !dbg_hook(vm)) return -1;
-        if (vm->pc >= n) { die(vm, "pc overrun"); }
-        op = c[vm->pc++];
+        if (tvm_dbg_on) {
+            SAVE_PC();
+            if (!dbg_hook(vm)) return -1;
+            LOAD_PC();
+        }
+        if (pc >= n) { SAVE_PC(); die(vm, "pc overrun"); }
+        op = c[pc++];
+        SAVE_PC();
 #ifdef TVM_PROF
         prof_hit(vm, op);
 #endif
 #ifdef TVM_TRACE
         fprintf(stderr, "[pc=%zu op=0x%02x sp=%zu fr=%zu nh=%zu]\n",
-                vm->pc - 1, op, vm->sp, vm->nframes, vm->nhandlers);
+                pc - 1, op, vm->sp, vm->nframes, vm->nhandlers);
 #endif
         switch (op) {
         case OP_PUSH_NIL: push(vm, mk_nil()); break;
-        case OP_PUSH_BOOL: { TVal v = mk_bool(c[vm->pc++]); push(vm, v); break; }
-        case OP_PUSH_INT: push(vm, mk_int(rd_i64(c, &vm->pc))); break;
-        case OP_PUSH_FLOAT: push(vm, mk_float(rd_f64(c, &vm->pc))); break;
+        case OP_PUSH_BOOL: { TVal v = mk_bool(c[pc++]); push(vm, v); break; }
+        case OP_PUSH_INT: push(vm, mk_int(rd_i64(c, &pc))); break;
+        case OP_PUSH_FLOAT: push(vm, mk_float(rd_f64(c, &pc))); break;
         case OP_PUSH_STR: {
-            TAttrIC *ic = &vm->prog->ic[vm->pc - 1];
-            uint32_t len = rd_u32(c, &vm->pc);
-            if (vm->pc + len > n) die(vm, "bad str");
+            TAttrIC *ic = &vm->prog->ic[pc - 1];
+            uint32_t len = rd_u32(c, &pc);
+            if (pc + len > n) die(vm, "bad str");
             if (ic->kind == 4) {
                 TVal v = *(const TVal*)ic->key;
                 (*v.u.str.refc)++;
-                vm->pc += len;
+                pc += len;
                 push(vm, v); break;
             }
             {
-                TVal v = mk_str_n((char*)(c + vm->pc), len);
+                TVal v = mk_str_n((char*)(c + pc), len);
                 TVal *keep = (TVal*)malloc(sizeof(TVal));
                 *keep = v; (*v.u.str.refc)++;          /* cache giữ 1 ref */
                 ic->kind = 4; ic->key = keep;
-                vm->pc += len;
+                pc += len;
                 push(vm, v); break;
             }
         }
         case OP_NEW_LIST: {
-            uint16_t k = rd_u16(c, &vm->pc);
+            uint16_t k = rd_u16(c, &pc);
             if (vm->sp < k) die(vm, "stack underflow");
             TList *l = list_new(k);
             for (uint16_t i = 0; i < k; i++) l->items[i] = vm->stack[vm->sp - k + i];
@@ -3122,7 +3132,7 @@ int tvm_run(TVM *vm) {
             push(vm, v); break;
         }
         case OP_NEW_TENSOR: {
-            uint16_t k = rd_u16(c, &vm->pc);
+            uint16_t k = rd_u16(c, &pc);
             if (vm->sp < k) die(vm, "stack underflow");
             TTensor *t = ten_alloc1(k);
             for (uint16_t i = 0; i < k; i++) {
@@ -3140,7 +3150,7 @@ int tvm_run(TVM *vm) {
             push(vm, v); break;
         }
         case OP_NEW_DICT: {
-            uint16_t k = rd_u16(c, &vm->pc);
+            uint16_t k = rd_u16(c, &pc);
             if (vm->sp < (size_t)k * 2) die(vm, "stack underflow");
             TDict *d = dict_new();
             uint16_t i;
@@ -3519,7 +3529,7 @@ int tvm_run(TVM *vm) {
             push(vm, mk_int((int64_t)k)); break;
         }
         case OP_PRINT: {
-            uint8_t k = c[vm->pc++];
+            uint8_t k = c[pc++];
             if (vm->sp < k) die(vm, "stack underflow");
             for (uint8_t i = 0; i < k; i++) {
                 if (i) putchar(' ');
@@ -3532,9 +3542,9 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_JMP: {
-            size_t jpc = vm->pc - 1;
-            int32_t rel = rd_i32(c, &vm->pc);
-            vm->pc = (size_t)((int64_t)vm->pc + rel);
+            size_t jpc = pc - 1;
+            int32_t rel = rd_i32(c, &pc);
+            pc = (size_t)((int64_t)pc + rel);
             if (rel < 0) {
                 if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
                 /* vòng lặp nóng ở top-level: JIT vùng vòng lặp (global ghi thẳng) */
@@ -3542,7 +3552,10 @@ int tvm_run(TVM *vm) {
                     TAttrIC *ic = &vm->prog->ic[jpc];
                     if (ic->kind == 0) { ic->kind = 6; ic->idx = 0; }
                     if (ic->kind == 6 && ic->idx >= 0 && ++ic->idx >= JIT_OSR_LOOPS) {
-                        int jr = t_jit_osr_main(vm, vm->pc, jpc + 5);
+                        int jr;
+                        SAVE_PC();
+                        jr = t_jit_osr_main(vm, pc, jpc + 5);
+                        LOAD_PC();
                         if (jr < 0) ic->idx = -1;            /* không JIT được: thôi */
                         else if (jr == 0) ic->idx = JIT_OSR_LOOPS / 2;
                         else ic->idx = 0;                    /* đã chạy; lần sau đếm lại */
@@ -3553,13 +3566,16 @@ int tvm_run(TVM *vm) {
                     TFrame *fr = &vm->frames[vm->nframes - 1];
                     if (fr->fn && !(fr->fn->jit_off & 2) && ++fr->fn->loops >= JIT_OSR_LOOPS) {
                         TVal rv;
-                        int jr = t_jit_osr(vm, fr->fn, fr->locals, vm->pc, &rv);
+                        int jr;
+                        SAVE_PC();
+                        jr = t_jit_osr(vm, fr->fn, fr->locals, pc, &rv);
                         if (jr == 1) {
                             do_return(vm, rv);
                             if (vm->nframes <= vm->stop_nf) return 0;
                             RELOAD_CODE();
                         }
-                        /* jr == 2: deopt, vm->pc + stack đã đặt lại -> chạy tiếp */
+                        LOAD_PC();
+                        /* jr == 2: deopt, pc + stack đã đặt lại -> chạy tiếp */
                     }
                 }
             }
@@ -3567,7 +3583,7 @@ int tvm_run(TVM *vm) {
         }
         case OP_JMPF: case OP_JMPT: {
             int is_t = (op == OP_JMPT);
-            int32_t rel = rd_i32(c, &vm->pc);
+            int32_t rel = rd_i32(c, &pc);
             TVal *tv = &vm->stack[vm->sp - 1];
             int t;
             if (tv->t == T_BOOL) { t = tv->u.b; vm->sp--; }
@@ -3577,34 +3593,38 @@ int tvm_run(TVM *vm) {
                 tval_free(&v);
             }
             if ((t && is_t) || (!t && !is_t))
-                vm->pc = (size_t)((int64_t)vm->pc + rel);
+                pc = (size_t)((int64_t)pc + rel);
             break;
         }
         case OP_CALL: {
-            uint8_t k = c[vm->pc++];
+            uint8_t k = c[pc++];
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
             if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
+            SAVE_PC();
             call_value(vm, k);
             RELOAD_CODE();
+            LOAD_PC();
             break;
         }
         case OP_CALLM: {
-            size_t at = vm->pc - 1;
-            uint8_t k = c[vm->pc++];
-            uint32_t len = rd_u32(c, &vm->pc);
-            const char *nm = (const char*)(c + vm->pc);
-            vm->pc += len;
+            size_t at = pc - 1;
+            uint8_t k = c[pc++];
+            uint32_t len = rd_u32(c, &pc);
+            const char *nm = (const char*)(c + pc);
+            pc += len;
             if (vm->sp < (size_t)k + 1) die(vm, "stack underflow");
             if (vm->root->gc_allocs >= GC_THRESHOLD) gc_collect(vm);
+            SAVE_PC();
             call_method(vm, k, nm, len, &vm->prog->ic[at]);
             RELOAD_CODE();
+            LOAD_PC();
             break;
         }
         case OP_SETATTR: {
-            size_t at = vm->pc - 1;
-            uint32_t len = rd_u32(c, &vm->pc);
-            const char *nm = (const char*)(c + vm->pc);
-            vm->pc += len;
+            size_t at = pc - 1;
+            uint32_t len = rd_u32(c, &pc);
+            const char *nm = (const char*)(c + pc);
+            pc += len;
             set_attr(vm, nm, len, &vm->prog->ic[at]);
             break;
         }
@@ -3614,10 +3634,11 @@ int tvm_run(TVM *vm) {
             do_return(vm, rv);
             if (vm->nframes <= vm->stop_nf) return 0;  /* hết nested call */
             RELOAD_CODE();
+            LOAD_PC();
             break;
         }
         case OP_LOAD: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             TFrame *fr = &vm->frames[vm->nframes - 1];
             if (s < fr->nlocals) {
                 TVal v = fr->locals[s];
@@ -3627,7 +3648,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_STORE: case OP_DECL: case OP_BIND: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             TFrame *fr = &vm->frames[vm->nframes - 1];
             TVal v = pop(vm);
             if (s < fr->nlocals && fr->locals[s].t <= T_FLOAT) { fr->locals[s] = v; break; }
@@ -3636,7 +3657,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_LOADG: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             if (s < vm->prog->nglobals) {
                 TVal v = vm->prog->globals[s];
                 if (v.t <= T_FLOAT) { push(vm, v); break; }
@@ -3645,7 +3666,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_STOREG: case OP_DECLG: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             TVal v = pop(vm);
             if (s < vm->prog->nglobals && vm->prog->globals[s].t <= T_FLOAT) {
                 vm->prog->globals[s] = v; break;
@@ -3654,10 +3675,10 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_MKFN: {
-            int32_t e = rd_i32(c, &vm->pc);
-            uint8_t na = c[vm->pc++];
-            uint16_t nl = rd_u16(c, &vm->pc);
-            uint16_t nu = rd_u16(c, &vm->pc);
+            int32_t e = rd_i32(c, &pc);
+            uint8_t na = c[pc++];
+            uint16_t nl = rd_u16(c, &pc);
+            uint16_t nu = rd_u16(c, &pc);
             TFn *f = (TFn*)malloc(sizeof(TFn));
             f->refc = 1; f->gc_mark = 0; f->entry = e; f->nargs = na; f->nlocals = nl;
             f->nupvals = nu; f->ncap = 0;
@@ -3669,7 +3690,7 @@ int tvm_run(TVM *vm) {
             push(vm, v); break;
         }
         case OP_CAPLOCAL: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             TFrame *fr = &vm->frames[vm->nframes - 1];
             if (vm->sp < 1 || vm->stack[vm->sp - 1].t != T_FN)
                 die(vm, "cap fn");
@@ -3695,7 +3716,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_CAPUP: {
-            uint16_t i = rd_u16(c, &vm->pc);
+            uint16_t i = rd_u16(c, &pc);
             TFrame *fr = &vm->frames[vm->nframes - 1];
             if (!fr->fn) die(vm, "capup outside");
             if (vm->sp < 1 || vm->stack[vm->sp - 1].t != T_FN)
@@ -3711,7 +3732,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_CAPG: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             if (s >= vm->prog->nglobals) die(vm, "bad global");
             if (vm->sp < 1 || vm->stack[vm->sp - 1].t != T_FN)
                 die(vm, "cap fn");
@@ -3735,7 +3756,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_BINDG: {
-            uint16_t s = rd_u16(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
             if (s >= vm->prog->nglobals) die(vm, "bad global");
             TVal v = pop(vm);
             tval_free(&vm->prog->globals[s]);
@@ -3743,7 +3764,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_LOADU: case OP_STOREU: {
-            uint16_t i = rd_u16(c, &vm->pc);
+            uint16_t i = rd_u16(c, &pc);
             TFrame *fr = &vm->frames[vm->nframes - 1];
             if (!fr->fn || i >= fr->fn->ncap) die(vm, "upval range");
             TVal *cell = &fr->fn->upvals[i];
@@ -3760,7 +3781,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_RANGE: {
-            uint8_t k = c[vm->pc++];
+            uint8_t k = c[pc++];
             TVal b = mk_nil(), a = mk_nil();
             if (k == 2) { b = pop(vm); a = pop(vm); }
             else if (k == 1) { a = pop(vm); }
@@ -3782,13 +3803,13 @@ int tvm_run(TVM *vm) {
             push(vm, v); break;
         }
         case OP_ATTR: {
-            uint32_t len = rd_u32(c, &vm->pc);
-            if (vm->pc + len > n) die(vm, "bad attr");
-            const char *nm = (const char*)(c + vm->pc);
-            vm->pc += len;
+            uint32_t len = rd_u32(c, &pc);
+            if (pc + len > n) die(vm, "bad attr");
+            const char *nm = (const char*)(c + pc);
+            pc += len;
             {
                 /* đường nhanh: field struct trúng inline cache (không phải module) */
-                TAttrIC *ic = &vm->prog->ic[vm->pc - len - 5];
+                TAttrIC *ic = &vm->prog->ic[pc - len - 5];
                 TVal *ov = &vm->stack[vm->sp - 1];
                 if (ic->kind == 1 && ov->t == T_DICT) {
                     TDict *d = ov->u.dict;
@@ -3816,7 +3837,7 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_TRY_PUSH: {
-            int32_t rel = rd_i32(c, &vm->pc);
+            int32_t rel = rd_i32(c, &pc);
             if (vm->nhandlers >= vm->hcap) {
                 vm->hcap *= 2;
                 vm->handlers = (THandler*)realloc(vm->handlers,
@@ -3825,12 +3846,13 @@ int tvm_run(TVM *vm) {
             }
             THandler *h = &vm->handlers[vm->nhandlers++];
             h->sp = vm->sp; h->nframes = vm->nframes;
-            h->pc = (size_t)((int64_t)vm->pc + rel);
+            h->pc = (size_t)((int64_t)pc + rel);
             h->stop_nf = vm->stop_nf;
             h->prog = vm->prog;
             if (setjmp(h->jb)) {
                 TVal v = mk_str(vm->errmsg);
                 RELOAD_CODE();
+                LOAD_PC();
                 push(vm, v);
             }
             break;
@@ -3868,8 +3890,8 @@ int tvm_run(TVM *vm) {
             push(vm, v); break;
         }
         case OP_INCB_L: case OP_INCB_G: {
-            uint16_t s = rd_u16(c, &vm->pc);
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
+            uint16_t s = rd_u16(c, &pc);
+            while (pc < n && c[pc] == OP_NOP) pc++;   /* đệm peephole */
             int isg = (op == OP_INCB_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3888,8 +3910,8 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_INC_L: case OP_INC_G: {
-            uint16_t s = rd_u16(c, &vm->pc);
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
+            uint16_t s = rd_u16(c, &pc);
+            while (pc < n && c[pc] == OP_NOP) pc++;   /* đệm peephole */
             int isg = (op == OP_INC_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3908,8 +3930,8 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_DEC_L: case OP_DEC_G: {
-            uint16_t s = rd_u16(c, &vm->pc);
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
+            uint16_t s = rd_u16(c, &pc);
+            while (pc < n && c[pc] == OP_NOP) pc++;   /* đệm peephole */
             int isg = (op == OP_DEC_G);
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
@@ -3928,10 +3950,10 @@ int tvm_run(TVM *vm) {
             break;
         }
         case OP_ADDI_L: case OP_ADDI_G: {
-            uint16_t s = rd_u16(c, &vm->pc);
-            int64_t k = rd_i64(c, &vm->pc);
+            uint16_t s = rd_u16(c, &pc);
+            int64_t k = rd_i64(c, &pc);
             int isg = (op == OP_ADDI_G);
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
+            while (pc < n && c[pc] == OP_NOP) pc++;   /* đệm peephole */
             {
                 TVal *p = isg ? (s < vm->prog->nglobals ? &vm->prog->globals[s] : NULL)
                               : (s < vm->frames[vm->nframes - 1].nlocals
@@ -3952,9 +3974,9 @@ int tvm_run(TVM *vm) {
             uint16_t ds, ss;
             int isg, bop;
             TVal a, b, r;
-            memcpy(&ds, c + vm->pc, 2); vm->pc += 2;
-            memcpy(&ss, c + vm->pc, 2); vm->pc += 2;
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;   /* đệm peephole */
+            memcpy(&ds, c + pc, 2); pc += 2;
+            memcpy(&ss, c + pc, 2); pc += 2;
+            while (pc < n && c[pc] == OP_NOP) pc++;   /* đệm peephole */
             isg = (op == OP_ADDS_G || op == OP_SUBS_G);
             bop = (op == OP_ADDS_L || op == OP_ADDS_G) ? OP_ADD : OP_SUB;
             {
@@ -3985,7 +4007,7 @@ int tvm_run(TVM *vm) {
         case OP_NOP:
             /* đệm của superop peephole (INC_L... thay 4 lệnh, phần dư là NOP; không đích
                nhảy nào rơi vào giữa): bỏ qua cả dải trong một lần dispatch */
-            while (vm->pc < n && c[vm->pc] == OP_NOP) vm->pc++;
+            while (pc < n && c[pc] == OP_NOP) pc++;
             break;
         case OP_HALT:
             if (vm->frames[vm->nframes - 1].is_mod) return 0;   /* hết top-level module */
