@@ -2,6 +2,7 @@
 VERSION = "1.0"
 mut COUNT = [0]
 mut LEVEL = 1
+let K = 5
 fn set_level(v):
     LEVEL = v
     return LEVEL

@@ -112,6 +112,5 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 | Biến `for` khai báo **sau** hàm thì closure không capture | `tests/hoist.t` khoá hành vi |
 | `==`/`!=` trên tensor so toàn bộ (bool) | so từng phần tử: `.eq()` / `.ne()`; `< > <= >=` là từng phần tử |
 | Tensor: view chỉ khi vùng chọn là **khối liền** (row-major) | `t[i]`, `t[a:b]`, `t[i, j:k]` là view; cột `t[:, j]`, bước `t[::2]`, `reshape`, `flatten`, `copy()` là bản sao |
-| `m.X = v` trên module của `load()` bỏ qua `mut` | field của bản ghi luôn ghi được (như struct) |
 | `mem()` trên `t.py`/`eval.t` trả `objs=0, gc=0` | chỉ `trun` có số liệu GC thật |
 | Thông điệp vài lỗi hiếm (vd unhashable key) khác chữ giữa runtime | output bình thường khớp từng byte |

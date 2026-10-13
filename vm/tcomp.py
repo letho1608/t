@@ -1626,14 +1626,17 @@ def line_table(c):
 
 
 def export_table(c):
-    """phần "EX01" sau LN01: u16 n + (u16 len + tên + u16 slot)* — global ở scope gốc
-    của main (bỏ tên ẩn chứa "$" và kiểu struct "X__type"); load() của VM dùng."""
-    ex = [(k, v) for k, v in c.main.scopes[0].m.items()
+    """phần "EX01" sau LN01: u16 n + (u16 len + tên + u16 slot + u8 mut)* — global ở
+    scope gốc của main (bỏ tên ẩn chứa "$" và kiểu struct "X__type"); load() của VM
+    dùng. mut = 0 với let/fn: `m.X = v` báo "X immutable (use mut)"."""
+    sc = c.main.scopes[0]
+    ex = [(k, v) for k, v in sc.m.items()
           if "$" not in k and not k.endswith("__type")]
     out = bytearray(b"EX01") + struct.pack("<H", len(ex))
     for k, v in ex:
         b = k.encode("utf-8")
-        out += struct.pack("<H", len(b)) + b + struct.pack("<H", v)
+        im = k in sc.imm or k in c.fn_names
+        out += struct.pack("<H", len(b)) + b + struct.pack("<HB", v, 0 if im else 1)
     return bytes(out)
 
 

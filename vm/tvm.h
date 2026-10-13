@@ -310,6 +310,7 @@ typedef struct TProg {
     uint16_t nexports;
     char **exnames;
     uint16_t *exslots;
+    uint8_t *exmut;         /* 1 = mut (ghi được qua m.X = v) */
     /* module nạp lúc chạy (load): đường dẫn, bản ghi export, danh sách (từ prog gốc) */
     char *path;
     TVal mod_rec;

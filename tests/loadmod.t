@@ -29,4 +29,16 @@ mut tot = 0
 for i in range(3000):
     tot += m.set_level(i) - m.LEVEL
 print(tot, m.LEVEL)
+# m.X = v tôn trọng mut: let/fn/struct báo lỗi như gán biến bất biến
+for nmx in ["K", "sq", "Pt", "VERSION"]:
+    try:
+        m[nmx] = 0
+        print(nmx, "ghi được")
+    except:
+        print(nmx, "->", err)
+try:
+    m.K = 1
+except:
+    print("m.K ->", err)
+print(m.K, m.sq(3))
 print("xong")

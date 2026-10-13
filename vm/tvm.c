@@ -587,6 +587,14 @@ static void mod_pull(TDict *d, size_t i) {
     tval_free(&d->vals[i]);
     d->vals[i] = v;
 }
+/* field i của bản ghi module là let/fn? -> ghi báo lỗi như gán biến bất biến */
+static int mod_ro(const TDict *d, size_t i, char *eb, size_t ebn) {
+    TProg *m = rec_mod(d);
+    if (!m || i >= m->nexports || i >= d->len || m->exmut[i]) return 0;
+    snprintf(eb, ebn, "%.*s immutable (use mut)",
+             (int)(d->keys[i].u.str.n > 60 ? 60 : d->keys[i].u.str.n), d->keys[i].u.str.s);
+    return 1;
+}
 static void mod_pull_all(TDict *d) {
     if (!rec_mod(d)) return;
     for (size_t i = 0; i < d->len; i++) mod_pull(d, i);
@@ -2291,13 +2299,15 @@ int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
             if (ok) {
                 p->exnames = (char**)calloc(ne ? ne : 1, sizeof(char*));
                 p->exslots = (uint16_t*)calloc(ne ? ne : 1, sizeof(uint16_t));
+                p->exmut = (uint8_t*)calloc(ne ? ne : 1, 1);
             }
             for (uint16_t i = 0; ok && i < ne; i++) {
                 uint16_t ln = 0;
                 ok = rd_exact(f, &ln, 2);
                 if (!ok) break;
                 p->exnames[i] = (char*)calloc((size_t)ln + 1, 1);
-                ok = rd_exact(f, p->exnames[i], ln) && rd_exact(f, &p->exslots[i], 2);
+                ok = rd_exact(f, p->exnames[i], ln) && rd_exact(f, &p->exslots[i], 2) &&
+                     rd_exact(f, &p->exmut[i], 1);
                 if (ok) p->nexports = (uint16_t)(i + 1);
                 else { free(p->exnames[i]); p->exnames[i] = NULL; }
             }
@@ -2314,8 +2324,8 @@ void tvm_prog_release(TProg *p) {
     free(p->lfiles); free(p->lpc); free(p->lline); free(p->lfile);
     p->lfiles = NULL; p->lpc = p->lline = NULL; p->lfile = NULL; p->nlfiles = 0; p->nlines = 0;
     for (uint16_t i = 0; i < p->nexports; i++) free(p->exnames[i]);
-    free(p->exnames); free(p->exslots);
-    p->exnames = NULL; p->exslots = NULL; p->nexports = 0;
+    free(p->exnames); free(p->exslots); free(p->exmut);
+    p->exnames = NULL; p->exslots = NULL; p->exmut = NULL; p->nexports = 0;
     free(p->path); p->path = NULL;
 }
 
@@ -2853,6 +2863,10 @@ static void set_attr(TVM *vm, const char *nm, size_t len, TAttrIC *ic) {
             snprintf(eb, sizeof(eb), "%.40s has no field %.*s", rec_name(d), (int)(len > 40 ? 40 : len), nm);
             tval_free(&v); tval_free(&o); die(vm, eb);
         }
+        {
+            char eb[128];
+            if (mod_ro(d, (size_t)fi, eb, sizeof(eb))) { tval_free(&v); tval_free(&o); die(vm, eb); }
+        }
         tval_free(&d->vals[fi]);
         d->vals[fi] = v;
         mod_push(d, (size_t)fi);
@@ -3230,6 +3244,12 @@ int tvm_run(TVM *vm) {
                              rec_name(cv.u.dict), b.s ? b.s : "?");
                     free(b.s);
                     tval_free(&v); tval_free(&ix); tval_free(&cv); die(vm, eb);
+                }
+                {
+                    char eb[128];
+                    if (mod_ro(cv.u.dict, (size_t)i, eb, sizeof(eb))) {
+                        tval_free(&v); tval_free(&ix); tval_free(&cv); die(vm, eb);
+                    }
                 }
                 tval_free(&cv.u.dict->vals[i]);
                 cv.u.dict->vals[i] = v;

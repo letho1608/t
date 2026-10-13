@@ -191,6 +191,8 @@ fn rec_f(o):
 fn rec_set(o, k, v):
     if not dict_has(o["f"], k):
         raise o["name"] + " has no field " + str(k)
+    if dict_has(o, "menv") and not dict_has(o["menv"]["mut"], k):
+        raise k + " immutable (use mut)"
     o["f"][k] = v
     if dict_has(o, "menv"):
         o["menv"]["slots"][k] = v

@@ -1603,7 +1603,9 @@ class ModFields:
     def __init__(self,env,keys): self.env=env; self.keys=keys
     def __contains__(self,k): return k in self.keys
     def __getitem__(self,k): return self.env.m[k]
-    def __setitem__(self,k,v): self.env.m[k]=v
+    def __setitem__(self,k,v):
+        if k not in self.env.mut: raise TError(f"{k} immutable (use mut)")
+        self.env.m[k]=v
     def items(self): return [(k,self.env.m[k]) for k in self.keys]
     def __eq__(self,o):
         if isinstance(o,ModFields): o=dict(o.items())

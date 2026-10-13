@@ -415,10 +415,11 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   (cột, bước ≠ 1, vùng rỗng) là bản sao. Phép toán luôn tạo tensor mới.
 - `load(tên)`: builtin mềm (NAT 51). Trả bản ghi kiểu `"module"` với field = global
   top-level của module (bỏ tên chứa `$` và `X__type`); đọc field = giá trị global
-  hiện tại, ghi field (`m.X = v`, `m["X"] = v`) = ghi global của module; nạp một
+  hiện tại, ghi field (`m.X = v`, `m["X"] = v`) = ghi global của module (global
+  `let`/`fn`/`struct` báo lỗi `X immutable (use mut)` như gán biến bất biến); nạp một
   lần theo đường dẫn, nạp vòng là lỗi. VM: `tên.t` mới hơn `tên.tb` thì tự chạy
   `trun tcomp.tb tên.t tên.tb`; lỗi biên dịch thành lỗi `load: tên.t: ...`. `.tb` kèm phần `"EX01"`
-  sau `LN01`: u16 n + (u16 len + tên + u16 slot)*. VM: mỗi hàm nhớ prog của nó,
+  sau `LN01`: u16 n + (u16 len + tên + u16 slot + u8 mut)*. VM: mỗi hàm nhớ prog của nó,
   gọi/return/try đổi prog hiện hành; global của module là gốc GC; JIT không gọi
   thẳng hàm thuộc prog khác.
 

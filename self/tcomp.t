@@ -2073,6 +2073,11 @@ fn build_from_cc(cc):
             out.append(ord(k[q:q + 1]))
         for b in be_bytes(cc["main"]["scopes"][0]["m"][k], 2):
             out.append(b)
+        # cờ mut: let/fn -> 0 (m.X = v báo "X immutable (use mut)")
+        if has_key(cc["main"]["scopes"][0]["imm"], k) or in_list(cc["fn_names"], k):
+            out.append(0)
+        else:
+            out.append(1)
     mut cs = []
     for b in out:
         cs.append(chr(b))
