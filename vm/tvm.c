@@ -2384,14 +2384,14 @@ static int compile_if_stale(const char *src, const char *out, char *msg, size_t 
    chạy top-level của nó một lần (cache theo đường dẫn) -> bản ghi kiểu "module"
    gồm các global top-level (giá trị lúc nạp xong). */
 static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
-    char path[1024], eb[1200];
+    char path[4200], eb[1200];
     TProg *root = vm->root;
     if (argc != 1 || a[0].t != T_STR) die(vm, "load(name str)");
     if (a[0].u.str.n > 900) die(vm, "load: tên quá dài");
     {
         /* thư mục hiện tại, rồi thư mục của chương trình chính; có tên.t mới hơn
            tên.tb (hoặc chưa có .tb) thì tự dịch trước */
-        char base[2][1024], src[1100];
+        char base[2][2048], src[4200];
         int nb = 0;
         snprintf(base[nb++], sizeof(base[0]), "%.*s", (int)a[0].u.str.n, a[0].u.str.s);
         if (root->path) {

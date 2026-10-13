@@ -3,6 +3,9 @@
  *   trun -d prog.tb            debugger từng lệnh
  *   trun                       REPL (nạp trepl.tb cạnh trun.exe, hoặc $TREPL)
  */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE      /* readlink */
+#endif
 #include "tvm.h"
 #include <stdio.h>
 #include <stdlib.h>
