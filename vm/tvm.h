@@ -380,6 +380,24 @@ int  t_jit_callees(TFn *fn, TFn ***out);   /* hàm mà code native giữ ref (GC
 int  t_jit_osr_main(TVM *vm, size_t header, size_t end);
 int  t_jit_root_fns(TFn ***out);           /* hàm mà code main giữ (gốc GC) */
 
+/* Helper cho JIT tạo/gán record + chuỗi (G6): code máy gọi trực tiếp, tự lo
+   refcount/GC (record mới refc=1 + gc_track; chuỗi so sánh không giữ ref). */
+enum { TJIT_TY_I = 1, TJIT_TY_F = 2, TJIT_TY_B = 3 };  /* khớp JT_I/F/B của jit_x64.c */
+TDict *tjit_rec_new(TDict *tp, int shape, int64_t *slots);
+const uint8_t *tjit_shape_fty(int shape);   /* bảng kiểu field theo shape (jit_x64.c) */
+int64_t tjit_str_eq(const TVal *a, const TVal *b, int m);
+void tjit_dec_dict(TDict *d);
+/* Helper cho JIT dict + chuỗi sở hữu được (G7): wrapper TVal* malloc (KHÔNG track
+   GC) — native tự dec đúng hạn theo luật ownership (entry-compare, POP, epilogue
+   RET, deopt move); orphan chờ GC chỉ đúng với dict (tracked). */
+TVal *tjit_str_of(int64_t bits, int ty);  /* ty 0=I,1=F,2=B,3=S,4=SN(nhả arg) */
+TVal *tjit_str_cat(const TVal *a, const TVal *b, int m);
+void tjit_dec_sval(TVal *w);              /* tval_free + free wrapper */
+void tjit_store_go(TVal *g, int64_t bits, int ty); /* write-through global mainmode */
+TDict *tjit_dict_new0(void);
+int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv); /* kv: b0=kstr, b[2:1]=vty */
+int tjit_dict_getD(TDict *d, int64_t kbits, int kstr, int64_t *out); /* 0=int,1=deopt,2=giữ default */
+
 /* Debugger (tdbg.c) */
 extern int tvm_dbg_on;
 void dbg_enable(void);

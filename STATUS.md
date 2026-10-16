@@ -1,9 +1,55 @@
-# Ngôn ngữ T — Báo cáo trạng thái v2.4 (2026-10-13)
+# Ngôn ngữ T — Báo cáo trạng thái v2.6 (2026-10-16)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`python tools/run_all.py` → ALL-GREEN** trên
-> Windows (MSVC 19.44) và Linux (gcc 13, Docker `gcc:13` + `python:3.12-slim`):
+> Windows (MSVC 19.44):
 > 7 bộ test + mọi `tests/*.t`; 4 runtime khớp từng byte; JIT x86-64 cả 2 ABI;
-> tensor n-chiều khớp numpy. (Các mục v2.0/v2.1 phía dưới giữ làm lịch sử.)
+> tensor n-chiều khớp numpy. (Linux gcc 13 re-verify bằng Docker khi cần.)
+
+## v2.6 — JIT dict + chuỗi sở hữu được (G7) + G11
+
+- Kiểu mới `JT_D`/`JT_DN` (dict mượn/mới), `JT_SN` (chuỗi mới, wrapper `TVal*`
+  malloc giữ 1 ref — KHÔNG track GC nên mọi đường đều phải dec đúng hạn).
+- `NEW_DICT {}` → helper `tjit_dict_new0` (tracked); `str(x)` → `tjit_str_of`
+  (dùng chung `fmt_str`, infallible); nối chuỗi `ADD` → `tjit_str_cat` (tự nhả
+  toán hạng owned trong helper theo mask, guard `a == b` chống double-free).
+- `d[k]`/`d[k] = v` đoán int: 1 lần tìm (`tjit_dict_getD`/`tjit_dict_set`),
+  thiếu key/khác int → deopt (interpreter báo lỗi/dùng default đúng ngữ nghĩa);
+  `d.get(k, dflt-int)` tương tự; `SETIDX` OSR-only (ghi nhìn thấy được).
+- Kỷ luật ownership: `LOAD` owned → alias mượn; `STORE`/`POP`/điều kiện/hậu
+  `CALL` nhả temp owned; `STORE` dùng entry-compare (`[r12+8i]`) để lần ghi đầu
+  giữ ref interpreter; epilogue `RET` nhả local chuỗi chết (trừ khi trả `JT_S`
+  có thể alias); callee mượn (chuẩn hoá owned → borrowed, `SN` cấm làm đối số
+  gọi hàm để tránh alias-UAF).
+- Hạn chế có chủ đích (rớt về interpreter, vẫn đúng): dict literal k>0, đọc
+  non-int, method dict khác `get`, key float/bool, `STORE` chuỗi mượn, `if`
+  trên dict, method ghi field gọi từ vòng nóng.
+- `tests/jitdict.t` mới (counter, key int, IDX/get/deopt, concat, self-concat,
+  entry trả chuỗi, dict global mainmode, unhashable): 6 OSR + 1 entry + 1 main;
+  bench dict 0.44× → 0.37× CPython (`--runs 3`).
+- Ba bug G7 đã bắt bằng test đọc giá trị (không chỉ len): emitter `mov_r8_rax`
+  sai REX, `get` ghi default đè receiver, `str_eq` trùng tên 2 đối/3 đối.
+
+## v2.5 — JIT tạo/gán record + chuỗi hằng (G6 một phần)
+
+- `__new(Kiểu, v...)` (field toàn số) biên dịch sang helper `tjit_rec_new`:
+  record mới sở hữu được (`JT_RN0+shape`, refc=1 + `gc_track`); callee luôn mượn
+  đối số (chuẩn hoá owned → borrowed khi tra spec).
+- `SETATTR` field số trong vùng OSR (guard tag cũ cùng kiểu → không refcount);
+  `STORE` record mới vào local (nhả ref cũ nếu chắc chắn native-owned, cấm
+  `nodec` cho local từng nâng borrowed → owned); `POP` record mới nhả ref;
+  `return` record (owned move, mượn retain); deopt đồng bộ local owned (move),
+  borrowed-record (free + retain), stack (move/retain theo sở hữu).
+- Chuỗi hằng `PUSH_STR` mượn cache (không inc, cache sống suốt native);
+  `==`/`!=` qua `tjit_str_eq`, `len()`, điều kiện `if s`/`while s`; global chuỗi
+  đọc kèm guard tag (đổi kiểu → deopt, `tests/jitrec.t`: `mode = 7` vẫn đúng).
+- `tests/jitrec.t` thêm khối G6 (constructor nóng, SETATTR, POP-owned,
+  return-record, chuỗi, deopt-move khi OOB): JIT 5 entry/3 OSR → 10 entry/7 OSR;
+  `bench/method.t` 0.48× → 0.22× CPython. GC dày (`TVM_GCTHRESH=1`) khớp byte.
+- Còn lại ở interpreter: tạo dict, nối chuỗi, `s[i]`, `d[k]`/`d[k] = v`, method
+  dict/list/str, closure/`try` trong vùng nóng, method ghi field gọi từ vòng
+  nóng (entry thuần không side-effect nên `p.move(1)` trong loop vẫn interpreted).
+
+## v2.4 — view theo bước, module tôn trọng mut, tối ưu toàn diện
 
 ## v2.4 — view theo bước, module tôn trọng mut, tối ưu toàn diện
 

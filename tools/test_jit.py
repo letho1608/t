@@ -1,6 +1,6 @@
 """test_jit.py — kiểm JIT x86-64 (v2.2): đúng + thực sự kích hoạt + nhanh hơn.
 Chạy: python tools/test_jit.py   (in JIT-ALL-GREEN khi xanh)
-  1. tests/jit2.t, jit.t, jitlist.t, jitmain.t, jitrec.t: output VM có JIT == VM tắt JIT (TVM_NOJIT) == t.py
+  1. tests/jit2.t, jit.t, jitlist.t, jitmain.t, jitrec.t, jitdict.t: output VM có JIT == VM tắt JIT (TVM_NOJIT) == t.py
   2. log TVM_JITLOG: đủ số hàm được biên dịch entry và vùng OSR
   3. fib(27) và vòng lặp float: JIT nhanh hơn interpreter ít nhất 3 lần
 """
@@ -45,7 +45,7 @@ def main():
         print("SKIP (thiếu %s)" % TRUN)
         return 0
     tmp = tempfile.mkdtemp(prefix="tjit")
-    for name in ("jit2", "jit", "jitlist", "jitmain", "jitrec"):
+    for name in ("jit2", "jit", "jitlist", "jitmain", "jitrec", "jitdict"):
         src = os.path.join(ROOT, "tests", name + ".t")
         tb = os.path.join(tmp, name + ".tb")
         check("compile " + name, compile_t(src, tb))
@@ -76,6 +76,10 @@ def main():
             log = rj.stderr.decode("utf-8", "replace")
             nm = log.count("main ok")
             check("jitmain: >= 5 vòng lặp top-level JIT (có %d)" % nm, nm >= 5, log)
+        if name == "jitdict":
+            log = rj.stderr.decode("utf-8", "replace")
+            no = log.count("osr ok")
+            check("jitdict: >= 3 vùng OSR dict/chuỗi (có %d)" % no, no >= 3, log)
 
     # tốc độ: JIT phải nhanh hơn rõ rệt
     prog = os.path.join(tmp, "speed.t")

@@ -1,6 +1,6 @@
 # T — trạng thái & việc còn thiếu
 
-Cập nhật: 2026-10-13 · phiên bản v2.2 · mọi mục ✅ đã verify bằng `python tools/run_all.py`
+Cập nhật: 2026-10-16 · phiên bản v2.6 · mọi mục ✅ đã verify bằng `python tools/run_all.py`
 (Windows MSVC + Linux gcc 13 qua Docker).
 
 Tóm một dòng: ngôn ngữ T có 4 runtime khớp từng byte, compiler thuần T tự biên dịch
@@ -89,6 +89,21 @@ compiler Python không đổi tên hàm lồng trong hàm của module; thông �
 "unhashable dict key" khác nhau giữa VM và t.py; `vm/build.bat` lưu xuống dòng LF
 khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `.gitattributes`).
 
+### 1.4c v2.5 (2026-10-16)
+
+| # | Hạng mục | Trạng thái |
+|---|---|---|
+| G6 | JIT tạo record (`P(x, y)` field số qua `__new`), gán field số (`SETATTR`, OSR), chuỗi hằng (`PUSH_STR` + `==`/`!=`/`len()`/`if s`) | ✅ record mượn + sở hữu được, refcount trong code máy; deopt move/retain; `tests/jitrec.t` 10 entry/7 OSR; bench method 0.48× → 0.22× CPython |
+| — | `trun --version` 2.5; fix JITLOAD đọc `s->st[d]` ngoài biên; guard `__new` loại kiểu module; NULL-check shape cho gcc | ✅ `run_all` xanh Win + Linux, `TVM_GCTHRESH=1` khớp byte |
+
+### 1.4d v2.6 (2026-10-16)
+
+| # | Hạng mục | Trạng thái |
+|---|---|---|
+| G7 | JIT dict + chuỗi sở hữu được: `NEW_DICT {}` → `JT_DN`, `str()` → `JT_SN`, nối chuỗi `ADD`, `d[k]`/`d[k] = v` đoán int (1 lần tìm, deopt khi thiếu/khác int), `d.get(k, dflt)` | ✅ helper C + refcount trong code máy (entry-compare, POP/RET-decs, deopt move/retain); `tests/jitdict.t` mới (6 OSR); bench dict 0.43× → 0.37× CPython |
+| G11 | `STORE` chuỗi mới vào local + `return` chuỗi tạo mới trong native | ✅ (làm cùng G7: `JT_SN` + epilogue RET decs; wrapper malloc không track GC nên dec đúng hạn mọi đường) |
+| — | Lỗi phát hiện khi làm G7 (đều đã sửa, có test đọc giá trị bắt cả 3): emitter `mov_r8_rax` sai byte REX (`4C`→`49`, r8 không bao giờ được ghi); codegen `d.get` ghi default đè slot receiver trước khi gọi helper; `tjit_str_eq` 2 bản trùng tên | ✅ |
+
 ### 1.5 Sửa lỗi có sẵn phát hiện khi làm v2.2
 
 - Inliner dùng chung biến tạm → `add(1, add(2, 3))` ra 7 (compiler T); thân inline dùng chung
@@ -104,11 +119,20 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 
 ---
 
-## 2. Còn có thể làm tiếp
+## 2. Còn có thể làm tiếp (ưu tiên từ trên xuống)
 
 | # | Hạng mục | Ghi chú |
 |---|---|---|
-| G6 | JIT tạo / gán record, chuỗi, dict (cần đếm tham chiếu trong code máy) | hiện chạy ở interpreter |
+| G8 | `SETATTR` trong entry khi receiver là local owned mới tạo trong cùng hàm (không alias ngoài) | hiện `p.move(1)` trong vòng nóng kéo cả vòng về interpreter |
+| G9 | Đoán `retty` thêm shape record của hàm đang biên dịch (hiện chỉ thử I/F/B) | hàm đệ quy trả record (`build(n)`) luôn rớt về interpreter |
+| G10 | Tag ownership ở runtime thay cho `nodec` tĩnh (ghi đè local upgraded vẫn `dec` được) | hiện mỗi vòng orphan ~200 byte chờ GC khi local từng nâng borrowed → owned |
+| G12 | Dict literal `{"k": v}` (k>0), method dict (`keys`/`values`/`has`/`remove`), key float/bool, chuỗi làm đối số gọi hàm T, `STORE` chuỗi mượn, điều kiện dict | rớt về interpreter (đúng), chờ G8/G10 hoặc khi cần |
+
+Đã xong: G6, G7, G11 (bảng trên). Còn lại ở interpreter: `s[i]`, method dict/list/str
+(khác `get`/`len`), closure/`try` trong vùng nóng.
+
+Đã xong: G6 (bảng trên). Còn lại ở interpreter sau G6: tạo dict, nối chuỗi, `s[i]`,
+`d[k]`/`d[k] = v`, method dict/list/str, closure/`try` trong vùng nóng.
 
 ## 3. Giới hạn đã biết (không phải bug)
 

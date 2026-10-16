@@ -20,7 +20,7 @@
 #define TRUN_SEP '/'
 #endif
 
-#define TRUN_VERSION "2.4"
+#define TRUN_VERSION "2.6"
 
 static int run_tb(const char *path, char **xargv, int xargc, int dbg) {
     TProg p; memset(&p, 0, sizeof(p));

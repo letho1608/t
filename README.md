@@ -1,4 +1,4 @@
-# T language — README (v2.4: JIT x86-64 + tensor n-chiều (view như numpy) + autograd)
+# T language — README (v2.6: JIT dict + chuỗi sở hữu được + tensor n-chiều (view như numpy) + autograd)
 
 Ngôn ngữ T: cú pháp Python/Go-like (thụt lề), tensor là kiểu nguyên thủy,
 AI-first. Bốn runtime cho output **giống nhau từng byte**:
@@ -132,7 +132,17 @@ Biên dịch **cả hàm số học** sang mã máy: int/float/bool, biến cụ
 ghi phần tử list** (`xs[i]`, `xs[i] = v`, `xs.len`) với kiểu phần tử được đoán và
 guard từng lần truy cập, **đọc field số của struct** (`p.x`) và **gọi method struct**
 (`p.norm2()`, phân giải tĩnh theo kiểu) trên record mượn (đối số / global), guard
-kiểu struct + tag field. Tạo / gán record vẫn chạy ở interpreter.
+kiểu struct + tag field. **Tạo record** (`P(x, y)` qua `__new`, field toàn số),
+**gán field số** (`p.x = v`, `p.x += ...`, chỉ trong vùng OSR), **chuỗi hằng**
+(`PUSH_STR` mượn cache, `==`/`!=`, `len()`, điều kiện `if s`), đọc global chuỗi
+có guard tag. Đếm tham chiếu trong code máy cho record mới (tạo refc=1, nhả khi
+ghi đè local/POP, move khi deopt/return); chuỗi hằng mượn nên không cần inc.
+**Dict + chuỗi sở hữu được** (G7): `{}`, `str(x)`, nối chuỗi, `d[k]`/`d[k] = v`
+đoán int, `d.get(k, dflt-int)`, qua helper C + kỷ luật ownership (borrowed mượn,
+owned move/dec đúng hạn; wrapper chuỗi không track GC). Chưa JIT: dict literal
+k>0, đọc non-int, method dict khác `get`, key float/bool, chuỗi làm đối số gọi
+hàm, `STORE` chuỗi mượn, `s[i]`, closure, `try`, `load()` — vẫn chạy ở
+interpreter (đúng, chỉ chậm hơn).
 
 - Kích hoạt: hàm được gọi ≥ 50 lần (đặc hoá theo kiểu đối số, tối đa 4 bản mỗi
   hàm), hoặc **OSR** khi
@@ -156,8 +166,8 @@ kiểu struct + tag field. Tạo / gán record vẫn chạy ở interpreter.
 | vòng lặp trong hàm 10M | 0.054s | 0.974s | 0.06× |
 | mandelbrot (float) | 0.043s | 0.496s | 0.09× |
 | sàng nguyên tố 2M (list) | 0.129s | 0.625s | 0.21× |
-| dict + chuỗi | 0.100s | 0.208s | 0.48× |
-| struct + method | 0.108s | 0.223s | 0.48× |
+| dict + chuỗi (JIT dict G7) | 0.062s | 0.170s | 0.37× |
+| struct + method (JIT tạo record, G6) | 0.046s | 0.212s | 0.22× |
 | matmul 120×120 ×20 | 0.029s | 2.858s (list Python) | 0.01× |
 | MLP 512×16→64→1, 300 bước | 0.246s | 0.947s (**numpy**) | 0.26× |
 
@@ -185,7 +195,7 @@ semver + ghi `CHANGELOG.md` (lấy từ git log nếu có).
 
 ## Kiểm thử
 
-`python tools/run_all.py` chạy: `test_ops` (đồng bộ 74 opcode + 51 native giữa
+`python tools/run_all.py` chạy: `test_ops` (đồng bộ 74 opcode + 52 native giữa
 `vm/tvm.h`, `vm/tcomp.py`, `self/tcomp.t`), `test_tcomp_t` (25 suite: compiler T
 == t.py, fixed point, compiler Python == compiler T từng byte, eval.t trên VM,
 GC quét dày, UTF-8), `test_dbg`, `test_lsp`, `test_tpkg`, `test_jit`,

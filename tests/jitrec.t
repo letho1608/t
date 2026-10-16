@@ -81,3 +81,114 @@ try:
     print(n2(c))
 except:
     print("lỗi kiểu")
+
+# G6: JIT tạo record (__new), gán field số (SETATTR), chuỗi hằng
+struct V:
+    x, y
+    fn norm2(self):
+        return self.x * self.x + self.y * self.y
+    fn moved(self, dx):
+        mut r = V(self.x + dx, self.y)
+        return r
+
+fn runv(n):
+    mut acc = V(0, 0)
+    d = V(1, 2)
+    mut s = 0
+    mut i = 0
+    while i < n:
+        acc = acc.moved(1)
+        s = s + acc.norm2()
+        i = i + 1
+    return s
+
+print(runv(3000))
+assert runv(10) == 385
+# gán field số trong vòng nóng + đọc lại
+fn bump(p, n):
+    mut i = 0
+    while i < n:
+        p.x = p.x + 1
+        p.y = i * 2
+        i = i + 1
+    return p.x + p.y
+
+qv = V(0, 0)
+print(bump(qv, 5000))
+assert qv.x == 5000
+assert qv.y == 9998
+# constructor làm câu lệnh (tạo rồi bỏ) + hàm trả record mới
+fn mkv(i):
+    return V(i, i * 3)
+
+fn usemk(n):
+    mut s = 0
+    mut i = 0
+    while i < n:
+        V(0, 0)
+        r = mkv(i)
+        s = s + r.x + r.y
+        i = i + 1
+    return s
+
+print(usemk(3000))
+assert usemk(5) == 40
+# chuỗi hằng: ==, !=, len, điều kiện, tham số
+fn sclass(s):
+    if s == "quit":
+        return 0 - 1
+    if s != "go":
+        return 0
+    return len(s)
+
+for i in range(200):
+    sclass("go")
+    sclass("quit")
+    sclass("xx")
+print(sclass("go"), sclass("quit"), sclass("xx"), sclass(""))
+assert sclass("go") == 2
+assert sclass("") == 0
+# global chuỗi đổi kiểu sau khi JIT -> deopt vẫn đúng
+mut mode = "go"
+fn chk(n):
+    mut c = 0
+    mut i = 0
+    while i < n:
+        if mode == "go":
+            c = c + 1
+        i = i + 1
+    return c
+
+for i in range(200):
+    chk(10)
+print(chk(3000))
+mode = 7
+print(chk(100))
+# deopt giữa vòng OSR khi local đang giữ record mới
+fn fill2(n):
+    mut a2 = P(1, 2)
+    mut xs2 = [0] * 2003
+    mut i = 0
+    while i < n:
+        a2 = P(i, i + 1)
+        xs2[i] = i * 2
+        i = i + 1
+    return a2.x
+
+try:
+    fill2(2005)
+except "assign range":
+    print("bắt:", err)
+print(fill2(10))
+# hàm nhiều câu lệnh trả record mới: gọi nóng từ interpreter qua t_jit_call
+fn fresh(i):
+    mut t = i * 2
+    return V(t, t + 1)
+
+for i in range(100):
+    fresh(i)
+print(fresh(7).x, fresh(7).y)
+assert fresh(7).x == 14
+assert fresh(3).y == 7
+print(map(fresh, [1, 2, 3]))
+print("JITREC2 OK")

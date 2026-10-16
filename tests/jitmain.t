@@ -76,4 +76,25 @@ mut gs = 0
 for f in fns:
     gs += f()
 print(gs)
+# G6: record ở top-level — gán field (SETATTR) + tạo mới ghi thẳng global
+struct MP:
+    x, y
+
+mut mp = MP(0, 0)
+mut mps = 0
+for i in range(5000):
+    mp.x = i
+    mp.y = i * 2
+    mps = mps + mp.x
+print(mp.x, mp.y, mps)
+assert mp.x == 4999
+assert mps == 12497500
+mut mq = MP(1, 1)
+mut mqt = 0
+for i in range(3000):
+    mq = MP(i, i + 1)
+    mqt = mqt + mq.x
+print(mq.x, mq.y, mqt)
+assert mq.x == 2999
+assert mqt == 4498500
 print("JITMAIN OK")

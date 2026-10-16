@@ -1839,6 +1839,112 @@ static void n___new(TVM *vm, TVal *a, int argc, TVal *r) {
     if (cur_vm) gc_track(cur_vm, T_DICT, d);
     r->t = T_DICT; r->u.dict = d;
 }
+/* JIT tạo record field số (G6): như n___new nhưng giá trị là bit thô trong slots
+   của frame native (không qua TVal stack). tp đã guard đúng con trỏ ở code máy;
+   field toàn số nên không cần retain. Trả record sở hữu được (refc=1). */
+TDict *tjit_rec_new(TDict *tp, int shape, int64_t *slots) {
+    const uint8_t *fty = tjit_shape_fty(shape);
+    size_t n = tp->fields->len;
+    TDict *d = (TDict*)pk_alloc(sizeof(TDict));
+    d->refc = 1; d->gc_mark = 0; d->gc_node = NULL;
+    d->len = n; d->cap = n;
+    d->keys = tp->fields->items;
+    d->vals = (TVal*)malloc((n ? n : 1) * sizeof(TVal));
+    if (!d->vals) exit(1);
+    for (size_t i = 0; i < n; i++) {
+        if (fty[i] == TJIT_TY_F) { d->vals[i].t = T_FLOAT; memcpy(&d->vals[i].u.f, &slots[i], 8); }
+        else if (fty[i] == TJIT_TY_B) { d->vals[i].t = T_BOOL; d->vals[i].u.b = (int)(slots[i] & 1); }
+        else { d->vals[i].t = T_INT; d->vals[i].u.i = slots[i]; }
+    }
+    d->kind = DK_REC; d->rname = NULL; d->fields = NULL;
+    d->idx = NULL; d->icap = 0; d->mod = NULL;
+    d->meths = tp; tp->refc++;
+    if (cur_vm) gc_track(cur_vm, T_DICT, d);
+    return d;
+}
+/* JIT nhả record sở hữu được (POP owned / ghi đè local owned). */
+void tjit_dec_dict(TDict *d) { TVal v; v.t = T_DICT; v.u.dict = d; tval_free(&v); }
+/* JIT chuỗi sở hữu được + dict (G7). Wrapper TVal* malloc giữ đúng 1 ref chuỗi;
+   native dec đúng hạn (entry-compare khi STORE, POP, epilogue RET, deopt move)
+   nên wrapper không bao giờ orphan ngoài đường abort (hiếm, tắt sau 64 lần). */
+TVal *tjit_str_of(int64_t bits, int ty) {
+    TVal a, *w = (TVal*)malloc(sizeof(TVal));
+    if (!w) exit(1);
+    if (ty == 1) { a.t = T_FLOAT; memcpy(&a.u.f, &bits, 8); }
+    else if (ty == 2) { a.t = T_BOOL; a.u.b = (int)(bits & 1); }
+    else if (ty >= 3) a = *(const TVal*)(intptr_t)bits;
+    else { a.t = T_INT; a.u.i = bits; }
+    *w = fmt_str(&a);
+    if (ty == 4) { tval_free((TVal*)(intptr_t)bits); free((void*)(intptr_t)bits); }
+    return w;
+}
+/* nối chuỗi; m: bit0 nhả a, bit1 nhả b (wrapper đã tiêu thụ) */
+TVal *tjit_str_cat(const TVal *a, const TVal *b, int m) {
+    size_t n = a->u.str.n + b->u.str.n;
+    TVal v = mk_str_uninit(n), *w = (TVal*)malloc(sizeof(TVal));
+    if (!w) exit(1);
+    if (a->u.str.n) memcpy(v.u.str.s, a->u.str.s, a->u.str.n);
+    if (b->u.str.n) memcpy(v.u.str.s + a->u.str.n, b->u.str.s, b->u.str.n);
+    if (a == b) m = 0;   /* cùng wrapper qua 2 alias (vd k + k): 0 ref giữ */
+    if (m & 1) { tval_free((TVal*)a); free((void*)a); }
+    if (m & 2) { tval_free((TVal*)b); free((void*)b); }
+    *w = v;
+    return w;
+}
+/* so chuỗi; m như trên (giữ ngữ nghĩa pop/free toán hạng của interpreter) */
+int64_t tjit_str_eq(const TVal *a, const TVal *b, int m) {
+    int64_t r = (a->u.str.n == b->u.str.n) &&
+                (a->u.str.n == 0 || memcmp(a->u.str.s, b->u.str.s, a->u.str.n) == 0);
+    if (a == b) m = 0;
+    if (m & 1) { tval_free((TVal*)a); free((void*)a); }
+    if (m & 2) { tval_free((TVal*)b); free((void*)b); }
+    return r;
+}
+void tjit_dec_sval(TVal *w) { tval_free(w); free(w); }
+TDict *tjit_dict_new0(void) { return dict_new(); }
+/* ghi thẳng global trong mainmode (G7): nhả cũ rồi move/retain mới (ty 0=SN,1=DN,2=D) */
+void tjit_store_go(TVal *g, int64_t bits, int ty) {
+    if (ty == 0) {
+        TVal *w = (TVal*)(intptr_t)bits;
+        tval_free(g); *g = *w; free(w);
+    } else {
+        TDict *d = (TDict*)(intptr_t)bits;
+        tval_free(g);
+        if (ty == 2) d->refc++;
+        g->t = T_DICT; g->u.dict = d;
+    }
+}
+/* gán dict (nhận ownership như OP_SETIDX): giữ key (retain) + val rồi dict_set.
+   key int/str luôn hashable nên không lỗi (giữ ngữ nghĩa die() cho interpreter). */
+int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv) {
+    TVal k, v;
+    if (kv & 1) { k = *(const TVal*)(intptr_t)kbits; tval_retain(&k); }
+    else { k.t = T_INT; k.u.i = kbits; }
+    switch ((kv >> 1) & 15) {
+    case 1: v.t = T_FLOAT; memcpy(&v.u.f, &vbits, 8); break;
+    case 2: v.t = T_BOOL; v.u.b = (int)(vbits & 1); break;
+    case 3: case 4:   /* chuỗi mượn/mới: TVal* */
+        v = *(const TVal*)(intptr_t)vbits; tval_retain(&v); break;
+    case 5: case 6:   /* dict/record mượn/mới: TDict* */
+    case 7: case 8:
+        v.t = T_DICT; v.u.dict = (TDict*)(intptr_t)vbits; tval_retain(&v); break;
+    default: v.t = T_INT; v.u.i = vbits; break;
+    }
+    dict_set(d, k, v);
+    return 0;
+}
+/* get có default (ghi sẵn default vào *out trước khi gọi): 0 = int thấy (đã ghi),
+   1 = deopt (khác int), 2 = thiếu key (giữ default, không deopt). Một lần tìm. */
+int tjit_dict_getD(TDict *d, int64_t kbits, int kstr, int64_t *out) {
+    TVal k; int i;
+    if (kstr) k = *(const TVal*)(intptr_t)kbits;
+    else { k.t = T_INT; k.u.i = kbits; }
+    i = dict_find(d, &k);
+    if (i < 0) return 2;
+    if (d->vals[i].t != T_INT) return 1;
+    *out = d->vals[i].u.i;
+    return 0;
+}
 /* gọi method của record: obj = list [fn, self] */
 static void m_call_bound(TVM *vm, TVal *a, int argc, TVal *r) {
     TVal fn = a[0].u.list->items[0];
