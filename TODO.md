@@ -113,15 +113,25 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 
 Ghi chú đo (best of 5, `--runs 5`, 3M vòng cho micro):
 
-| micro | JIT trước | JIT sau | NOJIT |
-|---|---|---|---|
-| `mb_str` (str+nối) | 0.361s | 0.137s | 0.453s |
-| `mb_dictint` (dict key int) | 0.148s | 0.149s | 0.387s |
-| `bench/dict.t` | 0.067s | 0.041s | 0.078s |
+| micro | JIT trước | JIT sau pool | +cache str(int) | +fusion hint | +key_eq_fast | NOJIT |
+|---|---|---|---|---|---|---|
+| `mb_str` (str+nối) | 0.361s | 0.137s | 0.099s | — | — | 0.453s |
+| `mb_dictint` (dict key int get+set) | 0.148s | 0.149s | — | 0.108s | **0.092s** | 0.387s |
+| `mb_get` (chỉ `d.get`) | — | — | — | — | **0.053s** | 0.261s |
+| `mb_set` (chỉ `d[k]=v`) | — | — | — | — | **0.094s** | 0.233s |
+| `bench/dict.t` | 0.067s | 0.041s | 0.033s | 0.032s | **0.031s** | 0.067s |
 
-Còn có thể làm tiếp (chưa làm, cần đo trước): inline `d.get`+`SETIDX` (counter
-pattern) bỏ 1 lần tìm; cache `str(i)` nguyên nhỏ (giảm nữa `mk_str_uninit` trong
-`str_of`); dict-index probe trong code máy cho key int.
+Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
+
+1. **Cache `str(i)` số nhỏ** (`mk_str_int`, cache `-256..2047` ref vĩnh viễn như
+   `str1_cache`): `mb_str` 0.137 → 0.099s, `dict.t` 0.041 → 0.033s.
+2. **Counter fusion qua hint index** (`tjit_last_i` + validate trong `tjit_dict_set`,
+   emitter luôn đặt bit5): `mb_dictint` 0.143 → 0.108s. Sai hint chỉ chậm, không
+   bao giờ sai kết quả (validate `i < len && keys[i] == k`; keys không bao giờ trùng).
+3. **`key_eq_fast`** — so sánh khoá int/str inline né C-call `tval_eq` trong
+   `dict_find` (lợi cả interpreter lẫn JIT, thay cho probe int-key viết tay trong
+   asm vốn chỉ lợi JIT và nhiều rủi ro): `mb_get` 0.077 → 0.053s, `mb_dictint`
+   0.108 → 0.092s, `mb_set` 0.107 → 0.094s, `dict.t` → 0.031s.
 
 ### 1.5 Sửa lỗi có sẵn phát hiện khi làm v2.2
 

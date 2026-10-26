@@ -1459,7 +1459,7 @@ static int gen_body(JC *j) {
                     int vty = vt == JT_F ? 1 : vt == JT_B ? 2 : vt == JT_S ? 3 :
                               vt == JT_SN ? 4 : vt == JT_D ? 5 : vt == JT_DN ? 6 :
                               is_rec_t(vt) ? 7 : is_own_rec_t(vt) ? 8 : 0;
-                    int kv = (kstr ? 1 : 0) | (vty << 1);
+                    int kv = (kstr ? 1 : 0) | (vty << 1) | 32;   /* bit5: hint index (counter fusion) */
                     ld_rax(j, L);
                     if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
                     ld_rax(j, X);

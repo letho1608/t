@@ -31,6 +31,17 @@
 - Tối ưu v2.6.1: wrapper `TVal*` của chuỗi JIT (`str()`/nối/so sánh/`dec`) chuyển
   từ `malloc`/`free` CRT sang pool 32 byte (`tjit_wrap_free`) — bottleneck đo được
   trên `mb_str` (3M vòng: 0.36s → 0.14s); bench dict 0.37× → **0.23×** CPython.
+- Ba tối ưu v2.6.1 tiếp theo (ALL-GREEN, GC dày khớp):
+  1. **Cache `str(i)` số nhỏ** (`mk_str_int`, cache `-256..2047`, ref vĩnh viễn):
+     `mb_str` 0.14 → 0.099s, `dict.t` 0.041 → 0.033s.
+  2. **Counter fusion** — `tjit_dict_getD` ghi index thấy được (`tjit_last_i`),
+     `tjit_dict_set` nhận hint (bit5 `kv`) và VALIDATE (`i < len && keys[i]==k`)
+     rồi ghi thẳng; sai hint fallback `dict_find` (chậm, không bao giờ sai kết quả):
+     `mb_dictint` 0.143 → 0.108s.
+  3. **`key_eq_fast`** — so sánh khoá int/str inline né C-call `tval_eq` trong
+     `dict_find` (lợi cả interpreter lẫn JIT, thay cho probe int-key viết tay trong
+     asm chỉ lợi JIT + nhiều rủi ro): `mb_get` 0.077 → 0.053s, `mb_dictint`
+     0.108 → 0.092s, `dict.t` → 0.031s (JIT ~2.2× / 7.8× CPython dict/loop).
 
 ## v2.5 — JIT tạo/gán record + chuỗi hằng (G6 một phần)
 

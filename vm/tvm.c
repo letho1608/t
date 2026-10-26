@@ -787,6 +787,27 @@ static void fmt_double(double x, char *tmp, size_t n) {
         if (strtod(tmp, NULL) == x) return;
     }
 }
+/* chuỗi cho số nguyên nhỏ (str(i) trong vòng lặp thường lặp lại): cache giữ
+   1 ref vĩnh viễn như str1_cache — bỏ cấp phát cho 0..2047 và -1..-256;
+   ngoài vùng vẫn mk_str_n bình thường. Chuỗi bất biến nên dùng chung an toàn. */
+#define SIC_LO (-256)
+#define SIC_HI 2048
+static TVal str_int_cache[SIC_HI - SIC_LO];
+static TVal mk_str_int(int64_t i) {
+    if (i >= SIC_LO && i < SIC_HI) {
+        TVal *c = &str_int_cache[i - SIC_LO];
+        if (c->t != T_STR) {
+            char tmp[24];
+            *c = mk_str_n(tmp, fmt_i64(i, tmp));   /* cache giữ ref trả về */
+        }
+        (*c->u.str.refc)++;
+        return *c;
+    }
+    {
+        char tmp[24];
+        return mk_str_n(tmp, fmt_i64(i, tmp));
+    }
+}
 
 /* fmt động (cho str()/raise/print/dict) */
 typedef struct { char *s; size_t n, cap; } Buf;
@@ -857,9 +878,9 @@ void tval_fmt(const TVal *v, char *buf, size_t n) {
 }
 static TVal fmt_str(const TVal *v) {
     if (v->t == T_STR) { TVal r = *v; (*r.u.str.refc)++; return r; }   /* chuỗi bất biến: dùng chung */
-    if (v->t == T_INT || v->t == T_FLOAT) {
+    if (v->t == T_INT) return mk_str_int(v->u.i);
+    if (v->t == T_FLOAT) {
         char tmp[64];
-        if (v->t == T_INT) return mk_str_n(tmp, fmt_i64(v->u.i, tmp));
         fmt_double(v->u.f, tmp, sizeof(tmp));
         return mk_str(tmp);
     }
@@ -930,12 +951,26 @@ static void dict_index_build(TDict *d) {
     for (size_t i = 0; i < cap; i++) d->idx[i] = -1;
     for (size_t i = 0; i < d->len; i++) dict_index_put(d, i);
 }
+/* so sánh khoá dict inline (né C-call tval_eq cho int/str — 2 khoá phổ biến
+   nhất; chỉ hợp khi k đã norm_ty, không CELL/UNDEF). Trả 1 = bằng, 0 = khác,
+   -1 = không chắc (phải gọi tval_eq đầy đủ). */
+static int key_eq_fast(const TVal *a, const TVal *b) {
+    if (a->t == T_INT && b->t == T_INT) return a->u.i == b->u.i;
+    if (a->t == T_STR && b->t == T_STR)
+        return a->u.str.n == b->u.str.n &&
+               memcmp(a->u.str.s, b->u.str.s, a->u.str.n) == 0;
+    return -1;
+}
+static int key_eq(const TVal *a, const TVal *b) {
+    int r = key_eq_fast(a, b);
+    return r >= 0 ? r : tval_eq(a, b);
+}
 static int dict_find(TDict *d, const TVal *k) {
     size_t i;
     if (!d->idx) {
         if (d->len < DICT_SMALL) {
             for (i = 0; i < d->len; i++)
-                if (tval_eq(&d->keys[i], k)) return (int)i;
+                if (key_eq(&d->keys[i], k)) return (int)i;
             return -1;
         }
         dict_index_build(d);
@@ -943,7 +978,7 @@ static int dict_find(TDict *d, const TVal *k) {
     {
         size_t m = d->icap - 1, h = (size_t)tval_hash(k) & m;
         while (d->idx[h] != -1) {
-            if (tval_eq(&d->keys[d->idx[h]], k)) return d->idx[h];
+            if (key_eq(&d->keys[d->idx[h]], k)) return d->idx[h];
             h = (h + 1) & m;
         }
     }
@@ -1921,10 +1956,19 @@ void tjit_store_go(TVal *g, int64_t bits, int ty) {
         g->t = T_DICT; g->u.dict = d;
     }
 }
+/* "counter fusion": index thấy được ở lần tìm trước (getD/OP_IDX) — SETIDX sau
+   đó dùng lại được vì helper luôn VALIDATE (i < len && keys[i] == k). Keys
+   không bao giờ trùng (dict_set chỉ chèn khi find < 0, del_at giữ duy nhất) nên
+   keys[i] == k => đúng entry của k, kể cả dict bị xoá/đổi giữa chừng: sai hint
+   chỉ là chậm (rớt về dict_find), không bao giờ sai kết quả. */
+static int tjit_last_i = -1;
 /* gán dict (nhận ownership như OP_SETIDX): giữ key (retain) + val rồi dict_set.
-   key int/str luôn hashable nên không lỗi (giữ ngữ nghĩa die() cho interpreter). */
+   key int/str luôn hashable nên không lỗi (giữ ngữ nghĩa die() cho interpreter).
+   kv bit5 = dùng index tìm được ở lần find trước (counter fusion): validate
+   i < len && keys[i] == k, sai thì fallback dict_find — không bao giờ sai kết quả. */
 int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv) {
     TVal k, v;
+    int hint = (kv & 32) ? tjit_last_i : -1;
     if (kv & 1) { k = *(const TVal*)(intptr_t)kbits; tval_retain(&k); }
     else { k.t = T_INT; k.u.i = kbits; }
     switch ((kv >> 1) & 15) {
@@ -1936,6 +1980,12 @@ int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv) {
     case 7: case 8:
         v.t = T_DICT; v.u.dict = (TDict*)(intptr_t)vbits; tval_retain(&v); break;
     default: v.t = T_INT; v.u.i = vbits; break;
+    }
+    if (hint >= 0 && (size_t)hint < d->len && tval_eq(&d->keys[hint], &k)) {
+        tval_free(&k);                    /* key đã có trong dict (như dict_set) */
+        tval_free(&d->vals[hint]);
+        d->vals[hint] = v;
+        return 0;
     }
     dict_set(d, k, v);
     return 0;
@@ -1950,6 +2000,7 @@ int tjit_dict_getD(TDict *d, int64_t kbits, int kstr, int64_t *out) {
     if (i < 0) return 2;
     if (d->vals[i].t != T_INT) return 1;
     *out = d->vals[i].u.i;
+    tjit_last_i = i;
     return 0;
 }
 /* gọi method của record: obj = list [fn, self] */
