@@ -393,6 +393,7 @@ void tjit_dec_dict(TDict *d);
 TVal *tjit_str_of(int64_t bits, int ty);  /* ty 0=I,1=F,2=B,3=S,4=SN(nhả arg) */
 TVal *tjit_str_cat(const TVal *a, const TVal *b, int m);
 void tjit_dec_sval(TVal *w);              /* tval_free + free wrapper */
+void tjit_wrap_free(TVal *w);             /* nhả wrapper TVal* (pool 32 byte) */
 void tjit_store_go(TVal *g, int64_t bits, int ty); /* write-through global mainmode */
 TDict *tjit_dict_new0(void);
 int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv); /* kv: b0=kstr, b[2:1]=vty */

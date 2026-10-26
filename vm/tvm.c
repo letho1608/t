@@ -1867,27 +1867,34 @@ void tjit_dec_dict(TDict *d) { TVal v; v.t = T_DICT; v.u.dict = d; tval_free(&v)
 /* JIT chuỗi sở hữu được + dict (G7). Wrapper TVal* malloc giữ đúng 1 ref chuỗi;
    native dec đúng hạn (entry-compare khi STORE, POP, epilogue RET, deopt move)
    nên wrapper không bao giờ orphan ngoài đường abort (hiếm, tắt sau 64 lần). */
-TVal *tjit_str_of(int64_t bits, int ty) {
-    TVal a, *w = (TVal*)malloc(sizeof(TVal));
+/* wrapper TVal* lấy từ pool 32 byte: đường nóng JIT (str()/nối/so sánh) cấp nhả
+   wrapper mỗi vòng lặp — malloc/free của CRT (nhất là Windows) đắt hơn free-list
+   nhiều. Mọi wrapper đều đúng sizeof(TVal) nên nhả phải qua tjit_wrap_free. */
+static TVal *wrap_new(void) {
+    TVal *w = (TVal*)pk_alloc(sizeof(TVal));
     if (!w) exit(1);
+    return w;
+}
+void tjit_wrap_free(TVal *w) { pk_free(w, sizeof(TVal)); }
+TVal *tjit_str_of(int64_t bits, int ty) {
+    TVal a, *w = wrap_new();
     if (ty == 1) { a.t = T_FLOAT; memcpy(&a.u.f, &bits, 8); }
     else if (ty == 2) { a.t = T_BOOL; a.u.b = (int)(bits & 1); }
     else if (ty >= 3) a = *(const TVal*)(intptr_t)bits;
     else { a.t = T_INT; a.u.i = bits; }
     *w = fmt_str(&a);
-    if (ty == 4) { tval_free((TVal*)(intptr_t)bits); free((void*)(intptr_t)bits); }
+    if (ty == 4) { tval_free((TVal*)(intptr_t)bits); tjit_wrap_free((TVal*)(intptr_t)bits); }
     return w;
 }
 /* nối chuỗi; m: bit0 nhả a, bit1 nhả b (wrapper đã tiêu thụ) */
 TVal *tjit_str_cat(const TVal *a, const TVal *b, int m) {
     size_t n = a->u.str.n + b->u.str.n;
-    TVal v = mk_str_uninit(n), *w = (TVal*)malloc(sizeof(TVal));
-    if (!w) exit(1);
+    TVal v = mk_str_uninit(n), *w = wrap_new();
     if (a->u.str.n) memcpy(v.u.str.s, a->u.str.s, a->u.str.n);
     if (b->u.str.n) memcpy(v.u.str.s + a->u.str.n, b->u.str.s, b->u.str.n);
     if (a == b) m = 0;   /* cùng wrapper qua 2 alias (vd k + k): 0 ref giữ */
-    if (m & 1) { tval_free((TVal*)a); free((void*)a); }
-    if (m & 2) { tval_free((TVal*)b); free((void*)b); }
+    if (m & 1) { tval_free((TVal*)a); tjit_wrap_free((TVal*)a); }
+    if (m & 2) { tval_free((TVal*)b); tjit_wrap_free((TVal*)b); }
     *w = v;
     return w;
 }
@@ -1896,17 +1903,17 @@ int64_t tjit_str_eq(const TVal *a, const TVal *b, int m) {
     int64_t r = (a->u.str.n == b->u.str.n) &&
                 (a->u.str.n == 0 || memcmp(a->u.str.s, b->u.str.s, a->u.str.n) == 0);
     if (a == b) m = 0;
-    if (m & 1) { tval_free((TVal*)a); free((void*)a); }
-    if (m & 2) { tval_free((TVal*)b); free((void*)b); }
+    if (m & 1) { tval_free((TVal*)a); tjit_wrap_free((TVal*)a); }
+    if (m & 2) { tval_free((TVal*)b); tjit_wrap_free((TVal*)b); }
     return r;
 }
-void tjit_dec_sval(TVal *w) { tval_free(w); free(w); }
+void tjit_dec_sval(TVal *w) { tval_free(w); tjit_wrap_free(w); }
 TDict *tjit_dict_new0(void) { return dict_new(); }
 /* ghi thẳng global trong mainmode (G7): nhả cũ rồi move/retain mới (ty 0=SN,1=DN,2=D) */
 void tjit_store_go(TVal *g, int64_t bits, int ty) {
     if (ty == 0) {
         TVal *w = (TVal*)(intptr_t)bits;
-        tval_free(g); *g = *w; free(w);
+        tval_free(g); *g = *w; tjit_wrap_free(w);
     } else {
         TDict *d = (TDict*)(intptr_t)bits;
         tval_free(g);

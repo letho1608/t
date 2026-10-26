@@ -2021,7 +2021,7 @@ static int to_ret(uint8_t ty, int64_t r, TVal *ret) {
     if (ty == JT_I) { ret->t = T_INT; ret->u.i = r; }
     else if (ty == JT_F) { ret->t = T_FLOAT; memcpy(&ret->u.f, &r, 8); }
     else if (ty == JT_S) { *ret = *(const TVal *)(intptr_t)r; tval_retain(ret); }
-    else if (ty == JT_SN) { *ret = *(TVal *)(intptr_t)r; free((void *)(intptr_t)r); }
+    else if (ty == JT_SN) { *ret = *(TVal *)(intptr_t)r; tjit_wrap_free((TVal *)(intptr_t)r); }
     else if (is_rec_t(ty)) {
         ret->t = T_DICT; ret->u.dict = (TDict *)(intptr_t)r; tval_retain(ret);
     }
@@ -2053,7 +2053,7 @@ static TVal bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
     else if (ty == JT_F) { v.t = T_FLOAT; memcpy(&v.u.f, &x, 8); }
     else if (ty == JT_B) { v.t = T_BOOL; v.u.b = (int)(x & 1); }
     else if (ty == JT_S) { v = *(const TVal *)(intptr_t)x; tval_retain(&v); }
-    else if (ty == JT_SN) { v = *(TVal *)(intptr_t)x; free((void *)(intptr_t)x); }
+    else if (ty == JT_SN) { v = *(TVal *)(intptr_t)x; tjit_wrap_free((TVal *)(intptr_t)x); }
     else if (is_list_t(ty)) { v.t = T_LIST; v.u.list = (TList *)(intptr_t)x; tval_retain(&v); }
     else if (is_rec_t(ty)) { v.t = T_DICT; v.u.dict = (TDict *)(intptr_t)x; tval_retain(&v); }
     else if (is_own_rec_t(ty)) { v.t = T_DICT; v.u.dict = (TDict *)(intptr_t)x; }

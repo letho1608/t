@@ -28,6 +28,9 @@
   bench dict 0.44× → 0.37× CPython (`--runs 3`).
 - Ba bug G7 đã bắt bằng test đọc giá trị (không chỉ len): emitter `mov_r8_rax`
   sai REX, `get` ghi default đè receiver, `str_eq` trùng tên 2 đối/3 đối.
+- Tối ưu v2.6.1: wrapper `TVal*` của chuỗi JIT (`str()`/nối/so sánh/`dec`) chuyển
+  từ `malloc`/`free` CRT sang pool 32 byte (`tjit_wrap_free`) — bottleneck đo được
+  trên `mb_str` (3M vòng: 0.36s → 0.14s); bench dict 0.37× → **0.23×** CPython.
 
 ## v2.5 — JIT tạo/gán record + chuỗi hằng (G6 một phần)
 

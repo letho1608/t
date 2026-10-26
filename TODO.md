@@ -104,6 +104,25 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 | G11 | `STORE` chuỗi mới vào local + `return` chuỗi tạo mới trong native | ✅ (làm cùng G7: `JT_SN` + epilogue RET decs; wrapper malloc không track GC nên dec đúng hạn mọi đường) |
 | — | Lỗi phát hiện khi làm G7 (đều đã sửa, có test đọc giá trị bắt cả 3): emitter `mov_r8_rax` sai byte REX (`4C`→`49`, r8 không bao giờ được ghi); codegen `d.get` ghi default đè slot receiver trước khi gọi helper; `tjit_str_eq` 2 bản trùng tên | ✅ |
 
+### 1.4e v2.6.1 (2026-10-27) — tối ưu wrapper chuỗi JIT
+
+| # | Hạng mục | Trạng thái |
+|---|---|---|
+| — | Bottleneck G7 đo được: mỗi `str()`/nối chuỗi trong vòng JIT cấp phát wrapper `TVal*` bằng `malloc`/`free` CRT (Windows heap đắt) — `mb_str` 3M vòng chỉ hơn interpreter 1.31×; dict-int đã 2.70× nên chắc chắn lỗi ở chuỗi | ✅ đổi toàn bộ wrapper sang pool 32 byte (`pk_alloc`/`pk_free`, thêm `tjit_wrap_free`); wrapper hằng số `OP_PUSH_STR` (sống vĩnh viễn) giữ `malloc` |
+| — | Sau tối ưu: `mb_str` 1.31× → **3.31×**, bench dict **0.37× → 0.23×** CPython (0.067s → 0.041s), method 0.041 → 0.037s; GC dày (`TVM_GCTHRESH=1/3`) khớp; ALL-GREEN Windows MSVC | ✅ |
+
+Ghi chú đo (best of 5, `--runs 5`, 3M vòng cho micro):
+
+| micro | JIT trước | JIT sau | NOJIT |
+|---|---|---|---|
+| `mb_str` (str+nối) | 0.361s | 0.137s | 0.453s |
+| `mb_dictint` (dict key int) | 0.148s | 0.149s | 0.387s |
+| `bench/dict.t` | 0.067s | 0.041s | 0.078s |
+
+Còn có thể làm tiếp (chưa làm, cần đo trước): inline `d.get`+`SETIDX` (counter
+pattern) bỏ 1 lần tìm; cache `str(i)` nguyên nhỏ (giảm nữa `mk_str_uninit` trong
+`str_of`); dict-index probe trong code máy cho key int.
+
 ### 1.5 Sửa lỗi có sẵn phát hiện khi làm v2.2
 
 - Inliner dùng chung biến tạm → `add(1, add(2, 3))` ra 7 (compiler T); thân inline dùng chung
@@ -130,9 +149,6 @@ khiến cmd.exe đọc lệch các dòng có chữ UTF-8 (đã chuyển CRLF + `
 
 Đã xong: G6, G7, G11 (bảng trên). Còn lại ở interpreter: `s[i]`, method dict/list/str
 (khác `get`/`len`), closure/`try` trong vùng nóng.
-
-Đã xong: G6 (bảng trên). Còn lại ở interpreter sau G6: tạo dict, nối chuỗi, `s[i]`,
-`d[k]`/`d[k] = v`, method dict/list/str, closure/`try` trong vùng nóng.
 
 ## 3. Giới hạn đã biết (không phải bug)
 
