@@ -273,7 +273,7 @@ def install_name(tp, depname, spec, lock):
     url = reg_file_url(reg, e["file"])
     if e.get("sha16"):
         print(f"[tpm] {want} {e.get('version')} (sha {e['sha16']})")
-    install_url(tp, depname, url, lock)
+    install_url(tp, depname, url, lock, want_sha=e.get("sha16"))
     lock[depname]["version"] = e.get("version")
     lock[depname]["registry"] = reg
 
@@ -301,15 +301,28 @@ def check_dep_module(dst, depname):
         fail(f"dep {depname}: thiếu {depname}.t (quy ước import) trong {dst}")
 
 
-def install_url(tp, depname, url, lock):
+def install_url(tp, depname, url, lock, want_sha=None):
     dst = os.path.join(tp, depname)
     print(f"[tpm] fetch {url}")
     data, sha = fetch_bytes(url)
+    if want_sha and sha != want_sha:
+        fail(f"{depname}: sha16 {sha} != khai báo {want_sha} — gói không khớp index")
     unpack_into(dst, data)
     check_dep_module(dst, depname)
     main = dep_main(dst, depname)
     lock[depname] = {"url": url, "sha16": sha, "main": main}
     print(f"[tpm] install {depname} <- {url} (sha {sha})")
+
+
+def _safe_out(dst, rel):
+    """Đường dẫn bung zip phải nằm trong dst: chặn ../ và tên tuyệt đối (zip-slip)."""
+    if rel.startswith("/") or rel.startswith("\\") or ":" in rel.split("/")[0]:
+        fail(f"zip entry là đường dẫn tuyệt đối: {rel}")
+    out = os.path.realpath(os.path.join(dst, rel.replace("\\", "/")))
+    base = os.path.realpath(dst)
+    if out != base and not out.startswith(base + os.sep):
+        fail(f"zip entry thoát thư mục đích: {rel}")
+    return out
 
 
 def unpack_into(dst, data):
@@ -332,7 +345,7 @@ def unpack_into(dst, data):
                     rel = n[len(top):]
                     if not rel:
                         continue
-                    out = os.path.join(dst, rel)
+                    out = _safe_out(dst, rel)
                     if n.endswith("/"):
                         os.makedirs(out, exist_ok=True)
                     else:
@@ -340,7 +353,14 @@ def unpack_into(dst, data):
                         with z.open(n) as src, open(out, "wb") as f:
                             shutil.copyfileobj(src, f)
             else:
-                z.extractall(dst)
+                for n in names:
+                    out = _safe_out(dst, n)
+                    if n.endswith("/"):
+                        os.makedirs(out, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(out) or dst, exist_ok=True)
+                        with z.open(n) as src, open(out, "wb") as f:
+                            shutil.copyfileobj(src, f)
     finally:
         if os.path.isfile(tmp):
             os.remove(tmp)
@@ -517,7 +537,14 @@ def main():
             f.write(data)
         try:
             with zipfile.ZipFile(tmp) as z:
-                z.extractall(d)
+                for n in z.namelist():
+                    out = _safe_out(d, n)
+                    if n.endswith("/"):
+                        os.makedirs(out, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(out) or d, exist_ok=True)
+                        with z.open(n) as src, open(out, "wb") as f:
+                            shutil.copyfileobj(src, f)
         finally:
             os.remove(tmp)
         print(f"[tpm] fetch {url} -> {d} "

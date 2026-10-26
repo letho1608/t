@@ -73,7 +73,12 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_PUT(self):
-        if Handler.token and self.headers.get("X-Token") != Handler.token:
+        if not Handler.token:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"PUT tat: khong co TPKG_TOKEN")
+            return
+        if self.headers.get("X-Token") != Handler.token:
             self.send_response(403)
             self.end_headers()
             return
@@ -83,8 +88,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         data = self.rfile.read(length)
-        name = (self.headers.get("X-Name") or "").strip().replace("/", "")
-        if not name.endswith(".tpkg") or not name:
+        name = os.path.basename((self.headers.get("X-Name") or "").strip().replace("\\", "/"))
+        if not name.endswith(".tpkg") or not name or name.startswith("."):
             self.send_response(400)
             self.end_headers()
             return
@@ -102,10 +107,12 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "tpkgs-reg")
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
-    token = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("TPKG_TOKEN", "")
+    token = os.environ.get("TPKG_TOKEN") or (sys.argv[3] if len(sys.argv) > 3 else "")
     os.makedirs(root, exist_ok=True)
     pkgs = build_index(root)
     print(f"[reg] {len(pkgs)} pkgs <- {root} (index.json)")
+    if not token:
+        print("[reg] CẢNH BÁO: khong co TPKG_TOKEN — PUT bi tat (chi GET duoc)")
     Handler.token = token
 
     def factory(*a, **k):

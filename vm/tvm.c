@@ -2673,6 +2673,19 @@ static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
     TProg *root = vm->root;
     if (argc != 1 || a[0].t != T_STR) die(vm, "load(name str)");
     if (a[0].u.str.n > 900) die(vm, "load: tên quá dài");
+    /* validate tên module: chỉ ký tự an toàn cho tên file — chặn shell metachar
+       (" ; & | ` $ \\n ...) tránh command injection qua system() trong compile_if_stale */
+    {
+        const char *s = a[0].u.str.s;
+        size_t n = a[0].u.str.n;
+        for (size_t i = 0; i < n; i++) {
+            char c = s[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+                  c == '.' || c == '/' || c == '\\'))
+                die(vm, "load: tên module chứa ký tự không hợp lệ");
+        }
+    }
     {
         /* thư mục hiện tại, rồi thư mục của chương trình chính; có tên.t mới hơn
            tên.tb (hoặc chưa có .tb) thì tự dịch trước */
