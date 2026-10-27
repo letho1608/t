@@ -15,12 +15,22 @@
 #include <windows.h>
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #else
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/wait.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#endif
+
+#ifdef _WIN32
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL __thread
 #endif
 
 /* Vòng lặp interpreter có setjmp/longjmp (try/except). GCC >= 12 (mingw-w64)
@@ -35,12 +45,12 @@
 #define FRAME_INIT 64
 #define HAND_INIT 16
 
-static jmp_buf top_jb;
+static THREAD_LOCAL jmp_buf top_jb;
 static int ten_eq(const TTensor *a, const TTensor *b);
-static int in_top;
+static THREAD_LOCAL int in_top;
 static void free_frame(TVM *vm);
 static TFrame *push_frame(TVM *vm);
-static TVM *cur_vm;   /* VM đang chạy (GC track dùng; đơn luồng) */
+static THREAD_LOCAL TVM *cur_vm;   /* VM đang chạy (GC track dùng) */
 static void gc_track(TVM *vm, int type, void *ptr);
 static void gc_collect(TVM *vm);
 
@@ -84,7 +94,7 @@ static void die(TVM *vm, const char *msg) {
    không trả lại hệ điều hành (dùng lại cho lần cấp sau). */
 #define PK_MAX 256
 typedef struct PkFree { struct PkFree *next; } PkFree;
-static PkFree *pk_list[PK_MAX / 16 + 1];
+static THREAD_LOCAL PkFree *pk_list[PK_MAX / 16 + 1];
 static void *pk_alloc(size_t sz) {
     size_t c = (sz + 15) >> 4;
     PkFree *p;
@@ -551,9 +561,9 @@ void tval_retain(TVal *v) {
    kích thước; dùng lại buffer vừa nhả tránh cấp phát + page fault mỗi phép toán */
 #define TBUF_MIN 1024
 #define TBUF_SLOTS 16
-static double *tbuf_p[TBUF_SLOTS];
-static size_t tbuf_n[TBUF_SLOTS];
-static int tbuf_cnt;
+static THREAD_LOCAL double *tbuf_p[TBUF_SLOTS];
+static THREAD_LOCAL size_t tbuf_n[TBUF_SLOTS];
+static THREAD_LOCAL int tbuf_cnt;
 static double *tbuf_get(size_t n) {
     if (n >= TBUF_MIN)
         for (int i = tbuf_cnt - 1; i >= 0; i--)
@@ -1992,7 +2002,7 @@ void tjit_store_go(TVal *g, int64_t bits, int ty) {
    không bao giờ trùng (dict_set chỉ chèn khi find < 0, del_at giữ duy nhất) nên
    keys[i] == k => đúng entry của k, kể cả dict bị xoá/đổi giữa chừng: sai hint
    chỉ là chậm (rớt về dict_find), không bao giờ sai kết quả. */
-static int tjit_last_i = -1;
+static THREAD_LOCAL int tjit_last_i = -1;
 /* gán dict (nhận ownership như OP_SETIDX): giữ key (retain) + val rồi dict_set.
    key int/str luôn hashable nên không lỗi (giữ ngữ nghĩa die() cho interpreter).
    kv bit5 = dùng index tìm được ở lần find trước (counter fusion): validate
@@ -3529,6 +3539,1013 @@ static void sys_exit(TVM *vm, TVal *a, int argc, TVal *r) {
     fflush(stdout); fflush(stderr);
     exit(code);
 }
+
+/* ========================================================================= */
+/* Memory-Mapped I/O (mmap) & Zero-Copy Tensor Storage                       */
+/* ========================================================================= */
+
+#define MAX_MMAPS 64
+typedef struct {
+    int in_use;
+    char *data;
+    size_t size;
+#ifdef _WIN32
+    HANDLE hFile;
+    HANDLE hMap;
+#else
+    int fd;
+#endif
+} TMMapSlot;
+
+static TMMapSlot g_mmaps[MAX_MMAPS];
+
+static void sys_mmap_open(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "mmap_open(path: str)");
+    int slot = -1;
+    for (int i = 0; i < MAX_MMAPS; i++) {
+        if (!g_mmaps[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) die(vm, "mmap_open: too many open mmap files");
+#ifdef _WIN32
+    HANDLE hFile = CreateFileA(a[0].u.str.s, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) die(vm, "mmap_open: cannot open file");
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(hFile, &sz)) { CloseHandle(hFile); die(vm, "mmap_open: cannot get file size"); }
+    if (sz.QuadPart == 0) { CloseHandle(hFile); die(vm, "mmap_open: file is empty"); }
+    HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMap) { CloseHandle(hFile); die(vm, "mmap_open: CreateFileMapping failed"); }
+    void *ptr = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!ptr) { CloseHandle(hMap); CloseHandle(hFile); die(vm, "mmap_open: MapViewOfFile failed"); }
+    g_mmaps[slot].in_use = 1;
+    g_mmaps[slot].data = (char*)ptr;
+    g_mmaps[slot].size = (size_t)sz.QuadPart;
+    g_mmaps[slot].hFile = hFile;
+    g_mmaps[slot].hMap = hMap;
+#else
+    int fd = open(a[0].u.str.s, O_RDONLY);
+    if (fd < 0) die(vm, "mmap_open: cannot open file");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size == 0) { close(fd); die(vm, "mmap_open: cannot stat or file is empty"); }
+    void *ptr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED) { close(fd); die(vm, "mmap_open: mmap failed"); }
+    g_mmaps[slot].in_use = 1;
+    g_mmaps[slot].data = (char*)ptr;
+    g_mmaps[slot].size = (size_t)st.st_size;
+    g_mmaps[slot].fd = fd;
+#endif
+    *r = mk_int(slot);
+}
+
+static void sys_mmap_close(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mmap_close(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) {
+        *r = mk_bool(0);
+        return;
+    }
+#ifdef _WIN32
+    UnmapViewOfFile(g_mmaps[slot].data);
+    CloseHandle(g_mmaps[slot].hMap);
+    CloseHandle(g_mmaps[slot].hFile);
+#else
+    munmap(g_mmaps[slot].data, g_mmaps[slot].size);
+    close(g_mmaps[slot].fd);
+#endif
+    g_mmaps[slot].in_use = 0;
+    g_mmaps[slot].data = NULL;
+    g_mmaps[slot].size = 0;
+    *r = mk_bool(1);
+}
+
+static void sys_mmap_size(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mmap_size(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap_size: invalid mmap id");
+    *r = mk_int((int64_t)g_mmaps[slot].size);
+}
+
+static void sys_mmap_read_bytes(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT || a[2].t != T_INT)
+        die(vm, "mmap_read_bytes(id, offset, len)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    size_t len = (size_t)a[2].u.i;
+    if (off + len > g_mmaps[slot].size || off + len < off) die(vm, "mmap: out of bounds");
+    *r = mk_str_n(g_mmaps[slot].data + off, len);
+}
+
+static void sys_mmap_read_u8(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_u8(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 1 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    *r = mk_int((uint8_t)g_mmaps[slot].data[off]);
+}
+
+static void sys_mmap_read_u16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_u16(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 2 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    const uint8_t *p = (const uint8_t*)g_mmaps[slot].data + off;
+    uint16_t v = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    *r = mk_int(v);
+}
+
+static void sys_mmap_read_u32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_u32(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 4 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    const uint8_t *p = (const uint8_t*)g_mmaps[slot].data + off;
+    uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    *r = mk_int((int64_t)v);
+}
+
+static void sys_mmap_read_u64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_u64(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 8 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    uint64_t v = 0;
+    memcpy(&v, g_mmaps[slot].data + off, 8);
+    *r = mk_int((int64_t)v);
+}
+
+static void sys_mmap_read_i32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_i32(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 4 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    int32_t v = 0;
+    memcpy(&v, g_mmaps[slot].data + off, 4);
+    *r = mk_int((int64_t)v);
+}
+
+static void sys_mmap_read_i64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_i64(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 8 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    int64_t v = 0;
+    memcpy(&v, g_mmaps[slot].data + off, 8);
+    *r = mk_int(v);
+}
+
+static void sys_mmap_read_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_f32(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 4 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    float f = 0.0f;
+    memcpy(&f, g_mmaps[slot].data + off, 4);
+    *r = mk_float((double)f);
+}
+
+static void sys_mmap_read_f64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_read_f64(id, off)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    if (off + 8 > g_mmaps[slot].size) die(vm, "mmap: out of bounds");
+    double d = 0.0;
+    memcpy(&d, g_mmaps[slot].data + off, 8);
+    *r = mk_float(d);
+}
+
+/* ========================================================================= */
+/* Quantization / Dequantization kernels (FP16, Q4_0, Q8_0)                  */
+/* ========================================================================= */
+
+static inline double fp16_to_double(uint16_t h) {
+    int sign = (h >> 15) & 1;
+    int exp = (h >> 10) & 0x1f;
+    int mant = h & 0x3ff;
+    if (exp == 0) {
+        if (mant == 0) return sign ? -0.0 : 0.0;
+        return (sign ? -1.0 : 1.0) * ldexp((double)mant, -24);
+    } else if (exp == 31) {
+        if (mant == 0) return sign ? -HUGE_VAL : HUGE_VAL;
+        return (double)NAN;
+    }
+    return (sign ? -1.0 : 1.0) * ldexp((double)(mant | 0x400), exp - 25);
+}
+
+static inline uint16_t double_to_fp16(double d) {
+    union { double f; uint64_t u; } u;
+    u.f = d;
+    uint32_t sign = (uint32_t)((u.u >> 63) & 1);
+    int exp = (int)((u.u >> 52) & 0x7ff);
+    uint64_t mant = u.u & 0x000fffffffffffffULL;
+    if (exp == 0) {
+        return (uint16_t)(sign << 15);
+    } else if (exp == 0x7ff) {
+        if (mant == 0) return (uint16_t)((sign << 15) | 0x7c00);
+        return (uint16_t)((sign << 15) | 0x7e00);
+    }
+    int new_exp = exp - 1023 + 15;
+    if (new_exp >= 31) {
+        return (uint16_t)((sign << 15) | 0x7c00);
+    } else if (new_exp <= 0) {
+        if (new_exp < -10) return (uint16_t)(sign << 15);
+        mant = (mant | 0x0010000000000000ULL) >> (1 - new_exp);
+        return (uint16_t)((sign << 15) | (mant >> 43));
+    }
+    return (uint16_t)((sign << 15) | ((new_exp & 0x1f) << 10) | (mant >> 42));
+}
+
+static void dequant_f16_buf(const uint16_t *src, double *dst, size_t n) {
+    for (size_t i = 0; i < n; i++) dst[i] = fp16_to_double(src[i]);
+}
+
+static void dequant_q4_0_buf(const uint8_t *src, double *dst, size_t n) {
+    size_t nb = n / 32;
+    for (size_t b = 0; b < nb; b++) {
+        const uint8_t *block = src + b * 18;
+        uint16_t d_raw = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
+        double d = fp16_to_double(d_raw);
+        const uint8_t *qs = block + 2;
+        double *out = dst + b * 32;
+        for (int j = 0; j < 16; j++) {
+            uint8_t byte = qs[j];
+            out[j]      = (double)((int)(byte & 0x0f) - 8) * d;
+            out[j + 16] = (double)((int)(byte >> 4)   - 8) * d;
+        }
+    }
+}
+
+static void dequant_q8_0_buf(const uint8_t *src, double *dst, size_t n) {
+    size_t nb = n / 32;
+    for (size_t b = 0; b < nb; b++) {
+        const uint8_t *block = src + b * 34;
+        uint16_t d_raw = (uint16_t)block[0] | ((uint16_t)block[1] << 8);
+        double d = fp16_to_double(d_raw);
+        const int8_t *qs = (const int8_t*)(block + 2);
+        double *out = dst + b * 32;
+        for (int j = 0; j < 32; j++) out[j] = (double)qs[j] * d;
+    }
+}
+
+static void quant_f16_buf(const double *src, uint16_t *dst, size_t n) {
+    for (size_t i = 0; i < n; i++) dst[i] = double_to_fp16(src[i]);
+}
+
+static void quant_q4_0_buf(const double *src, uint8_t *dst, size_t n) {
+    size_t nb = n / 32;
+    for (size_t b = 0; b < nb; b++) {
+        const double *in = src + b * 32;
+        uint8_t *block = dst + b * 18;
+        double max_v = 0.0;
+        for (int j = 0; j < 32; j++) {
+            double v = fabs(in[j]);
+            if (v > max_v) max_v = v;
+        }
+        double d = max_v / -8.0;
+        if (d == 0.0) d = -1.0;
+        double id = 1.0 / d;
+        uint16_t d_raw = double_to_fp16(d);
+        block[0] = (uint8_t)(d_raw & 0xff);
+        block[1] = (uint8_t)((d_raw >> 8) & 0xff);
+        uint8_t *qs = block + 2;
+        for (int j = 0; j < 16; j++) {
+            int q0 = (int)round(in[j] * id);
+            int q1 = (int)round(in[j + 16] * id);
+            q0 = q0 < -8 ? -8 : (q0 > 7 ? 7 : q0);
+            q1 = q1 < -8 ? -8 : (q1 > 7 ? 7 : q1);
+            qs[j] = (uint8_t)(((q0 + 8) & 0x0f) | (((q1 + 8) & 0x0f) << 4));
+        }
+    }
+}
+
+static void quant_q8_0_buf(const double *src, uint8_t *dst, size_t n) {
+    size_t nb = n / 32;
+    for (size_t b = 0; b < nb; b++) {
+        const double *in = src + b * 32;
+        uint8_t *block = dst + b * 34;
+        double max_v = 0.0;
+        for (int j = 0; j < 32; j++) {
+            double v = fabs(in[j]);
+            if (v > max_v) max_v = v;
+        }
+        double d = max_v / 127.0;
+        if (d == 0.0) d = 1.0;
+        double id = 1.0 / d;
+        uint16_t d_raw = double_to_fp16(d);
+        block[0] = (uint8_t)(d_raw & 0xff);
+        block[1] = (uint8_t)((d_raw >> 8) & 0xff);
+        int8_t *qs = (int8_t*)(block + 2);
+        for (int j = 0; j < 32; j++) {
+            int q = (int)round(in[j] * id);
+            qs[j] = (int8_t)(q < -127 ? -127 : (q > 127 ? 127 : q));
+        }
+    }
+}
+
+static void sys_quant_f16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_f16(tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    size_t bytes = t->len * 2;
+    char *out = (char*)malloc(bytes ? bytes : 1);
+    if (!out) die(vm, "quant_f16: out of memory");
+    quant_f16_buf(t->d, (uint16_t*)out, t->len);
+    *r = mk_str_n(out, bytes);
+    free(out);
+}
+
+static void sys_dequant_f16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR) die(vm, "dequant_f16(bytes: str, shape)");
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[1], sh, "dequant_f16");
+    TTensor *t = ten_alloc(nd, sh);
+    if (a[0].u.str.n < t->len * 2) {
+        free(t->d); free(t);
+        die(vm, "dequant_f16: buffer size too small");
+    }
+    dequant_f16_buf((const uint16_t*)a[0].u.str.s, t->d, t->len);
+    *r = ten_val(t);
+}
+
+static void sys_quant_q4_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_q4_0(tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    if (t->len % 32 != 0) die(vm, "quant_q4_0: length must be multiple of 32");
+    size_t bytes = (t->len / 32) * 18;
+    char *out = (char*)malloc(bytes ? bytes : 1);
+    if (!out) die(vm, "quant_q4_0: out of memory");
+    quant_q4_0_buf(t->d, (uint8_t*)out, t->len);
+    *r = mk_str_n(out, bytes);
+    free(out);
+}
+
+static void sys_dequant_q4_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR) die(vm, "dequant_q4_0(bytes: str, shape)");
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[1], sh, "dequant_q4_0");
+    TTensor *t = ten_alloc(nd, sh);
+    if (t->len % 32 != 0) {
+        free(t->d); free(t);
+        die(vm, "dequant_q4_0: length must be multiple of 32");
+    }
+    size_t req_bytes = (t->len / 32) * 18;
+    if (a[0].u.str.n < req_bytes) {
+        free(t->d); free(t);
+        die(vm, "dequant_q4_0: buffer size too small");
+    }
+    dequant_q4_0_buf((const uint8_t*)a[0].u.str.s, t->d, t->len);
+    *r = ten_val(t);
+}
+
+static void sys_quant_q8_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_q8_0(tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    if (t->len % 32 != 0) die(vm, "quant_q8_0: length must be multiple of 32");
+    size_t bytes = (t->len / 32) * 34;
+    char *out = (char*)malloc(bytes ? bytes : 1);
+    if (!out) die(vm, "quant_q8_0: out of memory");
+    quant_q8_0_buf(t->d, (uint8_t*)out, t->len);
+    *r = mk_str_n(out, bytes);
+    free(out);
+}
+
+static void sys_dequant_q8_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR) die(vm, "dequant_q8_0(bytes: str, shape)");
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[1], sh, "dequant_q8_0");
+    TTensor *t = ten_alloc(nd, sh);
+    if (t->len % 32 != 0) {
+        free(t->d); free(t);
+        die(vm, "dequant_q8_0: length must be multiple of 32");
+    }
+    size_t req_bytes = (t->len / 32) * 34;
+    if (a[0].u.str.n < req_bytes) {
+        free(t->d); free(t);
+        die(vm, "dequant_q8_0: buffer size too small");
+    }
+    dequant_q8_0_buf((const uint8_t*)a[0].u.str.s, t->d, t->len);
+    *r = ten_val(t);
+}
+
+static void sys_mmap_tensor_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_tensor_f32(id, off, shape)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[2], sh, "mmap_tensor_f32");
+    TTensor *t = ten_alloc(nd, sh);
+    if (off + t->len * 4 > g_mmaps[slot].size || off + t->len * 4 < off) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_f32: out of bounds");
+    }
+    const float *fsrc = (const float*)(g_mmaps[slot].data + off);
+    for (size_t i = 0; i < t->len; i++) t->d[i] = (double)fsrc[i];
+    *r = ten_val(t);
+}
+
+static void sys_mmap_tensor_f16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_tensor_f16(id, off, shape)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[2], sh, "mmap_tensor_f16");
+    TTensor *t = ten_alloc(nd, sh);
+    if (off + t->len * 2 > g_mmaps[slot].size || off + t->len * 2 < off) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_f16: out of bounds");
+    }
+    dequant_f16_buf((const uint16_t*)(g_mmaps[slot].data + off), t->d, t->len);
+    *r = ten_val(t);
+}
+
+static void sys_mmap_tensor_q4_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_tensor_q4_0(id, off, shape)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[2], sh, "mmap_tensor_q4_0");
+    TTensor *t = ten_alloc(nd, sh);
+    if (t->len % 32 != 0) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_q4_0: length must be multiple of 32");
+    }
+    size_t req_bytes = (t->len / 32) * 18;
+    if (off + req_bytes > g_mmaps[slot].size || off + req_bytes < off) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_q4_0: out of bounds");
+    }
+    dequant_q4_0_buf((const uint8_t*)(g_mmaps[slot].data + off), t->d, t->len);
+    *r = ten_val(t);
+}
+
+static void sys_mmap_tensor_q8_0(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mmap_tensor_q8_0(id, off, shape)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_MMAPS || !g_mmaps[slot].in_use) die(vm, "mmap: invalid id");
+    size_t off = (size_t)a[1].u.i;
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[2], sh, "mmap_tensor_q8_0");
+    TTensor *t = ten_alloc(nd, sh);
+    if (t->len % 32 != 0) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_q8_0: length must be multiple of 32");
+    }
+    size_t req_bytes = (t->len / 32) * 34;
+    if (off + req_bytes > g_mmaps[slot].size || off + req_bytes < off) {
+        free(t->d); free(t);
+        die(vm, "mmap_tensor_q8_0: out of bounds");
+    }
+    dequant_q8_0_buf((const uint8_t*)(g_mmaps[slot].data + off), t->d, t->len);
+    *r = ten_val(t);
+}
+
+/* ========================================================================= */
+/* C FFI (Dynamic Library Loading & Dynamic C Invocation)                    */
+/* ========================================================================= */
+
+#define MAX_FFI_LIBS 64
+typedef struct {
+    int in_use;
+#ifdef _WIN32
+    HMODULE hMod;
+#else
+    void *hMod;
+#endif
+} TFFILib;
+
+static TFFILib g_ffi_libs[MAX_FFI_LIBS];
+
+#ifdef _WIN32
+static void sys_ffi_open(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "ffi_open(path: str)");
+    int slot = -1;
+    for (int i = 0; i < MAX_FFI_LIBS; i++) {
+        if (!g_ffi_libs[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) die(vm, "ffi_open: too many open libraries");
+    HMODULE hMod = LoadLibraryA(a[0].u.str.s);
+    if (!hMod) {
+        *r = mk_int(-1);
+        return;
+    }
+    g_ffi_libs[slot].in_use = 1;
+    g_ffi_libs[slot].hMod = hMod;
+    *r = mk_int(slot);
+}
+
+static void sys_ffi_close(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "ffi_close(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_FFI_LIBS || !g_ffi_libs[slot].in_use) {
+        *r = mk_bool(0);
+        return;
+    }
+    FreeLibrary(g_ffi_libs[slot].hMod);
+    g_ffi_libs[slot].in_use = 0;
+    *r = mk_bool(1);
+}
+
+static void sys_ffi_sym(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_STR) die(vm, "ffi_sym(id: int, name: str)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_FFI_LIBS || !g_ffi_libs[slot].in_use) die(vm, "ffi_sym: invalid lib id");
+    FARPROC sym = GetProcAddress(g_ffi_libs[slot].hMod, a[1].u.str.s);
+    *r = mk_int((int64_t)(uintptr_t)sym);
+}
+#else
+static void sys_ffi_open(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "ffi_open(path: str)");
+    int slot = -1;
+    for (int i = 0; i < MAX_FFI_LIBS; i++) {
+        if (!g_ffi_libs[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) die(vm, "ffi_open: too many open libraries");
+    void *hMod = dlopen(a[0].u.str.s, RTLD_LAZY);
+    if (!hMod) {
+        *r = mk_int(-1);
+        return;
+    }
+    g_ffi_libs[slot].in_use = 1;
+    g_ffi_libs[slot].hMod = hMod;
+    *r = mk_int(slot);
+}
+
+static void sys_ffi_close(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "ffi_close(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_FFI_LIBS || !g_ffi_libs[slot].in_use) {
+        *r = mk_bool(0);
+        return;
+    }
+    dlclose(g_ffi_libs[slot].hMod);
+    g_ffi_libs[slot].in_use = 0;
+    *r = mk_bool(1);
+}
+
+static void sys_ffi_sym(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_STR) die(vm, "ffi_sym(id: int, name: str)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_FFI_LIBS || !g_ffi_libs[slot].in_use) die(vm, "ffi_sym: invalid lib id");
+    void *sym = dlsym(g_ffi_libs[slot].hMod, a[1].u.str.s);
+    *r = mk_int((int64_t)(uintptr_t)sym);
+}
+#endif
+
+static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 4 || a[0].t != T_INT || a[1].t != T_STR || a[2].t != T_STR || a[3].t != T_LIST)
+        die(vm, "ffi_call(sym: int, retty: str, argtypes: str, args: list)");
+    uintptr_t fn = (uintptr_t)a[0].u.i;
+    if (!fn) die(vm, "ffi_call: null function pointer");
+    char retty = a[1].u.str.n > 0 ? a[1].u.str.s[0] : 'v';
+    const char *argtypes = a[2].u.str.s;
+    size_t ntypes = a[2].u.str.n;
+    TList *args = a[3].u.list;
+    if (args->len != ntypes) die(vm, "ffi_call: arg count mismatch");
+    if (args->len > 6) die(vm, "ffi_call: max 6 arguments supported");
+
+    uint64_t u[6] = {0};
+    double d[6] = {0.0};
+    for (size_t i = 0; i < args->len; i++) {
+        char t = argtypes[i];
+        TVal *arg = &args->items[i];
+        if (t == 'd' || t == 'f') {
+            int ok = 1;
+            d[i] = to_num(arg, &ok);
+            u[i] = *(uint64_t*)&d[i];
+        } else if (t == 's') {
+            if (arg->t != T_STR) die(vm, "ffi_call: expected string");
+            u[i] = (uintptr_t)arg->u.str.s;
+        } else if (t == 'p' || t == 'l' || t == 'i') {
+            if (arg->t == T_INT) u[i] = (uint64_t)arg->u.i;
+            else if (arg->t == T_BOOL) u[i] = (uint64_t)arg->u.b;
+            else if (arg->t == T_STR) u[i] = (uintptr_t)arg->u.str.s;
+            else if (arg->t == T_NIL) u[i] = 0;
+            else die(vm, "ffi_call: invalid int/ptr arg");
+        } else {
+            die(vm, "ffi_call: unknown arg type");
+        }
+    }
+
+    if (retty == 'd' || retty == 'f') {
+        double res_d = 0.0;
+        if (args->len == 1) {
+            res_d = ((double(*)(double))fn)(d[0]);
+        } else if (args->len == 2) {
+            res_d = ((double(*)(double, double))fn)(d[0], d[1]);
+        } else if (args->len == 3) {
+            res_d = ((double(*)(double, double, double))fn)(d[0], d[1], d[2]);
+        } else {
+            res_d = ((double(*)(void))fn)();
+        }
+        *r = mk_float(res_d);
+        return;
+    }
+
+    uint64_t res = 0;
+    switch (args->len) {
+    case 0: res = ((uint64_t(*)(void))fn)(); break;
+    case 1: res = ((uint64_t(*)(uint64_t))fn)(u[0]); break;
+    case 2: res = ((uint64_t(*)(uint64_t,uint64_t))fn)(u[0], u[1]); break;
+    case 3: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2]); break;
+    case 4: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3]); break;
+    case 5: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4]); break;
+    case 6: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5]); break;
+    }
+
+    if (retty == 'v') *r = mk_nil();
+    else if (retty == 'i') *r = mk_int((int32_t)res);
+    else if (retty == 'l') *r = mk_int((int64_t)res);
+    else if (retty == 'p') *r = mk_int((int64_t)(uintptr_t)res);
+    else if (retty == 's') *r = res ? mk_str((const char*)(uintptr_t)res) : mk_nil();
+    else if (retty == 'b') *r = mk_bool(res != 0);
+    else *r = mk_int((int64_t)res);
+}
+
+/* ========================================================================= */
+/* Channels (thread-safe MPMC queue)                                         */
+/* ========================================================================= */
+
+#define MAX_CHANNELS 256
+typedef struct {
+    int in_use;
+    int closed;
+    size_t cap;
+    size_t head;
+    size_t tail;
+    size_t count;
+    TVal *items;
+#ifdef _WIN32
+    CRITICAL_SECTION cs;
+    CONDITION_VARIABLE not_empty;
+    CONDITION_VARIABLE not_full;
+#else
+    pthread_mutex_t mtx;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+#endif
+} TChannel;
+
+static TChannel g_channels[MAX_CHANNELS];
+
+static TVal tval_clone_isolated(const TVal *v) {
+    TVal out;
+    switch (v->t) {
+    case T_INT:
+    case T_FLOAT:
+    case T_BOOL:
+    case T_NIL:
+        return *v;
+    case T_STR:
+        return mk_str_n(v->u.str.s, v->u.str.n);
+    case T_TENSOR: {
+        TTensor *src = v->u.ten;
+        TTensor *t = ten_alloc(src->ndim, src->shape);
+        ten_sync(src);
+        if (src->len) memcpy(t->d, src->d, sizeof(double) * src->len);
+        return ten_val(t);
+    }
+    case T_LIST: {
+        TList *src = v->u.list;
+        TList *dst = list_new(src->len);
+        for (size_t i = 0; i < src->len; i++) {
+            list_push(dst, tval_clone_isolated(&src->items[i]));
+        }
+        out.t = T_LIST;
+        out.u.list = dst;
+        return out;
+    }
+    case T_DICT: {
+        TDict *src = v->u.dict;
+        TDict *dst = dict_new();
+        for (size_t i = 0; i < src->len; i++) {
+            TVal k = tval_clone_isolated(&src->keys[i]);
+            TVal val = tval_clone_isolated(&src->vals[i]);
+            dict_set(dst, k, val);
+        }
+        out.t = T_DICT;
+        out.u.dict = dst;
+        return out;
+    }
+    default:
+        return mk_nil();
+    }
+}
+
+static void sys_channel_new(TVM *vm, TVal *a, int argc, TVal *r) {
+    int cap = (argc >= 1 && a[0].t == T_INT && a[0].u.i > 0) ? (int)a[0].u.i : 16;
+    (void)vm;
+    int slot = -1;
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        if (!g_channels[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) die(vm, "channel_new: too many channels");
+    TChannel *ch = &g_channels[slot];
+    ch->in_use = 1;
+    ch->closed = 0;
+    ch->cap = (size_t)cap;
+    ch->head = 0;
+    ch->tail = 0;
+    ch->count = 0;
+    ch->items = (TVal*)malloc(sizeof(TVal) * ch->cap);
+#ifdef _WIN32
+    InitializeCriticalSection(&ch->cs);
+    InitializeConditionVariable(&ch->not_empty);
+    InitializeConditionVariable(&ch->not_full);
+#else
+    pthread_mutex_init(&ch->mtx, NULL);
+    pthread_cond_init(&ch->not_empty, NULL);
+    pthread_cond_init(&ch->not_full, NULL);
+#endif
+    *r = mk_int(slot);
+}
+
+static void sys_channel_send(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT) die(vm, "channel_send(id: int, val)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_CHANNELS || !g_channels[slot].in_use) die(vm, "channel_send: invalid channel");
+    TChannel *ch = &g_channels[slot];
+
+#ifdef _WIN32
+    EnterCriticalSection(&ch->cs);
+    while (ch->count == ch->cap && !ch->closed) {
+        SleepConditionVariableCS(&ch->not_full, &ch->cs, INFINITE);
+    }
+    if (ch->closed) {
+        LeaveCriticalSection(&ch->cs);
+        *r = mk_bool(0);
+        return;
+    }
+    ch->items[ch->tail] = tval_clone_isolated(&a[1]);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->count++;
+    WakeConditionVariable(&ch->not_empty);
+    LeaveCriticalSection(&ch->cs);
+#else
+    pthread_mutex_lock(&ch->mtx);
+    while (ch->count == ch->cap && !ch->closed) {
+        pthread_cond_wait(&ch->not_full, &ch->mtx);
+    }
+    if (ch->closed) {
+        pthread_mutex_unlock(&ch->mtx);
+        *r = mk_bool(0);
+        return;
+    }
+    ch->items[ch->tail] = tval_clone_isolated(&a[1]);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->count++;
+    pthread_cond_signal(&ch->not_empty);
+    pthread_mutex_unlock(&ch->mtx);
+#endif
+    *r = mk_bool(1);
+}
+
+static void sys_channel_recv(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "channel_recv(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_CHANNELS || !g_channels[slot].in_use) die(vm, "channel_recv: invalid channel");
+    TChannel *ch = &g_channels[slot];
+
+#ifdef _WIN32
+    EnterCriticalSection(&ch->cs);
+    while (ch->count == 0 && !ch->closed) {
+        SleepConditionVariableCS(&ch->not_empty, &ch->cs, INFINITE);
+    }
+    if (ch->count == 0 && ch->closed) {
+        LeaveCriticalSection(&ch->cs);
+        *r = mk_nil();
+        return;
+    }
+    TVal val = ch->items[ch->head];
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->count--;
+    WakeConditionVariable(&ch->not_full);
+    LeaveCriticalSection(&ch->cs);
+#else
+    pthread_mutex_lock(&ch->mtx);
+    while (ch->count == 0 && !ch->closed) {
+        pthread_cond_wait(&ch->not_empty, &ch->mtx);
+    }
+    if (ch->count == 0 && ch->closed) {
+        pthread_mutex_unlock(&ch->mtx);
+        *r = mk_nil();
+        return;
+    }
+    TVal val = ch->items[ch->head];
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->count--;
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->mtx);
+#endif
+    *r = val;
+}
+
+static void sys_channel_close(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "channel_close(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_CHANNELS || !g_channels[slot].in_use) {
+        *r = mk_bool(0);
+        return;
+    }
+    TChannel *ch = &g_channels[slot];
+#ifdef _WIN32
+    EnterCriticalSection(&ch->cs);
+    ch->closed = 1;
+    WakeAllConditionVariable(&ch->not_empty);
+    WakeAllConditionVariable(&ch->not_full);
+    LeaveCriticalSection(&ch->cs);
+#else
+    pthread_mutex_lock(&ch->mtx);
+    ch->closed = 1;
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_cond_broadcast(&ch->not_full);
+    pthread_mutex_unlock(&ch->mtx);
+#endif
+    *r = mk_bool(1);
+}
+
+static void sys_channel_len(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "channel_len(id: int)");
+    int slot = (int)a[0].u.i;
+    if (slot < 0 || slot >= MAX_CHANNELS || !g_channels[slot].in_use) die(vm, "channel_len: invalid channel");
+    TChannel *ch = &g_channels[slot];
+    size_t count;
+#ifdef _WIN32
+    EnterCriticalSection(&ch->cs);
+    count = ch->count;
+    LeaveCriticalSection(&ch->cs);
+#else
+    pthread_mutex_lock(&ch->mtx);
+    count = ch->count;
+    pthread_mutex_unlock(&ch->mtx);
+#endif
+    *r = mk_int((int64_t)count);
+}
+
+/* ========================================================================= */
+/* Worker Threads                                                            */
+/* ========================================================================= */
+
+#define MAX_THREADS 128
+typedef struct {
+    int in_use;
+    char *script_path;
+    int argc;
+    char **argv;
+#ifdef _WIN32
+    HANDLE hThread;
+#else
+    pthread_t thread;
+#endif
+} TThreadSlot;
+
+static TThreadSlot g_threads[MAX_THREADS];
+
+static int is_tb_file_tvm(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char hdr[4];
+    size_t n = fread(hdr, 1, 4, f);
+    fclose(f);
+    return n == 4 && memcmp(hdr, "TB01", 4) == 0;
+}
+
+static void make_tmp_path_tvm(char *out, size_t n, const char *ext) {
+    static unsigned int seq = 0;
+    seq++;
+#ifdef _WIN32
+    char dir[512];
+    DWORD dlen = GetTempPathA((DWORD)sizeof(dir), dir);
+    if (dlen == 0 || dlen >= sizeof(dir)) snprintf(dir, sizeof(dir), ".");
+    snprintf(out, n, "%strun_th_%lu_%u%s", dir, (unsigned long)GetCurrentProcessId(), seq, ext);
+#else
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+    snprintf(out, n, "%s/trun_th_%lu_%u%s", dir, (unsigned long)getpid(), seq, ext);
+#endif
+}
+
+#ifdef _WIN32
+static DWORD WINAPI worker_thread_proc(LPVOID lpParam) {
+#else
+static void* worker_thread_proc(void *lpParam) {
+#endif
+    TThreadSlot *slot = (TThreadSlot*)lpParam;
+    TProg p; memset(&p, 0, sizeof(p));
+    char msg[256];
+    char tmp_tb[1024];
+    int used_tmp = 0;
+    const char *load_path = slot->script_path;
+
+    if (!is_tb_file_tvm(slot->script_path)) {
+        make_tmp_path_tvm(tmp_tb, sizeof(tmp_tb), ".tb");
+        if (tvm_compile_src(slot->script_path, tmp_tb, 1, msg, sizeof(msg)) < 0) {
+            remove(tmp_tb);
+            fprintf(stderr, "thread compile error: %s\n", msg);
+            return 0;
+        }
+        load_path = tmp_tb;
+        used_tmp = 1;
+    }
+
+    if (tvm_read_tb(load_path, &p, msg, sizeof(msg)) != 0) {
+        if (used_tmp) remove(tmp_tb);
+        fprintf(stderr, "thread load error: %s\n", msg);
+        return 0;
+    }
+    if (used_tmp) {
+        remove(tmp_tb);
+        free(p.path);
+        size_t plen = strlen(slot->script_path);
+        p.path = (char*)malloc(plen + 1);
+        if (p.path) memcpy(p.path, slot->script_path, plen + 1);
+    }
+    p.xargv = slot->argv;
+    p.xargc = slot->argc;
+
+    TVM vm;
+    tvm_init(&vm, &p);
+    tvm_run(&vm);
+    tvm_free(&vm);
+    tvm_prog_release(&p);
+    return 0;
+}
+
+static void sys_thread_spawn(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || a[0].t != T_STR) die(vm, "thread_spawn(script_path: str[, args: list])");
+    int slot_id = -1;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (!g_threads[i].in_use) { slot_id = i; break; }
+    }
+    if (slot_id < 0) die(vm, "thread_spawn: too many threads");
+    TThreadSlot *slot = &g_threads[slot_id];
+    slot->in_use = 1;
+    slot->script_path = (char*)malloc(a[0].u.str.n + 1);
+    memcpy(slot->script_path, a[0].u.str.s, a[0].u.str.n + 1);
+
+    int xargc = 1;
+    if (argc >= 2 && a[1].t == T_LIST) xargc += (int)a[1].u.list->len;
+    slot->argc = xargc;
+    slot->argv = (char**)malloc(sizeof(char*) * (xargc + 1));
+    slot->argv[0] = (char*)malloc(a[0].u.str.n + 1);
+    memcpy(slot->argv[0], a[0].u.str.s, a[0].u.str.n + 1);
+    if (argc >= 2 && a[1].t == T_LIST) {
+        for (int i = 0; i < (int)a[1].u.list->len; i++) {
+            char buf[256];
+            tval_fmt(&a[1].u.list->items[i], buf, sizeof(buf));
+            size_t blen = strlen(buf);
+            slot->argv[i + 1] = (char*)malloc(blen + 1);
+            memcpy(slot->argv[i + 1], buf, blen + 1);
+        }
+    }
+    slot->argv[xargc] = NULL;
+
+#ifdef _WIN32
+    slot->hThread = CreateThread(NULL, 0, worker_thread_proc, slot, 0, NULL);
+    if (!slot->hThread) {
+        slot->in_use = 0;
+        die(vm, "thread_spawn: CreateThread failed");
+    }
+#else
+    if (pthread_create(&slot->thread, NULL, worker_thread_proc, slot) != 0) {
+        slot->in_use = 0;
+        die(vm, "thread_spawn: pthread_create failed");
+    }
+#endif
+    *r = mk_int(slot_id);
+}
+
+static void sys_thread_join(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "thread_join(id: int)");
+    int slot_id = (int)a[0].u.i;
+    if (slot_id < 0 || slot_id >= MAX_THREADS || !g_threads[slot_id].in_use) {
+        *r = mk_bool(0);
+        return;
+    }
+    TThreadSlot *slot = &g_threads[slot_id];
+#ifdef _WIN32
+    WaitForSingleObject(slot->hThread, INFINITE);
+    CloseHandle(slot->hThread);
+#else
+    pthread_join(slot->thread, NULL);
+#endif
+    free(slot->script_path);
+    for (int i = 0; i < slot->argc; i++) free(slot->argv[i]);
+    free(slot->argv);
+    slot->in_use = 0;
+    *r = mk_bool(1);
+}
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -3541,7 +4558,32 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"sha256", sys_sha256}, {"run", sys_run}, {"stdin_line", sys_stdin_line},
         {"stdin_read", sys_stdin_read}, {"stdout_write", sys_stdout_write},
         {"stderr_write", sys_stderr_write}, {"zip_pack", sys_zip_pack},
-        {"zip_unpack", sys_zip_unpack}, {"exit", sys_exit}
+        {"zip_unpack", sys_zip_unpack}, {"exit", sys_exit},
+
+        /* mmap */
+        {"mmap_open", sys_mmap_open}, {"mmap_close", sys_mmap_close},
+        {"mmap_size", sys_mmap_size}, {"mmap_read_bytes", sys_mmap_read_bytes},
+        {"mmap_read_u8", sys_mmap_read_u8}, {"mmap_read_u16", sys_mmap_read_u16},
+        {"mmap_read_u32", sys_mmap_read_u32}, {"mmap_read_u64", sys_mmap_read_u64},
+        {"mmap_read_i32", sys_mmap_read_i32}, {"mmap_read_i64", sys_mmap_read_i64},
+        {"mmap_read_f32", sys_mmap_read_f32}, {"mmap_read_f64", sys_mmap_read_f64},
+        {"mmap_tensor_f32", sys_mmap_tensor_f32}, {"mmap_tensor_f16", sys_mmap_tensor_f16},
+        {"mmap_tensor_q4_0", sys_mmap_tensor_q4_0}, {"mmap_tensor_q8_0", sys_mmap_tensor_q8_0},
+
+        /* quant / dequant */
+        {"quant_f16", sys_quant_f16}, {"dequant_f16", sys_dequant_f16},
+        {"quant_q4_0", sys_quant_q4_0}, {"dequant_q4_0", sys_dequant_q4_0},
+        {"quant_q8_0", sys_quant_q8_0}, {"dequant_q8_0", sys_dequant_q8_0},
+
+        /* C FFI */
+        {"ffi_open", sys_ffi_open}, {"ffi_close", sys_ffi_close},
+        {"ffi_sym", sys_ffi_sym}, {"ffi_call", sys_ffi_call},
+
+        /* thread & channel */
+        {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},
+        {"channel_recv", sys_channel_recv}, {"channel_close", sys_channel_close},
+        {"channel_len", sys_channel_len},
+        {"thread_spawn", sys_thread_spawn}, {"thread_join", sys_thread_join}
     };
     size_t ne = sizeof(S) / sizeof(S[0]);
     TList *fl = list_new(ne);

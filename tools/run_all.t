@@ -21,7 +21,9 @@ T_TESTS = [
     "tests/hoist.t", "tests/builtins.t", "tests/lang.t", "tests/tryflow.t",
     "tests/jit2.t", "tests/gcstress.t", "tests/tensor.t", "tests/jitlist.t",
     "tests/lambda.t", "tests/jitmain.t", "tests/agtest.t", "tests/aitest.t",
-    "tests/stdlib.t", "tests/jitrec.t", "tests/jitdict.t", "tests/loadmod.t"
+    "tests/stdlib.t", "tests/jitrec.t", "tests/jitdict.t", "tests/loadmod.t",
+    "tests/mmap_test.t", "tests/ffi_test.t", "tests/thread_test.t",
+    "tests/gguf_test.t", "tests/safetensors_test.t", "tests/transformer_test.t"
 ]
 
 fn pad_right(s, w):
