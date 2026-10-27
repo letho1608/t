@@ -88,6 +88,8 @@ struct TFn {
     GCNode *gc_node;
     int32_t entry;
     uint8_t nargs;
+    uint8_t min_args;
+    uint8_t vararg;
     uint16_t nlocals;
     /* closure: mảng cell bắt từ scope ngoài (giữ ref) */
     uint16_t nupvals;
@@ -227,6 +229,7 @@ enum {
     OP_IN,            /* a b -> bool (a in b) */
     OP_CALLM,         /* u8 argc + u32 len + name: obj a1..ak -> obj.name(a1..ak) */
     OP_SETATTR,       /* u32 len + name: obj v -> obj.name = v */
+    OP_BAND, OP_BOR, OP_BXOR, OP_BNOT, OP_SHL, OP_SHR,
     OP_NOP,
     OP_HALT
 };
@@ -324,6 +327,8 @@ typedef struct TProg {
 } TProg;
 /* đường dẫn trun (tự biên dịch .t cho load); trun.c đặt lúc khởi động */
 extern const char *tvm_exe_path;
+/* dịch file .t sang .tb bằng tcomp.tb (bundle=1 gộp import); 1 ok, -1 lỗi (msg) */
+int tvm_compile_src(const char *src, const char *out, int bundle, char *msg, size_t msgn);
 /* đọc file .tb (TB01 + LN01/EX01 tuỳ chọn) vào p (memset trước); 0 ok, -1 lỗi (msg) */
 int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn);
 /* giải phóng phần do tvm_read_tb cấp (code, bảng dòng, export, path) */
@@ -382,7 +387,7 @@ int  t_jit_root_fns(TFn ***out);           /* hàm mà code main giữ (gốc GC
 
 /* Helper cho JIT tạo/gán record + chuỗi (G6): code máy gọi trực tiếp, tự lo
    refcount/GC (record mới refc=1 + gc_track; chuỗi so sánh không giữ ref). */
-enum { TJIT_TY_I = 1, TJIT_TY_F = 2, TJIT_TY_B = 3 };  /* khớp JT_I/F/B của jit_x64.c */
+enum { TJIT_TY_F = 2, TJIT_TY_B = 3 };  /* khớp JT_F/B của jit_x64.c (JT_I = 1) */
 TDict *tjit_rec_new(TDict *tp, int shape, int64_t *slots);
 const uint8_t *tjit_shape_fty(int shape);   /* bảng kiểu field theo shape (jit_x64.c) */
 int64_t tjit_str_eq(const TVal *a, const TVal *b, int m);
@@ -398,11 +403,13 @@ void tjit_store_go(TVal *g, int64_t bits, int ty); /* write-through global mainm
 TDict *tjit_dict_new0(void);
 int tjit_dict_set(TDict *d, int64_t kbits, int64_t vbits, int kv); /* kv: b0=kstr, b[2:1]=vty */
 int tjit_dict_getD(TDict *d, int64_t kbits, int kstr, int64_t *out); /* 0=int,1=deopt,2=giữ default */
+int64_t tjit_dict_has(TDict *d, int64_t kbits, int kstr);
+int64_t tjit_dict_remove(TDict *d, int64_t kbits, int kstr);
+TVal *tjit_str_idx(const TVal *s, int64_t i); /* trả &str1_cache[ch] (mượn) hoặc NULL nếu ngoài biên */
 
 /* Debugger (tdbg.c) */
 extern int tvm_dbg_on;
 void dbg_enable(void);
-int  dbg_enabled(void);
 int  dbg_hook(TVM *vm);
 void dbg_dis(TProg *p, size_t at, int count);
 

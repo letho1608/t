@@ -1,9 +1,9 @@
-# self/host.t — glue self-host: scan(src) = indent_scan + tokenize (tương đương lex2 trong t.py)
+# self/host.t — glue self-host: scan(src) = indent_lines + tokenize
 # Dùng:
 #   import host
 #   toks = host.scan("let x = 1\nprint(x)")
 #   st = [toks, 0]
-#   ast = host.parse_prog(st)   # parse_prog re-export từ parse2 qua host
+#   ast = host.parse_prog(st)
 import lex
 import parse
 import parse2
@@ -41,8 +41,3 @@ fn parse_prog(st):
         parse2.add_stmt(ss, parse2.parse_stmt(st))
     return ["prog", ss]
 
-fn parse_stmt(st):
-    return parse2.parse_stmt(st)
-
-fn parse_expr(st):
-    return parse2.parse_expr(st)

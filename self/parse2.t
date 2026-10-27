@@ -19,19 +19,6 @@ fn eat_op(st, v):
     st[1] = st[1] + 1
     return t
 
-fn is_op2(t, v):
-    return t[0] == "OP" and t[1] == v
-
-fn is_kw2(t, w):
-    return t[0] == "KW" and t[1] == w
-
-fn eat_op2(st, v):
-    t = st[0][st[1]]
-    if t[0] != "OP" or t[1] != v:
-        raise tok_line(t) + "want " + v
-    st[1] = st[1] + 1
-    return t
-
 fn parse_suite(st):
     eat_ind(st)
     mut ss = []
@@ -151,7 +138,10 @@ fn parse_struct(st):
     eat_ded(st)
     mut out = []
     for m in meths:
-        out.append(["fn", name + "__" + m[1], m[2], m[3]])
+        if m.len > 4:
+            out.append(["fn", name + "__" + m[1], m[2], m[3], m[4]])
+        else:
+            out.append(["fn", name + "__" + m[1], m[2], m[3]])
     mut fstrs = []
     mut fvars = []
     for f in fields:
@@ -243,11 +233,24 @@ fn parse_lambda(st):
     st[1] = st[1] + 1
     eat_op(st, "(")
     mut args = []
+    mut is_va = false
     if not is_op(st[0][st[1]], ")"):
-        args.append(eat_name(st))
-        while is_op(st[0][st[1]], ","):
+        if is_op(st[0][st[1]], "*"):
             st[1] = st[1] + 1
             args.append(eat_name(st))
+            is_va = true
+        else:
+            args.append(eat_name(st))
+        while is_op(st[0][st[1]], ","):
+            if is_va:
+                raise tok_line(st[0][st[1]]) + "*args phải ở cuối"
+            st[1] = st[1] + 1
+            if is_op(st[0][st[1]], "*"):
+                st[1] = st[1] + 1
+                args.append(eat_name(st))
+                is_va = true
+            else:
+                args.append(eat_name(st))
     eat_op(st, ")")
     eat_op(st, ":")
     PEND.append([])
@@ -255,8 +258,71 @@ fn parse_lambda(st):
     mut fb = PEND.pop()
     fb.append(["ret", body])
     name = gensym("l")
-    hoist(["fn", name, args, fb])
+    if is_va:
+        hoist(["fn", name, args, fb, -1])
+    else:
+        hoist(["fn", name, args, fb])
     return ["var", name]
+
+# Khử đường cú pháp try ... [except ...] finally: fin
+fn rw_fin_stmt(s, fd, fin, ldepth):
+    k = s[0]
+    if k == "ret":
+        rv = gensym("rv")
+        mut seq = [["decl", "let", rv, s[1]], ["assign", ["var", fd], ["lit", "true"]]]
+        for fs in fin:
+            seq.append(fs)
+        seq.append(["ret", ["var", rv]])
+        return ["multi", seq]
+    if (k == "break" or k == "continue") and ldepth == 0:
+        mut seq = [["assign", ["var", fd], ["lit", "true"]]]
+        for fs in fin:
+            seq.append(fs)
+        seq.append(s)
+        return ["multi", seq]
+    if k == "if":
+        mut b2 = nil
+        if s[3] != nil:
+            b2 = rw_fin_list(s[3], fd, fin, ldepth)
+        return ["if", s[1], rw_fin_list(s[2], fd, fin, ldepth), b2]
+    if k == "while":
+        return ["while", s[1], rw_fin_list(s[2], fd, fin, ldepth + 1)]
+    if k == "for":
+        return ["for", s[1], s[2], rw_fin_list(s[3], fd, fin, ldepth + 1)]
+    if k == "try":
+        mut hs2 = []
+        for h in s[2]:
+            hs2.append([h[0], rw_fin_list(h[1], fd, fin, ldepth)])
+        return ["try", rw_fin_list(s[1], fd, fin, ldepth), hs2]
+    if k == "multi":
+        return ["multi", rw_fin_list(s[1], fd, fin, ldepth)]
+    return s
+
+fn rw_fin_list(ss, fd, fin, ldepth):
+    mut out = []
+    for x in ss:
+        add_stmt(out, rw_fin_stmt(x, fd, fin, ldepth))
+    return out
+
+fn make_try_fin(body, hs, fin):
+    fd = gensym("fd")
+    fe = gensym("fe")
+    b_rw = rw_fin_list(body, fd, fin, 0)
+    mut inner = b_rw
+    if hs.len > 0:
+        mut hs_rw = []
+        for h in hs:
+            hs_rw.append([h[0], rw_fin_list(h[1], fd, fin, 0)])
+        inner = [["try", b_rw, hs_rw]]
+    mut run_fin1 = [["assign", ["var", fd], ["lit", "true"]]]
+    mut run_fin2 = [["assign", ["var", fd], ["lit", "true"]]]
+    for fs in fin:
+        run_fin1.append(fs)
+        run_fin2.append(fs)
+    guard_fin1 = ["if", ["un", "not", ["var", fd]], run_fin1, nil]
+    guard_fin2 = ["if", ["un", "not", ["var", fd]], run_fin2, nil]
+    outer_h = [nil, [["decl", "let", fe, ["var", "err"]], guard_fin1, ["raise", ["var", fe]]]]
+    return ["multi", [["decl", "mut", fd, ["lit", "false"]], ["try", inner, [outer_h]], guard_fin2]]
 
 # [e for ... if ...] / {k: v for ...} -> hàm ẩn $cN() dựng kết quả, gọi tại chỗ;
 # định nghĩa ẩn của từng mệnh đề đặt ngay trước mệnh đề đó
@@ -332,16 +398,52 @@ fn parse_stmt0(st):
             st[1] = st[1] + 1
             eat_op(st, "(")
             mut args = []
+            mut defs = []
+            mut is_va = false
             if not is_op(st[0][st[1]], ")"):
-                args.append(st[0][st[1]][1])
-                st[1] = st[1] + 1
+                if is_op(st[0][st[1]], "*"):
+                    st[1] = st[1] + 1
+                    args.append(eat_name(st))
+                    is_va = true
+                else:
+                    p0 = st[0][st[1]][1]
+                    args.append(p0)
+                    st[1] = st[1] + 1
+                    if is_op(st[0][st[1]], "="):
+                        st[1] = st[1] + 1
+                        defs.append([p0, parse_expr(st)])
                 while is_op(st[0][st[1]], ","):
+                    if is_va:
+                        raise tok_line(st[0][st[1]]) + "*args phải ở cuối danh sách tham số"
                     st[1] = st[1] + 1
-                    args.append(st[0][st[1]][1])
-                    st[1] = st[1] + 1
+                    if is_op(st[0][st[1]], "*"):
+                        if defs.len > 0:
+                            raise tok_line(st[0][st[1]]) + "không kết hợp tham số mặc định và *args"
+                        st[1] = st[1] + 1
+                        args.append(eat_name(st))
+                        is_va = true
+                    else:
+                        pn = st[0][st[1]][1]
+                        args.append(pn)
+                        st[1] = st[1] + 1
+                        if is_op(st[0][st[1]], "="):
+                            st[1] = st[1] + 1
+                            defs.append([pn, parse_expr(st)])
+                        elif defs.len > 0:
+                            raise tok_line(st[0][st[1]]) + "tham số không mặc định sau tham số mặc định"
             eat_op(st, ")")
             eat_op(st, ":")
-            return ["fn", nm, args, parse_suite(st)]
+            body = parse_suite(st)
+            if is_va:
+                return ["fn", nm, args, body, -1]
+            if defs.len == 0:
+                return ["fn", nm, args, body]
+            mut nb = []
+            for d in defs:
+                nb.append(["if", ["bin", "==", ["var", d[0]], ["lit", "nil"]], [["assign", ["var", d[0]], d[1]]], nil])
+            for s in body:
+                nb.append(s)
+            return ["fn", nm, args, nb, defs.len]
         if t[1] == "return":
             st[1] = st[1] + 1
             return ["ret", parse_expr(st)]
@@ -381,6 +483,11 @@ fn parse_stmt0(st):
                     st[1] = st[1] + 1
                 eat_op(st, ":")
                 hs.append([nm, parse_suite(st)])
+            if is_kw(st[0][st[1]], "finally"):
+                st[1] = st[1] + 1
+                eat_op(st, ":")
+                fin = parse_suite(st)
+                return make_try_fin(body, hs, fin)
             return ["try", body, hs]
         if t[1] == "raise":
             st[1] = st[1] + 1
@@ -440,13 +547,13 @@ fn parse_stmt0(st):
                 return ["print", a]
     e = parse_expr(st)
     a = st[0][st[1]]
-    if a[0] == "OP" and (a[1] == "=" or a[1] == "+=" or a[1] == "-=" or a[1] == "*=" or a[1] == "/=" or a[1] == "%="):
+    if a[0] == "OP" and (a[1] == "=" or a[1] == "+=" or a[1] == "-=" or a[1] == "*=" or a[1] == "/=" or a[1] == "%=" or a[1] == "&=" or a[1] == "|=" or a[1] == "^=" or a[1] == "<<=" or a[1] == ">>="):
         if e[0] != "var" and e[0] != "idx" and e[0] != "attr":
             raise tok_line(a) + "bad assign target"
         st[1] = st[1] + 1
         mut v = parse_expr(st)
         if a[1] != "=":
-            v = ["bin", a[1][0:1], e, v]
+            v = ["bin", a[1][0:a[1].len - 1], e, v]
         return ["assign", e, v]
     return ["expr", e]
 
@@ -510,21 +617,50 @@ fn parse_not(st):
     return parse_cmp(st)
 
 fn parse_cmp(st):
-    e = parse_add(st)
+    e = parse_bitor(st)
     mut go = true
     while go:
         t = st[0][st[1]]
         if t[0] == "OP" and (t[1] == "==" or t[1] == "!=" or t[1] == "<" or t[1] == ">" or t[1] == "<=" or t[1] == ">="):
             st[1] = st[1] + 1
-            e = ["bin", t[1], e, parse_add(st)]
+            e = ["bin", t[1], e, parse_bitor(st)]
         elif is_kw(t, "in"):
             st[1] = st[1] + 1
-            e = ["bin", "in", e, parse_add(st)]
+            e = ["bin", "in", e, parse_bitor(st)]
         elif is_kw(t, "not") and is_kw(st[0][st[1] + 1], "in"):
             st[1] = st[1] + 2
-            e = ["un", "not", ["bin", "in", e, parse_add(st)]]
+            e = ["un", "not", ["bin", "in", e, parse_bitor(st)]]
         else:
             go = false
+    return e
+
+fn parse_bitor(st):
+    e = parse_bitxor(st)
+    while is_op(st[0][st[1]], "|"):
+        st[1] = st[1] + 1
+        e = ["bin", "|", e, parse_bitxor(st)]
+    return e
+
+fn parse_bitxor(st):
+    e = parse_bitand(st)
+    while is_op(st[0][st[1]], "^"):
+        st[1] = st[1] + 1
+        e = ["bin", "^", e, parse_bitand(st)]
+    return e
+
+fn parse_bitand(st):
+    e = parse_shift(st)
+    while is_op(st[0][st[1]], "&"):
+        st[1] = st[1] + 1
+        e = ["bin", "&", e, parse_shift(st)]
+    return e
+
+fn parse_shift(st):
+    e = parse_add(st)
+    while is_op(st[0][st[1]], "<<") or is_op(st[0][st[1]], ">>"):
+        op = st[0][st[1]][1]
+        st[1] = st[1] + 1
+        e = ["bin", op, e, parse_add(st)]
     return e
 
 fn parse_add(st):
@@ -545,9 +681,10 @@ fn parse_mul(st):
     return e
 
 fn parse_un(st):
-    if is_op(st[0][st[1]], "-"):
+    if is_op(st[0][st[1]], "-") or is_op(st[0][st[1]], "~"):
+        op = st[0][st[1]][1]
         st[1] = st[1] + 1
-        return ["un", "-", parse_un(st)]
+        return ["un", op, parse_un(st)]
     return parse_pow(st)
 
 fn parse_pow(st):

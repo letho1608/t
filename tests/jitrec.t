@@ -191,4 +191,45 @@ print(fresh(7).x, fresh(7).y)
 assert fresh(7).x == 14
 assert fresh(3).y == 7
 print(map(fresh, [1, 2, 3]))
+
+# G8: SETATTR trong entry khi receiver là local owned hoặc method sửa field
+struct Mover:
+    x, y
+    fn move(self, dx, dy):
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+
+fn entry_mutate(v):
+    mut p = Mover(v, v * 2)
+    p.x = p.x + 10
+    p.y = p.y - 3
+    return p.x * 100 + p.y
+
+for i in range(100):
+    entry_mutate(i)
+assert entry_mutate(5) == 1507
+
+fn hot_move(n):
+    mut m = Mover(0, 0)
+    mut i = 0
+    while i < n:
+        m.move(1, 2)
+        i = i + 1
+    return m.x + m.y
+
+assert hot_move(2500) == 7500
+
+# G9: hàm đệ quy trả record (đoán retty theo shape record)
+fn build_rec(n):
+    if n <= 0:
+        return V(0, 0)
+    prev = build_rec(n - 1)
+    return V(prev.x + 1, prev.y + n)
+
+for i in range(60):
+    build_rec(5)
+r_rec = build_rec(10)
+assert r_rec.x == 10
+assert r_rec.y == 55
 print("JITREC2 OK")

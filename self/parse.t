@@ -1,18 +1,8 @@
-# self/parse.t — parser của T viết bằng chính T (v0.4 self-hosting bước 2)
-# Input: token list từ lex.tokenize (sau indent_scan). Output: AST tuple/list.
-# AST dùng list T: ["num", v], ["bin", op, l, r], ... ("prog" ở gốc)
+# self/parse.t — tiền xử lý thụt lề của T viết bằng chính T
+# Input: mã nguồn T. Output: danh sách [số_dòng, dòng_logic, là_dòng_nối] cho host.scan.
 
-fn peek(toks, i):
-    return toks[i]
-
-fn is_op(t, v):
-    return t[0] == "OP" and t[1] == v
-
-fn is_kw(t, w):
-    return t[0] == "KW" and t[1] == w
-
-# --- indent scan: source -> source với <IND>/<DED> ---
-# Bracket-aware + string-aware (khớp t.py): dòng nối trong (... [...] {...})
+# --- indent scan: source -> danh sách dòng logic kèm <IND>/<DED> ---
+# Bracket-aware + string-aware: dòng nối trong (... [...] {...})
 # không gây IND/DED; '#' trong string được giữ; tab nở thành 4 spaces.
 fn strip_comment(ln):
     if ln.find("#") < 0:
@@ -114,18 +104,3 @@ fn indent_lines(src):
         out.append([no, "<DED>", false])
     return out
 
-fn indent_scan(src):
-    mut out = []
-    for p in indent_lines(src):
-        out.append(p[1])
-    return "\n".join(out)
-
-# --- parser state: [toks, pos] ---
-# (parse_stmt sống ở parse2.t; entry full chương trình là host.parse_prog
-#  trong host.t — không định nghĩa parse_prog ở đây để tránh ref treo.)
-fn eat_op(st, v):
-    t = st[0][st[1]]
-    if t[0] != "OP" or t[1] != v:
-        raise "want " + v
-    st[1] = st[1] + 1
-    return t

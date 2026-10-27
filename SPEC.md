@@ -1,4 +1,4 @@
-# Ngôn ngữ T — Đặc tả thiết kế v2.2 (xem §21 cho phần mới; các mục cũ giữ làm lịch sử)
+# Ngôn ngữ T — Đặc tả thiết kế v3.0 (100% tự thân thuần `.t`, VM C + x86-64 JIT + Tensor n-D)
 
 > Mục tiêu: nhanh tối đa (đánh bại Python/Ruby, tiệm cận C), syntax đơn giản như
 > Python/Go, an toàn, AI-first, chạy trực tiếp không qua giai đoạn compile riêng.

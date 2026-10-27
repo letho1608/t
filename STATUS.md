@@ -1,9 +1,24 @@
-# Ngôn ngữ T — Báo cáo trạng thái v2.6 (2026-10-16)
+# Ngôn ngữ T — Báo cáo trạng thái v3.0 (2026-10-27)
 
-> Vị trí: `D:\Code\t`. Trạng thái: **`python tools/run_all.py` → ALL-GREEN** trên
-> Windows (MSVC 19.44):
-> 7 bộ test + mọi `tests/*.t`; 4 runtime khớp từng byte; JIT x86-64 cả 2 ABI;
-> tensor n-chiều khớp numpy. (Linux gcc 13 re-verify bằng Docker khi cần.)
+> Vị trí: `D:\Code\t`. Trạng thái: **`.\trun.exe tools\run_all.t` → ALL-GREEN** trên
+> Windows (MSVC 19.44): 35/35 bộ kiểm thử (7 subsystem + 28 `tests/*.t`), hoàn toàn tự thân
+> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G12 JIT x86-64,
+> bảo mật bytecode/process/archive, tham số mặc định, thư viện chuẩn đầy đủ (`math`, `json`, `os`, `path`, `time`, `autograd`, `ai`).
+
+## v3.0 — Tự thân hoàn toàn (`.t`), hoàn tất JIT G8/G9/G10/G12, chuẩn hóa bảo mật & stdlib
+
+- **Loại bỏ hoàn toàn sự phụ thuộc Python**: Compiler (`self/tcomp.t` → `tcomp.tb`), REPL (`tools/repl.t` → `trepl.tb`), Formatter (`tools/ffmt.t`), LSP (`tools/tlsp.t`), Package Manager (`tools/tpkg.t`, `tools/tpkg_reg.t`), Test Suite (`tools/run_all.t`, `tools/test_*.t`) và Benchmark Runner (`bench/bench.t`) đều viết 100% bằng T và chạy trực tiếp trên `trun`.
+- **Chạy trực tiếp file nguồn `.t` và `-c`**: `trun prog.t` và `trun -c "code"` tự động gọi `tcomp.tb` dịch ngầm và thực thi ngay trên VM + JIT.
+- **Tham số mặc định**: `fn f(a, b = 10, c = "x"):` hỗ trợ trên cả VM C, compiler T và evaluator `self/eval.t`.
+- **Hoàn tất JIT G8, G9, G10, G12 (`vm/jit_x64.c`)**:
+  - **G8**: `OP_SETATTR` trong entry mode khi receiver là record cục bộ (`is_own_rec_t` hoặc `sv == 1`) hoặc không thể abort sau điểm ghi (kèm guard tag toàn bộ field trước khi ghi).
+  - **G9**: Hàm đệ quy trả về record (`compile_entry` đăng ký trước các struct shape vào `j.ops` và suy đoán kiểu trả về `own_of_shape(s)` / `bor_of_shape(s)`).
+  - **G10**: Cờ sở hữu động `OWN(jc, i)` ngay trên stack frame native thay thế `nodec` tĩnh khi biến cục bộ nâng cấp `borrowed -> owned` trong vòng lặp, giải phóng bộ nhớ tức thời mỗi vòng lặp và đồng bộ chính xác khi OSR deopt.
+  - **G12**: Hỗ trợ `OP_STORE` chuỗi mượn `JT_S`, điều kiện `if d` trên dict, dict literal `{"k": v}` (`k > 0`), `d.has(k)`, `d.remove(k)`, chỉ số chuỗi `s[i]` (`tjit_str_idx`), và truyền chuỗi mới `JT_SN` làm đối số gọi hàm/method T.
+- **Bảo mật hệ thống (`vm/tvm.c`)**:
+  - `verify_bytecode`: Kiểm tra toàn vẹn bytecode `.tb` (magic, độ dài lệnh, phạm vi opcode, chỉ số global, bảng `LN01`/`EX01`, guard `OP_HALT`) trước khi thực thi.
+  - Khởi tạo tiến trình con trực tiếp qua OS API (`CreateProcessA` trên Windows, `fork`/`execvp` trên POSIX) với mảng tham số độc lập, loại bỏ hoàn toàn `system()` (chống CWE-78 OS Command Injection).
+  - Giải nén gói `.tpkg` kiểm tra chặt tên mục nén (`zip_safe_arcname`), chặn tuyệt đối `..`, đường dẫn tuyệt đối và ký tự ổ đĩa (chống CWE-22 Zip-Slip).
 
 ## v2.6 — JIT dict + chuỗi sở hữu được (G7) + G11
 

@@ -18,7 +18,7 @@ fn keywords():
         "while", "break", "continue", "true", "false", "nil", "and", "or",
         "not", "print", "tensor", "range", "len", "str", "int", "float",
         "type", "dict", "keys", "open", "read", "write", "close", "ord",
-        "chr", "argv", "assert", "mem", "f64bits", "import", "from", "as", "try", "except",
+        "chr", "argv", "assert", "mem", "f64bits", "import", "from", "as", "try", "except", "finally",
         "raise", "abs", "round", "min", "max", "sum", "any", "all",
         "sort", "reversed", "enumerate", "zip", "map", "filter",
         "switch", "case", "default", "struct"]
@@ -195,11 +195,15 @@ fn tokenize(src):
                 toks.append(["NAME", w, str(line)])
                 i = j
         else:
+            three = src[i:i + 3]
             two = src[i:i + 2]
-            if two == "==" or two == "!=" or two == "<=" or two == ">=" or two == "**" or two == "->" or two == "+=" or two == "-=" or two == "*=" or two == "/=" or two == "%=":
+            if three == "<<=" or three == ">>=":
+                toks.append(["OP", three, str(line)])
+                i = i + 3
+            elif two == "==" or two == "!=" or two == "<=" or two == ">=" or two == "**" or two == "->" or two == "+=" or two == "-=" or two == "*=" or two == "/=" or two == "%=" or two == "<<" or two == ">>" or two == "&=" or two == "|=" or two == "^=":
                 toks.append(["OP", two, str(line)])
                 i = i + 2
-            elif c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "@" or c == "<" or c == ">" or c == "=" or c == "(" or c == ")" or c == ":" or c == "," or c == "[" or c == "]" or c == "{" or c == "}" or c == ".":
+            elif c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "@" or c == "<" or c == ">" or c == "=" or c == "(" or c == ")" or c == ":" or c == "," or c == "[" or c == "]" or c == "{" or c == "}" or c == "." or c == "&" or c == "|" or c == "^" or c == "~":
                 toks.append(["OP", c, str(line)])
                 i = i + 1
             else:

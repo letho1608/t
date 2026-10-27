@@ -1,57 +1,41 @@
-# std/ai.t — thư viện AI (dùng qua: import ai)
-fn zeros(n):
-    mut r = []
-    for i in range(n):
-        r.append(0)
-    return tensor(r)
+# std/ai.t — Thư viện tiện ích AI và học máy cho T
+# Cung cấp các hàm toán học, activation, loss function và vi phân số học.
 
-fn ones(n):
-    mut r = []
-    for i in range(n):
-        r.append(1)
-    return tensor(r)
+# Bước sai phân mặc định cho đạo hàm số học
+DIFF_STEP = 0.00001
 
+# Tạo tensor chứa toàn số 0 theo kích thước hoặc shape truyền vào
+fn zeros(shape):
+    return full(shape, 0)
+
+# Tạo tensor chứa toàn số 1 theo kích thước hoặc shape truyền vào
+fn ones(shape):
+    return full(shape, 1)
+
+# Tích vô hướng (dot product) hoặc nhân ma trận giữa hai tensor
 fn dot(a, b):
     return a @ b
 
-fn relu(t):
-    mut r = []
-    for i in range(t.len):
-        v = t[i]
-        if v > 0:
-            r.append(v)
-        else:
-            r.append(0)
-    return tensor(r)
+# Hàm kích hoạt ReLU (Rectified Linear Unit): max(0, x)
+fn relu(x):
+    t = x if type(x) == "tensor" else tensor(x)
+    return t.relu()
 
-fn mse(a, b):
-    mut s = 0
-    for i in range(a.len):
-        d = a[i] - b[i]
-        s = s + d * d
-    return s / a.len
+# Hàm mất mát Mean Squared Error (MSE): trung bình bình phương sai số
+fn mse(predicted, actual):
+    diff = predicted - actual
+    return (diff * diff).mean()
 
+# Tính đạo hàm số học f'(x) tại điểm x bằng sai phân trung tâm (central difference)
 fn grad(f, x):
-    h = 0.00001
+    h = DIFF_STEP
     return (f(x + h) - f(x - h)) / (2 * h)
 
-# linear: w @ x + b  (w, x tensor cùng len)
-fn linear(w, x, b):
-    return (w @ x) + b
+# Biến đổi tuyến tính affine: weights @ inputs + bias
+fn linear(weights, inputs, bias):
+    return (weights @ inputs) + bias
 
-# softmax 1-D, trả tensor
-fn softmax(t):
-    mut m = t[0]
-    for i in range(1, t.len):
-        if t[i] > m:
-            m = t[i]
-    mut s = 0
-    mut e = []
-    for i in range(t.len):
-        v = 2.718281828 ** ((t[i] - m))
-        e.append(v)
-        s = s + v
-    mut r = []
-    for v in e:
-        r.append(v / s)
-    return tensor(r)
+# Hàm Softmax chuẩn hóa phân phối xác suất
+fn softmax(x):
+    t = x if type(x) == "tensor" else tensor(x)
+    return t.softmax()

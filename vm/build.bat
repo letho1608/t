@@ -1,5 +1,5 @@
 @echo off
-REM build.bat — build trun.exe bằng MSVC + bootstrap tcomp.tb/trepl.tb (Windows x64).
+REM build.bat — build trun.exe bằng MSVC + tự host tcomp.tb/trepl.tb (Windows x64).
 REM   vm\build.bat            (chạy được từ bất kỳ thư mục nào)
 REM Cần Visual Studio Build Tools 2019+ (cl.exe). Nếu đã ở trong "x64 Native
 REM Tools Command Prompt" thì dùng luôn cl hiện có.
@@ -27,16 +27,17 @@ if errorlevel 1 (
 )
 if not exist build mkdir build
 cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fobuild\ /Fe"%ROOT%\trun.exe" vm\tvm.c vm\jit_x64.c vm\tdbg.c vm\trun.c
-if errorlevel 1 exit /b 1
+set BUILD_RC=%errorlevel%
+rmdir /s /q build 2>nul
+del /q *.obj 2>nul
+if not "%BUILD_RC%"=="0" exit /b 1
 echo [build] OK: trun.exe
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [build] khong co python: bo qua bootstrap tcomp.tb
-  exit /b 0
+if exist "%ROOT%\tcomp.tb" (
+  "%ROOT%\trun.exe" tcomp.tb -b self\tcli.t tcomp.new.tb >nul
+  if errorlevel 1 exit /b 1
+  move /y tcomp.new.tb tcomp.tb >nul
+  "%ROOT%\trun.exe" tcomp.tb -b tools\repl.t trepl.tb >nul
+  if errorlevel 1 exit /b 1
+  echo [build] OK: tcomp.tb + trepl.tb ^(self-hosted^)
 )
-python vm\tcomp.py -b self\tcli.t tcomp.tb >nul
-if errorlevel 1 exit /b 1
-"%ROOT%\trun.exe" tcomp.tb -b tools\repl.t trepl.tb >nul
-if errorlevel 1 exit /b 1
-echo [build] OK: tcomp.tb + trepl.tb
 exit /b 0

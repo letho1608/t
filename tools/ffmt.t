@@ -1,8 +1,7 @@
 # tools/ffmt.t — CLI cho formatter (viết bằng chính T)
 # Dùng:
-#   python t.py tools/ffmt.t prog.t              # format tại chỗ
-#   python t.py tools/ffmt.t --check prog.t      # exit 1 nếu chưa chuẩn
-#   trun fmt.tb prog.t                           # tương tự, không cần Python
+#   trun tools/ffmt.t prog.t              # format tại chỗ
+#   trun tools/ffmt.t --check prog.t      # exit 1 nếu chưa chuẩn
 import fmt
 
 args = argv()

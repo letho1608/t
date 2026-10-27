@@ -31,6 +31,7 @@ close(f)
 f = open("tests/_tmp_out.txt", "r")
 print(read(f))
 close(f)
+load("__sys").remove("tests/_tmp_out.txt")
 
 import ai
 print(ai.softmax(tensor([1, 2, 3])).sum())

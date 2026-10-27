@@ -20,13 +20,67 @@
 #define TRUN_SEP '/'
 #endif
 
-#define TRUN_VERSION "2.6"
+#define TRUN_VERSION "3.0"
+
+static int is_tb_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char hdr[4];
+    size_t n = fread(hdr, 1, 4, f);
+    fclose(f);
+    return n == 4 && memcmp(hdr, "TB01", 4) == 0;
+}
+
+static void make_tmp_path(char *out, size_t n, const char *ext) {
+    static unsigned int seq = 0;
+    seq++;
+#ifdef _WIN32
+    char dir[512];
+    DWORD dlen = GetTempPathA((DWORD)sizeof(dir), dir);
+    if (dlen == 0 || dlen >= sizeof(dir)) snprintf(dir, sizeof(dir), ".");
+    snprintf(out, n, "%strun_%lu_%u%s", dir, (unsigned long)GetCurrentProcessId(), seq, ext);
+#else
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+    snprintf(out, n, "%s/trun_%lu_%u%s", dir, (unsigned long)getpid(), seq, ext);
+#endif
+}
 
 static int run_tb(const char *path, char **xargv, int xargc, int dbg) {
     TProg p; memset(&p, 0, sizeof(p));
     char msg[256];
-    if (tvm_read_tb(path, &p, msg, sizeof(msg)) != 0) {
-        fprintf(stderr, "%s\n", msg); return 1;
+    char tmp_tb[1024];
+    int used_tmp = 0;
+    const char *load_path = path;
+
+    if (!is_tb_file(path)) {
+        FILE *chk = fopen(path, "rb");
+        if (!chk) {
+            fprintf(stderr, "không mở được %s\n", path);
+            return 1;
+        }
+        fclose(chk);
+        make_tmp_path(tmp_tb, sizeof(tmp_tb), ".tb");
+        if (tvm_compile_src(path, tmp_tb, 1, msg, sizeof(msg)) < 0) {
+            remove(tmp_tb);
+            fprintf(stderr, "%s\n", msg);
+            return 1;
+        }
+        load_path = tmp_tb;
+        used_tmp = 1;
+    }
+
+    if (tvm_read_tb(load_path, &p, msg, sizeof(msg)) != 0) {
+        if (used_tmp) remove(tmp_tb);
+        fprintf(stderr, "%s\n", msg);
+        return 1;
+    }
+    if (used_tmp) {
+        remove(tmp_tb);
+        free(p.path);
+        size_t plen = strlen(path);
+        p.path = (char*)malloc(plen + 1);
+        if (p.path) memcpy(p.path, path, plen + 1);
     }
     p.xargv = xargv;
     p.xargc = xargc;
@@ -44,6 +98,23 @@ static int run_tb(const char *path, char **xargv, int xargc, int dbg) {
     tvm_free(&vm);
     tvm_prog_release(&p);
     return rc ? 1 : 0;
+}
+
+static int run_code(const char *code, char **xargv, int xargc, int dbg) {
+    char tmp_t[1024];
+    make_tmp_path(tmp_t, sizeof(tmp_t), ".t");
+    FILE *f = fopen(tmp_t, "wb");
+    if (!f) {
+        fprintf(stderr, "không tạo được file tạm\n");
+        return 1;
+    }
+    size_t len = strlen(code);
+    fwrite(code, 1, len, f);
+    if (len == 0 || code[len - 1] != '\n') fwrite("\n", 1, 1, f);
+    fclose(f);
+    int rc = run_tb(tmp_t, xargv, xargc, dbg);
+    remove(tmp_t);
+    return rc;
 }
 
 /* trepl.tb: $TREPL, rồi cạnh file thực thi, rồi thư mục hiện tại */
@@ -73,9 +144,11 @@ static int find_repl(const char *argv0, char *out, size_t n) {
 static void usage(void) {
     fprintf(stderr,
         "T %s — usage:\n"
-        "  trun prog.tb [args...]   chạy bytecode\n"
-        "  trun -d prog.tb          debugger\n"
-        "  trun                     REPL (cần trepl.tb: trun tcomp.tb -b tools/repl.t trepl.tb)\n"
+        "  trun prog.t [args...]    biên dịch & chạy trực tiếp file nguồn .t\n"
+        "  trun prog.tb [args...]   chạy bytecode .tb\n"
+        "  trun -c \"code\" [args...] chạy đoạn mã T trực tiếp\n"
+        "  trun -d prog.t|.tb       debugger từng lệnh\n"
+        "  trun                     REPL (cần trepl.tb)\n"
         "  trun --version\n", TRUN_VERSION);
 }
 
@@ -95,7 +168,7 @@ int main(int argc, char **argv) {
     }
 #endif
 #ifdef _WIN32
-    /* nhị phân: không CRLF — output phải khớp byte với t.py */
+    /* nhị phân: không CRLF — output phải khớp byte chuẩn */
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
@@ -112,5 +185,10 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) { usage(); return 0; }
     if (!strcmp(argv[1], "-d")) { dbg = 1; ai++; }
     if (ai >= argc) { usage(); return 2; }
+    if (!strcmp(argv[ai], "-c")) {
+        ai++;
+        if (ai >= argc) { usage(); return 2; }
+        return run_code(argv[ai], argv + ai + 1, argc - ai - 1, dbg);
+    }
     return run_tb(argv[ai], argv + ai + 1, argc - ai - 1, dbg);
 }

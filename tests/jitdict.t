@@ -144,4 +144,30 @@ for i in range(3000):
     msg = "n" + str(i)
 print(h2.len, h2["k"], len(msg))
 assert h2["k"] == 2999
+
+# G12: dict literal {"a": 1, ...}, d.has(k), d.remove(k), điều kiện if d, s[i], STORE chuỗi mượn, gọi hàm với chuỗi mới
+fn str_helper(s):
+    return len(s) + (10 if s[0] == "k" else 0)
+
+fn g12_test(n):
+    mut total = 0
+    mut label = "init"
+    mut i = 0
+    while i < n:
+        mut d = {"a": i, "b": i + 1}
+        if d:
+            if d.has("a"):
+                total = total + d["a"]
+            d.remove("b")
+            if not d.has("b"):
+                total = total + d.len
+        label = "const_tag"
+        s = "k" + str(i % 10)
+        if s[0] == "k":
+            total = total + str_helper(s) + len(label)
+        i = i + 1
+    return total
+
+assert g12_test(10) == 265
+assert g12_test(2500) == 3178750
 print("JITDICT OK")

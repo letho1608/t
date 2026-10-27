@@ -23,7 +23,7 @@ fn run_chunk(src, env, mods):
     return nil
 
 fn main():
-    print("T v2.2 REPL (trun)  (khoi lenh ket thuc bang dong trong; thoat: exit)")
+    print("T v3.0 REPL (trun)  (khoi lenh ket thuc bang dong trong; thoat: exit)")
     env = eval.env_new(nil)
     mods = {}
     mut buf = ""

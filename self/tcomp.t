@@ -1,21 +1,19 @@
-# self/tcomp.t — compiler T -> bytecode .tb viết bằng chính T (v2.1 thuần T)
+# self/tcomp.t — compiler T -> bytecode .tb viết bằng chính T (thuần T)
 # Thư viện; CLI nằm ở self/tcli.t (from tcomp import main_cli).
-# Bootstrap một lần: python vm/tcomp.py -b self/tcli.t tcomp.tb
-# Sau đó không cần Python:
-#   trun tcomp.tb prog.t prog.tb          (dịch)
-#   trun tcomp.tb prog.t prog.tb          (có import thì tự gộp module)
+# Cách dùng:
+#   trun tcomp.tb prog.t prog.tb          (dịch; có import thì tự gộp module)
 #   trun tcomp.tb -b self/tcli.t t2.tb    (tự biên dịch, tới fixed point)
 # .tb: "TB01" + u16 nglobals + u32 len + code. Op theo vm/tvm.h.
 # Phạm vi: full core (mọi node/stmt, closure, try, assert, fstr, mem,
 # f64bits) + inliner hàm single-return + peephole superop; import qua -b.
 # Chỉ 1 primitive C: f64bits. Int 2/4/8 byte và UTF-8 làm thuần T.
-# String là byte-string (1 char = 1 byte) ở cả VM C lẫn t.py: UTF-8 pass-through.
+# String là byte-string (1 char = 1 byte) ở cả VM C lẫn compiler T: UTF-8 pass-through.
 import host
 import parse2
 
 # ---------- bảng opcode/native ----------
 fn opnames():
-    return ["PUSH_NIL", "PUSH_BOOL", "PUSH_INT", "PUSH_FLOAT", "PUSH_STR", "NEW_LIST", "NEW_TENSOR", "NEW_DICT", "ADD", "SUB", "MUL", "DIV", "MOD", "POW", "NEG", "NOT", "EQ", "NE", "LT", "GT", "LE", "GE", "CONTAINS", "MATCHGLOB", "TDOT", "IDX", "SETIDX", "SLICE", "LEN", "PRINT", "JMP", "JMPF", "JMPT", "CALL", "RET", "LOAD", "STORE", "DECL", "LOADG", "STOREG", "DECLG", "MKFN", "CAPLOCAL", "CAPUP", "CAPG", "LOADU", "STOREU", "BIND", "BINDG", "RANGE", "ATTR", "RAISE", "TRY_PUSH", "TRY_POP", "FOR_PREP", "POP", "DUP", "INC_L", "INC_G", "DEC_L", "DEC_G", "ADDI_L", "ADDI_G", "ADDS_L", "ADDS_G", "SUBS_L", "SUBS_G", "INCB_L", "INCB_G", "IN", "CALLM", "SETATTR", "NOP", "HALT"]
+    return ["PUSH_NIL", "PUSH_BOOL", "PUSH_INT", "PUSH_FLOAT", "PUSH_STR", "NEW_LIST", "NEW_TENSOR", "NEW_DICT", "ADD", "SUB", "MUL", "DIV", "MOD", "POW", "NEG", "NOT", "EQ", "NE", "LT", "GT", "LE", "GE", "CONTAINS", "MATCHGLOB", "TDOT", "IDX", "SETIDX", "SLICE", "LEN", "PRINT", "JMP", "JMPF", "JMPT", "CALL", "RET", "LOAD", "STORE", "DECL", "LOADG", "STOREG", "DECLG", "MKFN", "CAPLOCAL", "CAPUP", "CAPG", "LOADU", "STOREU", "BIND", "BINDG", "RANGE", "ATTR", "RAISE", "TRY_PUSH", "TRY_POP", "FOR_PREP", "POP", "DUP", "INC_L", "INC_G", "DEC_L", "DEC_G", "ADDI_L", "ADDI_G", "ADDS_L", "ADDS_G", "SUBS_L", "SUBS_G", "INCB_L", "INCB_G", "IN", "CALLM", "SETATTR", "BAND", "BOR", "BXOR", "BNOT", "SHL", "SHR", "NOP", "HALT"]
 
 fn build_op():
     mut d = {}
@@ -71,6 +69,16 @@ fn binop_name(op):
         return "GE"
     if op == "in":
         return "IN"
+    if op == "&":
+        return "BAND"
+    if op == "|":
+        return "BOR"
+    if op == "^":
+        return "BXOR"
+    if op == "<<":
+        return "SHL"
+    if op == ">>":
+        return "SHR"
     return nil
 
 # ---------- số nguyên -> byte (thuần T) ----------
@@ -91,14 +99,6 @@ fn divmod256(d):
     while q.len > 1 and q[0] == 0:
         q = q[1:]
     return [q, rem]
-
-fn pow256(n):
-    mut r = 1
-    mut i = 0
-    while i < n:
-        r = r * 256
-        i = i + 1
-    return r
 
 fn be_bytes(v, n):
     if n < 0 or n > 8:
@@ -190,7 +190,7 @@ fn rd_i64(code, at):
         return 0 - (comp + 1)
     return v
 
-# ---------- số trong AST (self/lex.t giữ chuỗi; t.py đã ra số) ----------
+# ---------- số trong AST (self/lex.t giữ chuỗi) ----------
 fn digit_val(c):
     if c >= "0" and c <= "9":
         return ord(c) - ord("0")
@@ -212,7 +212,7 @@ fn acc_base(s, i, base, acc):
         i = i + 1
     return v
 
-fn parse_num(s):
+fn num_val(s):
     mut t = ""
     for i in range(s.len):
         c = s[i:i + 1]
@@ -230,19 +230,12 @@ fn parse_num(s):
         return float(t)
     return acc_base(t, 0, 10, 0)
 
-fn num_val(v):
-    if type(v) == "str":
-        return parse_num(v)
-    return v
-
-fn lit_val(v):
-    if type(v) == "str":
-        if v == "true":
-            return true
-        if v == "false":
-            return false
-        return nil
-    return v
+fn lit_val(s):
+    if s == "true":
+        return true
+    if s == "false":
+        return false
+    return nil
 
 # ---------- trạng thái compiler ----------
 # cc = {"b": byte list, "gnames": {}, "fn_names": [], "fnmap": [], "fnorder": [],
@@ -623,6 +616,8 @@ fn c_expr(cc, e):
             c_emit(cc, cc["op"]["NEG"])
         elif e[1] == "not":
             c_emit(cc, cc["op"]["NOT"])
+        elif e[1] == "~":
+            c_emit(cc, cc["op"]["BNOT"])
         else:
             fail("unary " + e[1])
     elif k == "bin":
@@ -885,7 +880,12 @@ fn c_fn(cc, s, main):
     c_patch(cc, over)
     c_emit(cc, cc["op"]["MKFN"])
     c_i32(cc, entry)
-    cc["b"].append(args.len)
+    if s.len > 4 and s[4] == -1:
+        cc["b"].append(240 + args.len)
+    elif s.len > 4 and s[4] > 0:
+        cc["b"].append(128 + s[4] * 16 + args.len)
+    else:
+        cc["b"].append(args.len)
     c_u16(cc, fctx["max"])
     c_u16(cc, fctx["uval"].len)
     for nm in fctx["uval"].keys():
@@ -1383,11 +1383,14 @@ fn prescan_stmt(cc, s):
                 prescan_scope(cc, s[3], false)
     elif k == "try":
         prescan_scope(cc, s[1], false)
+        push_scope(cc, false)
+        pre_alloc(cc, "err")
         for h in s[2]:
-            push_scope(cc, false)
-            pre_alloc(cc, "err")
-            prescan(cc, h[1])
-            pop_scope(cc)
+            if h[0] == nil:
+                prescan_scope(cc, h[1], false)
+                break
+            prescan_scope(cc, h[1], false)
+        pop_scope(cc)
     elif k == "print":
         for x in s[1]:
             prescan_expr(cc, x)
@@ -1718,6 +1721,8 @@ fn rw_stmt(s, up, lren, am, xb, fbound, is_entry, cur):
         nm = s[2]
         if has_key(lren, nm):
             nm = lren[nm]
+        if s[3][0] == "var" and s[3][1] == s[2]:
+            return ["decl", s[1], nm, s[3]]
         return ["decl", s[1], nm, rw_expr(s[3], up, lren, am, xb)]
     if k == "fn":
         nm = s[1]
@@ -1741,6 +1746,8 @@ fn rw_stmt(s, up, lren, am, xb, fbound, is_entry, cur):
                 args.append(myren[a])
             else:
                 args.append(a)
+        if s.len > 4:
+            return ["fn", nm2, args, body, s[4]]
         return ["fn", nm2, args, body]
     if k == "assign":
         t = s[1]
@@ -2013,7 +2020,7 @@ fn compile_prog(cc, prog):
             for x in s[3]:
                 if x[0] != "line":
                     bs.append(x)
-            if bs.len == 1 and bs[0][0] == "ret":
+            if s.len == 4 and bs.len == 1 and bs[0][0] == "ret":
                 cc["fntab"][s[1]] = [s[2], bs[0][1], s[1]]
     main = new_fctx(true, 0, 0)
     cc["main"] = main
@@ -2075,7 +2082,7 @@ fn build_from_cc(cc):
     for b in be_bytes(ln, 4):
         out.append(b)
     out.extend(cc["b"])
-    # bảng dòng "LN01" (khớp line_table của vm/tcomp.py)
+    # bảng dòng "LN01"
     for b in [76, 78, 48, 49]:
         out.append(b)
     for b in be_bytes(cc["lfiles"].len, 2):
@@ -2094,7 +2101,7 @@ fn build_from_cc(cc):
             out.append(b)
         for b in be_bytes(e[2], 2):
             out.append(b)
-    # bảng export "EX01" (khớp export_table của vm/tcomp.py)
+    # bảng export "EX01"
     mut ex = []
     for k in cc["main"]["scopes"][0]["m"]:
         if "$" not in k and not k.endswith("__type"):
@@ -2122,21 +2129,22 @@ fn main_cli():
     args = argv()
     mut paths = []
     mut dobundle = false
+    mut quiet = false
     for a in args:
         if a == "-b":
             dobundle = true
+        elif a == "-q":
+            quiet = true
         else:
             paths.append(a)
     if paths.len < 2:
-        print("dùng: tcomp [-b] prog.t prog.tb")
+        print("dùng: tcomp [-b] [-q] prog.t prog.tb")
         raise "usage"
     src = paths[paths.len - 2]
     out = paths[paths.len - 1]
-    prog = parse_prog_file(src, dobundle)
-    cc = new_c()
-    compile_prog(cc, prog)
-    r = build_from_cc(cc)
+    r = compile_file(src, dobundle)
     f = open(out, "wb")
     write(f, r[0])
     close(f)
-    print("ok")
+    if not quiet:
+        print("ok")

@@ -14,7 +14,6 @@ static size_t g_bps[64];
 static int g_nbps;
 
 void dbg_enable(void) { g_on = 1; g_step = 0; }
-int dbg_enabled(void) { return g_on; }
 
 static const char *opname(uint8_t op) { return tvm_opname(op); }
 

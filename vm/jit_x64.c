@@ -74,7 +74,7 @@ typedef char tval_layout_check[(offsetof(TVal, u) == 8 && sizeof(TType) == 4) ? 
 /* JT_LI/LF/LB: list mà phần tử (đoán lúc biên dịch) là int/float/bool;
    JT_LX: list phần tử lẫn lộn (chỉ dùng len) */
 enum { JT_UNK = 0, JT_I, JT_F, JT_B, JT_FN, JT_NAT, JT_LI, JT_LF, JT_LB, JT_LX,
-       JT_S = 10, JT_TYP = 11, JT_D = 12, JT_DN = 13, JT_SN = 14 };
+       JT_S = 10, JT_TYP = 11, JT_D = 12, JT_DN = 13, JT_SN = 14, JT_NIL = 15 };
 /* chuỗi hằng: JT_S, slot giữ TVal* mượn (hằng cache trong ic, sống suốt native).
    JT_SN: chuỗi sở hữu được (wrapper TVal* malloc, giữ 1 ref) do str()/nối tạo ra.
    JT_D: dict mượn (local/global giữ ref); JT_DN: dict sở hữu được (NEW_DICT trong
@@ -155,6 +155,7 @@ typedef struct {
     JitDeopt *deopts;
     int ndeopt;
     int nsave;                  /* số qword frame cần chép khi deopt */
+    int own_base;               /* offset của mảng cờ OWN trong save[] */
 } JitOsr;
 
 /* một bản đặc hoá entry theo bộ kiểu đối số */
@@ -279,6 +280,7 @@ static int decode(JC *j, TProg *p, size_t beg, size_t end) {
         case OP_PUSH_INT: add_op(j, OP_PUSH_INT, rd64(c + pc + 1), pc, 1); break;
         case OP_PUSH_FLOAT: add_op(j, OP_PUSH_FLOAT, rd64(c + pc + 1), pc, 1); break;
         case OP_PUSH_BOOL: add_op(j, OP_PUSH_BOOL, c[pc + 1] ? 1 : 0, pc, 1); break;
+        case OP_PUSH_NIL: add_op(j, OP_PUSH_NIL, 0, pc, 1); break;
         case OP_PUSH_STR: add_op(j, OP_PUSH_STR, 0, pc, 1); break;   /* hằng chuỗi: JT_S mượn */
         case OP_SETATTR: add_op(j, OP_SETATTR, 0, pc, 1); break;     /* gán field số: tên đọc lại từ pc */
         case OP_LOAD: case OP_STORE: case OP_DECL: case OP_BIND: case OP_LOADG:
@@ -310,6 +312,7 @@ static int decode(JC *j, TProg *p, size_t beg, size_t end) {
         }
         case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
         case OP_NEG: case OP_NOT:
+        case OP_BAND: case OP_BOR: case OP_BXOR: case OP_BNOT: case OP_SHL: case OP_SHR:
         case OP_EQ: case OP_NE: case OP_LT: case OP_GT: case OP_LE: case OP_GE:
         case OP_RET: case OP_POP: case OP_DUP: case OP_NOP:
         case OP_IDX: case OP_SETIDX: case OP_LEN:
@@ -410,12 +413,18 @@ static int merge_in(JC *j, int i, int depth, const uint8_t *st, const int32_t *s
             if (j->nodec) j->nodec[l] = 1;
             continue;
         }
-        /* nâng chuỗi/dict mượn -> sở hữu được (vd k = "w" + str(i)): deopt move;
-           codegen STORE dùng entry-compare nên lần ghi đầu không nhả ref cũ */
+        /* nâng chuỗi/dict mượn -> sở hữu được (vd k = "w" + str(i)): deopt/codegen
+           dùng cờ runtime OWN(j, l) để biết lúc nào giữ giá trị owned thật */
         if ((s->lt[l] == JT_S && lt[l] == JT_SN) ||
             (s->lt[l] == JT_D && lt[l] == JT_DN)) {
             s->lt[l] = lt[l]; ch = 1;
             if (j->nodec) j->nodec[l] = 1;
+            continue;
+        }
+        if ((s->lt[l] == JT_SN && lt[l] == JT_S) ||
+            (s->lt[l] == JT_DN && lt[l] == JT_D) ||
+            (is_own_rec_t(s->lt[l]) && is_rec_t(lt[l]) &&
+             rec_shape(s->lt[l]) == rec_shape(lt[l]))) {
             continue;
         }
         jc_fail(j, "local đổi kiểu qua vòng lặp/nhánh");
@@ -488,10 +497,36 @@ static TFn *shape_method(const JShape *sh, const uint8_t *name, uint32_t len) {
     return NULL;
 }
 static int arg_ok_t(uint8_t t) {
-    /* SN (chuỗi mới) KHÔNG làm đối số gọi hàm: callee mượn xem, caller không thể
-       nhả temp (kết quả có thể alias nó) mà bỏ thì leak (wrapper không track GC) */
-    return t == JT_I || t == JT_F || t == JT_B || t == JT_S ||
+    return t == JT_I || t == JT_F || t == JT_B || is_str_t(t) ||
            is_dict_t(t) || is_list_t(t) || is_any_rec_t(t);
+}
+/* kiểm tra từ sau micro-op idx tới cuối hàm không còn lệnh nào có thể abort/guard hỏng */
+static int no_abort_after(JC *j, int idx) {
+    for (int q = 0; q < j->nops; q++) {
+        MOp *m = &j->ops[q];
+        if ((m->op == OP_JMP || m->op == OP_JMPF || m->op == OP_JMPT) && m->target <= q)
+            return 0; /* có vòng lặp trong hàm */
+    }
+    for (int q = idx + 1; q < j->nops; q++) {
+        uint8_t op = j->ops[q].op;
+        switch (op) {
+        case OP_PUSH_INT: case OP_PUSH_FLOAT: case OP_PUSH_BOOL:
+        case OP_PUSH_NIL: case OP_PUSH_STR:
+        case OP_LOAD: case OP_STORE: case OP_DECL: case OP_BIND:
+        case OP_ADD: case OP_SUB: case OP_MUL:
+        case OP_NEG: case OP_NOT:
+        case OP_BAND: case OP_BOR: case OP_BXOR: case OP_BNOT: case OP_SHL: case OP_SHR:
+        case OP_EQ: case OP_NE: case OP_LT: case OP_GT: case OP_LE: case OP_GE:
+        case OP_POP: case OP_DUP: case OP_NOP: case OP_LEN:
+        case OP_ATTR: case OP_SETATTR:
+        case OP_JMP: case OP_JMPF: case OP_JMPT:
+        case OP_RET:
+            break;
+        default:
+            return 0;
+        }
+    }
+    return 1;
 }
 /* kiểu trừu tượng của list theo phần tử hiện có (đoán; mỗi lần đọc đều có guard) */
 static uint8_t list_ty(const TList *l) {
@@ -535,6 +570,7 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
             case OP_PUSH_INT: st[d] = JT_I; sv[d] = 0; d++; break;
             case OP_PUSH_FLOAT: st[d] = JT_F; sv[d] = 0; d++; break;
             case OP_PUSH_BOOL: st[d] = JT_B; sv[d] = 0; d++; break;
+            case OP_PUSH_NIL: st[d] = JT_NIL; sv[d] = 0; d++; break;
             case OP_PUSH_STR: {
                 /* hằng chuỗi mượn cache ic (khởi tạo ở lần chạy interpreter đầu) */
                 if (!j->prog->ic || j->prog->ic[m->pc].kind != 4) {
@@ -545,38 +581,42 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
             case OP_LOAD:
                 if (m->k >= j->nl || lt[m->k] == JT_UNK) { jc_fail(j, "đọc local chưa gán / kiểu lạ"); break; }
                 st[d] = lt[m->k];
-                if (is_own_rec_t(st[d])) st[d] = bor_of_shape(rec_shape(st[d]));  /* mượn xem */
+                sv[d] = 0;
+                if (is_own_rec_t(st[d])) {
+                    st[d] = bor_of_shape(rec_shape(st[d]));  /* mượn xem */
+                    if (!j->nodec[m->k]) sv[d] = 1;          /* G8: record tạo mới trong cùng hàm */
+                }
                 else if (st[d] == JT_DN) st[d] = JT_D;    /* dict mượn xem */
                 else if (st[d] == JT_SN) st[d] = JT_S;    /* chuỗi mượn xem */
-                sv[d] = 0; d++; break;
+                d++; break;
             case OP_STORE: case OP_DECL: case OP_BIND:
                 if (d < 1) { jc_fail(j, "stack rỗng"); break; }
                 d--;
                 if (m->k >= j->nl) { jc_fail(j, "slot lạ"); break; }
                 if (st[d] == JT_I || st[d] == JT_F || st[d] == JT_B) { lt[m->k] = st[d]; break; }
                 if (is_own_rec_t(st[d])) {
-                    /* record mới: gán đè mọi kiểu cũ (cũ owned chắc chắn native thì
-                       nhả ref, cũ khác thì interpreter vẫn giữ ref của nó) */
+                    /* record mới: gán đè mọi kiểu cũ (OWN(j, k) kiểm ở runtime) */
                     lt[m->k] = st[d]; break;
                 }
                 if (is_rec_t(st[d])) {
-                    /* record mượn xem (vd kết quả method trả về tham số): gán đè,
-                       deopt đồng bộ lại bằng free + retain */
+                    /* record mượn xem (vd kết quả method trả về tham số): gán đè */
+                    if (is_own_rec_t(lt[m->k]) && rec_shape(lt[m->k]) == rec_shape(st[d])) break;
                     lt[m->k] = st[d]; break;
                 }
                 if (st[d] == JT_SN || st[d] == JT_DN) {
-                    /* chuỗi/dict mới: gán đè; codegen entry-compare để chỉ nhả ref
-                       cũ khi chắc chắn native-owned (lần ghi đầu giữ ref interpreter) */
+                    /* chuỗi/dict mới: gán đè; codegen kiểm OWN(j, k) để nhả ref cũ */
                     lt[m->k] = st[d]; break;
                 }
                 if (st[d] == JT_S) {
-                    /* CHƯA HỖ TRỢ (giữ như G6): chuỗi mượn gán vào local sẽ tạo alias
-                       mà overwrite sau không phân biệt được (cần tag ownership - G10) */
-                    jc_fail(j, "gán chuỗi mượn vào local"); break;
+                    /* G12 + G10: chuỗi mượn gán vào local; OWN(j, k) = 0 ở runtime */
+                    if (j->mainmode) { jc_fail(j, "gán chuỗi mượn vào local main"); break; }
+                    if (lt[m->k] != JT_SN) lt[m->k] = JT_S;
+                    break;
                 }
                 if (st[d] == JT_D) {
-                    /* dict mượn xem: gán đè, deopt free + retain */
-                    lt[m->k] = st[d]; break;
+                    /* dict mượn xem: gán đè */
+                    if (lt[m->k] != JT_DN) lt[m->k] = JT_D;
+                    break;
                 }
                 jc_fail(j, "gán local kiểu ngoài phạm vi"); break;
             case OP_STOREG: case OP_BINDG: {
@@ -646,6 +686,11 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                     d--; st[d - 1] = JT_I; sv[d - 1] = 0;
                     break;
                 }
+                if (d >= 2 && is_str_t(st[d - 2]) && st[d - 1] == JT_I) {
+                    /* s[i]: chuỗi 1 ký tự từ str1_cache (JT_S mượn; ngoài biên -> deopt) */
+                    d--; st[d - 1] = JT_S; sv[d - 1] = 0;
+                    break;
+                }
                 if (d < 2 || list_elem(st[d - 2]) == JT_UNK || st[d - 1] != JT_I) {
                     jc_fail(j, "index ngoài phạm vi JIT"); break;
                 }
@@ -685,13 +730,15 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 break;
             }
             case OP_SETATTR: {
-                /* gán field số lên record (OSR only, như SETIDX): guard tag cũ là số
-                   nên không cần refcount cho giá trị cũ/mới */
+                /* gán field số lên record: OSR, hoặc G8 trong entry khi receiver là
+                   record mới tạo trong cùng hàm / không còn lệnh nào sau đó có thể abort */
                 const uint8_t *c = j->prog->code + m->pc;
                 JShape *sh;
                 int fi;
-                if (!j->osr) { jc_fail(j, "gán field (side effect) chỉ JIT trong vùng OSR"); break; }
                 if (d < 2 || !is_any_rec_t(st[d - 2])) { jc_fail(j, "gán field ngoài phạm vi JIT"); break; }
+                if (!j->osr && !(is_own_rec_t(st[d - 2]) || sv[d - 2] == 1 || no_abort_after(j, i))) {
+                    jc_fail(j, "gán field (side effect) chỉ JIT trong vùng OSR"); break;
+                }
                 sh = shape_of_any(st[d - 2]);
                 if (!sh) { jc_fail(j, "shape lạ"); break; }
                 fi = shape_field(sh, c + 5, (uint32_t)rd32(c + 1));
@@ -709,26 +756,44 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 uint8_t at[256], r = JT_UNK;
                 JShape *sh;
                 TFn *F;
-                if (d >= k + 1 && is_dict_t(st[d - k - 1]) && k == 2 &&
-                    rd32(c + 2) == 3 && memcmp(c + 6, "get", 3) == 0 &&
-                    (st[d - 2] == JT_I || is_str_t(st[d - 2])) &&
-                    st[d - 1] == JT_I) {
-                    /* d.get(k, dflt-int) đoán int (thiếu key -> dùng default, khác int
-                       -> deopt; codegen dec keytemp owned) */
-                    d -= k;
-                    st[d - 1] = JT_I; sv[d - 1] = 0;
-                    break;
+                uint32_t mlen = (uint32_t)rd32(c + 2);
+                const uint8_t *mnm = c + 6;
+                if (d >= k + 1 && is_dict_t(st[d - k - 1])) {
+                    if (k == 2 && mlen == 3 && memcmp(mnm, "get", 3) == 0 &&
+                        (st[d - 2] == JT_I || is_str_t(st[d - 2])) &&
+                        st[d - 1] == JT_I) {
+                        /* d.get(k, dflt-int) đoán int */
+                        d -= k;
+                        st[d - 1] = JT_I; sv[d - 1] = 0;
+                        break;
+                    }
+                    if (k == 1 && mlen == 3 && memcmp(mnm, "has", 3) == 0 &&
+                        (st[d - 1] == JT_I || is_str_t(st[d - 1]))) {
+                        d -= k;
+                        st[d - 1] = JT_B; sv[d - 1] = 0;
+                        break;
+                    }
+                    if (k == 1 && mlen == 6 && memcmp(mnm, "remove", 6) == 0 &&
+                        (st[d - 1] == JT_I || is_str_t(st[d - 1]))) {
+                        if (!j->osr) { jc_fail(j, "remove dict chỉ JIT trong vùng OSR"); break; }
+                        d -= k;
+                        st[d - 1] = JT_NIL; sv[d - 1] = 0;
+                        break;
+                    }
                 }
                 if (d < k + 1 || !is_any_rec_t(st[d - k - 1])) { jc_fail(j, "method ngoài phạm vi JIT"); break; }
                 sh = shape_of_any(st[d - k - 1]);
                 if (!sh) { jc_fail(j, "shape lạ"); break; }
-                F = shape_method(sh, c + 6, (uint32_t)rd32(c + 2));
+                F = shape_method(sh, mnm, mlen);
+                int has_sn_arg = 0;
                 for (int q = 0; q <= k; q++) {
                     at[q] = st[d - k - 1 + q];
+                    if (at[q] == JT_SN) has_sn_arg = 1;
                     if (!arg_ok_t(at[q])) { jc_fail(j, "đối số kiểu lạ"); break; }
                 }
                 if (j->fail) break;
                 if (!F || !callee_info(j, F, at, k + 1, &r) || r == JT_UNK) { jc_fail(j, "method không JIT được"); break; }
+                if (has_sn_arg && r == JT_S) { jc_fail(j, "method trả chuỗi mượn từ đối số mới"); break; }
                 d -= k;
                 st[d - 1] = r; sv[d - 1] = 0;
                 break;
@@ -740,9 +805,26 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 }
                 st[d - 1] = JT_I; sv[d - 1] = 0;
                 break;
-            case OP_NEW_DICT:
-                if (m->k != 0) { jc_fail(j, "dict literal chỉ {} rỗng"); break; }
-                st[d] = JT_DN; sv[d] = 0; d++; break;
+            case OP_NEW_DICT: {
+                int k = (int)m->k;
+                if (d < 2 * k) { jc_fail(j, "stack rỗng"); break; }
+                if (k > 0 && !j->osr && !no_abort_after(j, i)) {
+                    /* dict literal có phần tử trong entry: chỉ khi không thể abort rò temp */
+                }
+                for (int q = 0; q < k; q++) {
+                    uint8_t kt = st[d - 2 * k + 2 * q];
+                    uint8_t vt = st[d - 2 * k + 2 * q + 1];
+                    if (!(kt == JT_I || is_str_t(kt))) { jc_fail(j, "key dict literal ngoài phạm vi"); break; }
+                    if (!(vt == JT_I || vt == JT_F || vt == JT_B || is_str_t(vt) ||
+                          is_dict_t(vt) || is_any_rec_t(vt))) {
+                        jc_fail(j, "val dict literal ngoài phạm vi"); break;
+                    }
+                }
+                if (j->fail) break;
+                d -= 2 * k;
+                st[d] = JT_DN; sv[d] = 0; d++;
+                break;
+            }
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD: {
                 if (m->op == OP_ADD && d >= 2 && is_str_t(st[d - 2]) && is_str_t(st[d - 1])) {
                     /* nối chuỗi -> owned (helper cấp mới; codegen dec toán hạng owned) */
@@ -759,6 +841,16 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
             }
             case OP_NEG:
                 if (d < 1 || !is_num(st[d - 1])) { jc_fail(j, "neg kiểu lạ"); break; }
+                break;
+            case OP_BNOT:
+                if (d < 1 || st[d - 1] != JT_I) { jc_fail(j, "bnot kiểu lạ"); break; }
+                sv[d - 1] = 0;
+                break;
+            case OP_BAND: case OP_BOR: case OP_BXOR: case OP_SHL: case OP_SHR:
+                if (d < 2 || st[d - 2] != JT_I || st[d - 1] != JT_I) { jc_fail(j, "bitop kiểu lạ"); break; }
+                d--;
+                st[d - 1] = JT_I;
+                sv[d - 1] = 0;
                 break;
             case OP_NOT:
                 if (d < 1 || !(is_num(st[d - 1]) || st[d - 1] == JT_B)) { jc_fail(j, "not kiểu lạ"); break; }
@@ -788,7 +880,7 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
             case OP_JMP: br = m->target; fall = 0; break;   /* target < 0: lối ra (main) */
             case OP_JMPF: case OP_JMPT:
                 if (d < 1 || !(is_num(st[d - 1]) || st[d - 1] == JT_B || st[d - 1] == JT_S ||
-                               st[d - 1] == JT_SN)) {
+                               st[d - 1] == JT_SN || is_dict_t(st[d - 1]))) {
                     jc_fail(j, "điều kiện kiểu lạ"); break;
                 }
                 d--; br = m->target; break;
@@ -796,7 +888,7 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 uint8_t rt;
                 if (d < 1) { jc_fail(j, "stack rỗng"); break; }
                 rt = st[d - 1];
-                if (!(rt == JT_I || rt == JT_F || rt == JT_B || is_str_t(rt) ||
+                if (!(rt == JT_I || rt == JT_F || rt == JT_B || rt == JT_NIL || is_str_t(rt) ||
                       is_dict_t(rt) ||
                       is_own_rec_t(rt) || is_rec_t(rt))) {
                     jc_fail(j, "trả kiểu ngoài phạm vi"); break;
@@ -868,8 +960,10 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                 {
                     TVal *g = &G[sv[d - k - 1]];
                     uint8_t at[256], r = JT_UNK;
+                    int has_sn_arg = 0;
                     for (int q = 0; q < k; q++) {
                         at[q] = st[d - k + q];
+                        if (at[q] == JT_SN) has_sn_arg = 1;
                         if (!arg_ok_t(at[q])) {
                             jc_fail(j, "đối số kiểu lạ"); break;
                         }
@@ -877,6 +971,9 @@ static int analyze(JC *j, int start, const uint8_t *lt0, uint8_t *retty_out) {
                     if (j->fail) break;
                     if (g->t != T_FN || !callee_info(j, g->u.fn, at, k, &r) || r == JT_UNK) {
                         jc_fail(j, "callee không JIT được"); break;
+                    }
+                    if (has_sn_arg && r == JT_S) {
+                        jc_fail(j, "callee trả chuỗi mượn từ đối số mới"); break;
                     }
                     d -= k;
                     st[d - 1] = r; sv[d - 1] = 0;
@@ -938,6 +1035,7 @@ static void e64(JC *j, int64_t v) { for (int i = 0; i < 8; i++) eb(j, (uint8_t)(
 
 #define LOC(i) (32 + 8 * (int32_t)(i))
 #define SLOT(jc, d) (32 + 8 * ((int32_t)(jc)->nl + (int32_t)(d)))
+#define OWN(jc, i) (32 + 8 * ((int32_t)(jc)->nl + (int32_t)(jc)->maxd_seen + 2 + (int32_t)(i)))
 
 /* [rsp + disp32] với reg (0..7) */
 static void m_rsp(JC *j, int reg, int32_t disp) { eb(j, (uint8_t)(0x84 | (reg << 3))); eb(j, 0x24); e32(j, disp); }
@@ -957,8 +1055,6 @@ static void mov_r8_imm32(JC *j, int32_t v) { eb3(j, 0x49, 0xC7, 0xC0); e32(j, v)
 static void mov_r9_imm32(JC *j, int32_t v) { eb3(j, 0x49, 0xC7, 0xC1); e32(j, v); }   /* mov r9,imm32 */
 static void lea_rcx_rsp(JC *j, int32_t d) { eb3(j, 0x48, 0x8D, 0x8C); eb(j, 0x24); e32(j, d); }
 static void lea_r9_rsp(JC *j, int32_t d) { eb3(j, 0x4C, 0x8D, 0x8C); eb(j, 0x24); e32(j, d); }
-/* mov rcx,[r12+d] (đọc bản copy entry của local, cho entry-compare) */
-static void ld_rcx_r12(JC *j, int32_t d) { eb3(j, 0x49, 0x8B, 0x8C); eb(j, 0x24); e32(j, d); }
 /* chuyển đối số cho helper C (SYSV: rdi rsi rdx / Win64: rcx rdx r8) */
 static void mov_rdi_rax(JC *j) { eb3(j, 0x48, 0x89, 0xC7); }
 static void mov_rsi_rax(JC *j) { eb3(j, 0x48, 0x89, 0xC6); }
@@ -980,21 +1076,42 @@ static void dec_temp(JC *j, int32_t slot, uint8_t ty) {
     mov_rax_imm(j, (int64_t)(intptr_t)fn);
     call_rax(j);
 }
-/* STORE chuỗi/dict mới vào local: so old với bản copy entry ([r12+8i]); khác mới
-   nhả ref cũ (lần ghi đầu giữ ref interpreter, các lần sau nhả ref native).
-   deco: SN -> dec_sval, DN/RN -> dec_dict. Chỉ dùng trong fn (mainmode: plain). */
-static void store_owned(JC *j, int32_t dst_loc, int32_t src_slot, int local_i, uint8_t cur) {
-    size_t j1;
-    ld_rax(j, dst_loc);                        /* rax = cũ */
-    ld_rcx_r12(j, 8 * local_i);                /* rcx = bản entry */
-    eb3(j, 0x48, 0x39, 0xC8);                  /* cmp rax,rcx */
-    eb2(j, 0x74, 0x00); j1 = j->n - 1;         /* je skip */
-    if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
-    if (cur == JT_SN) mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_sval);
-    else mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_dict);
-    call_rax(j);
-    j->b[j1] = (uint8_t)(j->n - (j1 + 1));     /* skip: */
-    ld_rax(j, src_slot); st_rax(j, dst_loc);
+/* STORE local với cờ runtime OWN(j, local_i) (G10):
+   - OWN(j, local_i) == 1 khi local đang giữ giá trị native-owned (RN/SN/DN).
+   - Khi ghi đè: nếu mới != cũ và OWN == 1 thì nhả giá trị cũ (SN -> dec_sval,
+     DN/RN -> dec_dict), rồi cập nhật OWN = (mới là owned ? 1 : 0). */
+static void emit_store_local(JC *j, int local_i, int32_t src_slot, uint8_t old_t, uint8_t new_t) {
+    int old_may_own = (!j->mainmode) && (is_own_rec_t(old_t) || old_t == JT_SN || old_t == JT_DN);
+    int new_is_own = (!j->mainmode) && (is_own_rec_t(new_t) || new_t == JT_SN || new_t == JT_DN);
+    if (!old_may_own) {
+        ld_rax(j, src_slot);
+        st_rax(j, LOC(local_i));
+        if (new_is_own) {
+            eb(j, 0xB8); e32(j, 1);
+            st_rax(j, OWN(j, local_i));
+        }
+        return;
+    }
+    {
+        size_t j_same, j_not_own;
+        ld_rcx(j, src_slot);                         /* rcx = mới */
+        ld_rax(j, LOC(local_i));                     /* rax = cũ */
+        eb3(j, 0x48, 0x39, 0xC8);                    /* cmp rax,rcx */
+        eb2(j, 0x74, 0x00); j_same = j->n - 1;       /* je same (tự gán x = x) */
+        ld_rcx(j, OWN(j, local_i));                  /* rcx = cờ OWN */
+        eb3(j, 0x48, 0x85, 0xC9);                    /* test rcx,rcx */
+        eb2(j, 0x74, 0x00); j_not_own = j->n - 1;    /* jz not_own */
+        if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
+        if (old_t == JT_SN) mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_sval);
+        else mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_dict);
+        call_rax(j);
+        j->b[j_not_own] = (uint8_t)(j->n - (j_not_own + 1)); /* not_own: */
+        ld_rax(j, src_slot);
+        st_rax(j, LOC(local_i));
+        eb(j, 0xB8); e32(j, new_is_own ? 1 : 0);
+        st_rax(j, OWN(j, local_i));
+        j->b[j_same] = (uint8_t)(j->n - (j_same + 1));       /* same: */
+    }
 }
 
 static void jmp_fix(JC *j, uint8_t *pre, int npre, int32_t to) {
@@ -1069,6 +1186,10 @@ static void prologue(JC *j, const uint8_t *copy_ty, int ncopy) {
     /* hết ngân sách stack C (đệ quy quá sâu) -> abort */
     eb(j, 0x48); eb3(j, 0x3B, 0x63, 0x08);   /* cmp rsp,[rbx+8] */
     jabort(j, 0x82);                         /* jb abort */
+    if (j->nl > 0) {
+        eb2(j, 0x31, 0xC0);                  /* xor eax,eax */
+        for (int i = 0; i < j->nl; i++) st_rax(j, OWN(j, i));
+    }
     for (int i = 0; i < ncopy; i++) {
         if (copy_ty[i] == JT_UNK) continue;
         eb3(j, 0x49, 0x8B, 0x84); eb(j, 0x24); e32(j, 8 * i);   /* mov rax,[r12+8i] */
@@ -1124,6 +1245,8 @@ static int gen_body(JC *j) {
             mov_rax_imm(j, m->k); st_rax(j, SLOT(j, d)); break;
         case OP_PUSH_BOOL:
             eb(j, 0xB8); e32(j, (int32_t)m->k); st_rax(j, SLOT(j, d)); break;
+        case OP_PUSH_NIL:
+            eb2(j, 0x31, 0xC0); st_rax(j, SLOT(j, d)); break;
         case OP_PUSH_STR: {
             /* TVal* mượn hằng cache (sống suốt native, không cần inc) */
             TVal *keep = (TVal *)j->prog->ic[m->pc].key;
@@ -1134,31 +1257,7 @@ static int gen_body(JC *j) {
         case OP_LOAD:
             ld_rax(j, LOC(m->k)); st_rax(j, SLOT(j, d)); break;
         case OP_STORE: case OP_DECL: case OP_BIND: {
-            uint8_t t = st[d - 1];
-            if (is_own_rec_t(t) && is_own_rec_t(s->lt[m->k]) && !j->nodec[m->k]) {
-                /* ghi đè record sở hữu được cũ: nhả ref (trừ tự gán p = p) */
-                size_t j1;
-                ld_rcx(j, SLOT(j, d - 1));                       /* rcx = mới */
-                ld_rax(j, LOC(m->k));                           /* rax = cũ */
-                eb3(j, 0x48, 0x39, 0xC8);                       /* cmp rax,rcx */
-                eb2(j, 0x74, 0x00); j1 = j->n - 1;               /* je skip */
-                if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
-                mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_dict);
-                call_rax(j);
-                j->b[j1] = (uint8_t)(j->n - (j1 + 1));           /* skip: */
-                ld_rcx(j, SLOT(j, d - 1));
-                eb2(j, 0x48, 0x89); m_rsp(j, 1, LOC(m->k));     /* mov [loc],rcx */
-            } else if (!j->mainmode && (t == JT_SN || t == JT_DN) &&
-                       (s->lt[m->k] == JT_SN || s->lt[m->k] == JT_DN ||
-                        is_own_rec_t(s->lt[m->k]))) {
-                /* chuỗi/dict mới đè giá trị owned cũ: entry-compare rồi nhả */
-                store_owned(j, LOC(m->k), SLOT(j, d - 1), (int)m->k, s->lt[m->k]);
-            } else if (!j->mainmode && s->lt[m->k] == JT_SN) {
-                /* ghi đè chuỗi (số/mượn): nhả chuỗi cũ nếu khác bản entry */
-                store_owned(j, LOC(m->k), SLOT(j, d - 1), (int)m->k, JT_SN);
-            } else {
-                ld_rax(j, SLOT(j, d - 1)); st_rax(j, LOC(m->k));
-            }
+            emit_store_local(j, (int)m->k, SLOT(j, d - 1), s->lt[m->k], st[d - 1]);
             break;
         }
         case OP_STOREG: case OP_BINDG: {
@@ -1320,6 +1419,31 @@ static int gen_body(JC *j) {
             st_rax(j, A);
             break;
         }
+        case OP_BNOT: {
+            int32_t A = SLOT(j, d - 1);
+            ld_rax(j, A);
+            eb3(j, 0x48, 0xF7, 0xD0);                                          /* not rax */
+            st_rax(j, A);
+            break;
+        }
+        case OP_BAND: case OP_BOR: case OP_BXOR: {
+            int32_t A = SLOT(j, d - 2), B = SLOT(j, d - 1);
+            ld_rax(j, A);
+            uint8_t o = m->op == OP_BAND ? 0x23 : m->op == OP_BOR ? 0x0B : 0x33;
+            eb2(j, 0x48, o); m_rsp(j, 0, B);                                   /* and/or/xor rax,[rsp+B] */
+            st_rax(j, A);
+            break;
+        }
+        case OP_SHL: case OP_SHR: {
+            int32_t A = SLOT(j, d - 2), B = SLOT(j, d - 1);
+            ld_rax(j, A);
+            ld_rcx(j, B);
+            eb(j, 0x48); eb3(j, 0x83, 0xF9, 0x3F);                             /* cmp rcx,63 */
+            jguard(j, 0x87);                                                   /* ja guard */
+            eb3(j, 0x48, 0xD3, m->op == OP_SHL ? 0xE0 : 0xF8);                 /* shl/sar rax,cl */
+            st_rax(j, A);
+            break;
+        }
         case OP_NOT: {
             int32_t A = SLOT(j, d - 1);
             if (st[d - 1] == JT_F) {
@@ -1423,6 +1547,18 @@ static int gen_body(JC *j) {
                 }
                 uint8_t pre[2] = {0x0F, (uint8_t)(m->op == OP_JMPF ? 0x84 : 0x85)};
                 jto(j, pre, 2, m, d - 1);
+            } else if (is_dict_t(st[d - 1])) {
+                /* dict rỗng là falsy (đọc len ở offsetof(TDict, len)) */
+                ld_rax(j, A);
+                eb(j, 0x48); eb2(j, 0x83, 0xB8); e32(j, (int32_t)offsetof(TDict, len)); eb(j, 0x00);
+                if (st[d - 1] == JT_DN) {
+                    eb3(j, 0x0F, 0x95, 0xC0);
+                    eb3(j, 0x0F, 0xB6, 0xC0);
+                    dec_temp(j, A, JT_DN);
+                    eb2(j, 0x85, 0xC0);
+                }
+                uint8_t pre[2] = {0x0F, (uint8_t)(m->op == OP_JMPF ? 0x84 : 0x85)};
+                jto(j, pre, 2, m, d - 1);
             } else if (st[d - 1] == JT_F) {
                 ld_xmm(j, 0, A);
                 eb3(j, 0x66, 0x0F, 0x57); eb(j, 0xC9);      /* xorpd xmm1,xmm1 */
@@ -1487,6 +1623,22 @@ static int gen_body(JC *j) {
                 dec_temp(j, X, kt);                                   /* keytemp chết */
                 break;
             }
+            if (is_str_t(ct)) {
+                /* s[i]: helper trả &str1_cache[ch] (JT_S mượn), NULL nếu ngoài biên */
+                ld_rax(j, L);
+                if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
+                ld_rax(j, X);
+                if (JIT_SYSV) mov_rsi_rax(j); else mov_rdx_rax(j);
+                mov_rax_imm(j, (int64_t)(intptr_t)&tjit_str_idx);
+                call_rax(j);
+                eb3(j, 0x48, 0x85, 0xC0);                             /* test rax,rax */
+                jguard(j, 0x84);                                      /* jz deopt */
+                st_rax(j, X);                                         /* giữ tạm ở X */
+                dec_temp(j, L, ct);                                   /* nhả s nếu JT_SN */
+                ld_rax(j, X);
+                st_rax(j, L);
+                break;
+            }
             uint8_t et = list_elem(st[d - (set ? 3 : 2)]);
             int ttag = et == JT_I ? T_INT : et == JT_F ? T_FLOAT : T_BOOL;
             ld_rax(j, L);
@@ -1543,6 +1695,15 @@ static int gen_body(JC *j) {
             vtag = vt == JT_I ? T_INT : vt == JT_F ? T_FLOAT : T_BOOL;
             ld_rax(j, L);
             eb(j, 0x48); eb2(j, 0x8B, 0x80); e32(j, (int32_t)offsetof(TDict, vals));
+            if (!j->osr && !is_own_rec_t(st[d - 2]) && s->sv[d - 2] != 1) {
+                /* G8: trước khi ghi vào tham số record trong entry, guard tất cả field
+                   của record đó để các ATTR/SETATTR kế tiếp không bao giờ abort nửa chừng */
+                for (int qf = 0; qf < sh->nf; qf++) {
+                    int qtag = sh->fty[qf] == JT_I ? T_INT : sh->fty[qf] == JT_F ? T_FLOAT : T_BOOL;
+                    eb2(j, 0x83, 0xB8); e32(j, 32 * qf); eb(j, (uint8_t)qtag);
+                    jguard(j, 0x85);
+                }
+            }
             eb2(j, 0x48, 0x05); e32(j, 32 * fi);
             eb3(j, 0x83, 0x38, (uint8_t)vtag); jguard(j, 0x85);   /* field cũ phải cùng kiểu số */
             eb2(j, 0xC7, 0x00); e32(j, vtag);
@@ -1582,6 +1743,42 @@ static int gen_body(JC *j) {
                 dec_temp(j, K, kt);                                   /* keytemp chết */
                 break;
             }
+            if (k == 1 && is_dict_t(st[fd])) {
+                uint32_t mlen = (uint32_t)rd32(c + 2);
+                const uint8_t *mnm = c + 6;
+                uint8_t kt = st[fd + 1];
+                int kstr = is_str_t(kt) ? 1 : 0;
+                int32_t R = SLOT(j, fd), K = SLOT(j, fd + 1);
+                if (mlen == 3 && memcmp(mnm, "has", 3) == 0) {
+                    ld_rax(j, R);
+                    if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
+                    ld_rax(j, K);
+                    if (JIT_SYSV) mov_rsi_rax(j); else mov_rdx_rax(j);
+                    if (JIT_SYSV) mov_rdx_imm(j, kstr); else mov_r8_imm32(j, kstr);
+                    mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dict_has);
+                    call_rax(j);
+                    st_rax(j, SLOT(j, d));                            /* giữ tạm kết quả */
+                    dec_temp(j, K, kt);
+                    dec_temp(j, R, st[fd]);
+                    ld_rax(j, SLOT(j, d));
+                    st_rax(j, R);
+                    break;
+                }
+                if (mlen == 6 && memcmp(mnm, "remove", 6) == 0) {
+                    ld_rax(j, R);
+                    if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
+                    ld_rax(j, K);
+                    if (JIT_SYSV) mov_rsi_rax(j); else mov_rdx_rax(j);
+                    if (JIT_SYSV) mov_rdx_imm(j, kstr); else mov_r8_imm32(j, kstr);
+                    mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dict_remove);
+                    call_rax(j);
+                    dec_temp(j, K, kt);
+                    dec_temp(j, R, st[fd]);
+                    eb2(j, 0x31, 0xC0);
+                    st_rax(j, R);
+                    break;
+                }
+            }
             JShape *sh2 = shape_of_any(st[fd]);
             TFn *F;
             if (!sh2) { jc_fail(j, "shape lạ"); return 0; }
@@ -1597,10 +1794,19 @@ static int gen_body(JC *j) {
                 eb2(j, 0xFF, 0xD0);
                 keep_callee(j, F);
             }
-            eb3(j, 0x83, 0x3B, 0x00);           /* cmp dword [rbx],0 */
-            if (j->osr) jguard(j, 0x85);
-            else jepi(j, 0x85);
             st_rax(j, SLOT(j, fd));
+            if (j->osr) {
+                eb3(j, 0x83, 0x3B, 0x00);       /* cmp dword [rbx],0 */
+                jguard(j, 0x85);
+                for (int q = 1; q <= k; q++)
+                    if (st[fd + q] == JT_SN) dec_temp(j, SLOT(j, fd + q), JT_SN);
+            } else {
+                for (int q = 1; q <= k; q++)
+                    if (st[fd + q] == JT_SN) dec_temp(j, SLOT(j, fd + q), JT_SN);
+                ld_rax(j, SLOT(j, fd));
+                eb3(j, 0x83, 0x3B, 0x00);       /* cmp dword [rbx],0 */
+                jepi(j, 0x85);
+            }
             break;
         }
         case OP_LEN:
@@ -1621,27 +1827,61 @@ static int gen_body(JC *j) {
             eb(j, 0x48); eb2(j, 0x8B, 0x80); e32(j, (int32_t)offsetof(TList, len));
             st_rax(j, SLOT(j, d - 1));
             break;
-        case OP_NEW_DICT:
-            /* {} rỗng: helper cấp dict mới (tracked, refc=1) */
+        case OP_NEW_DICT: {
+            int k = (int)m->k;
+            int32_t D = SLOT(j, d);
             mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dict_new0);
             call_rax(j);
-            st_rax(j, SLOT(j, d));
+            if (k == 0) {
+                st_rax(j, D);
+                break;
+            }
+            st_rax(j, D);
+            for (int q = 0; q < k; q++) {
+                int kd = d - 2 * k + 2 * q;
+                uint8_t kt = st[kd], vt = st[kd + 1];
+                int32_t K = SLOT(j, kd), V = SLOT(j, kd + 1);
+                int kstr = is_str_t(kt) ? 1 : 0;
+                int vty = vt == JT_F ? 1 : vt == JT_B ? 2 : vt == JT_S ? 3 :
+                          vt == JT_SN ? 4 : vt == JT_D ? 5 : vt == JT_DN ? 6 :
+                          is_rec_t(vt) ? 7 : is_own_rec_t(vt) ? 8 : 0;
+                int kv = (kstr ? 1 : 0) | (vty << 1);
+                ld_rax(j, D);
+                if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
+                ld_rax(j, K);
+                if (JIT_SYSV) mov_rsi_rax(j); else mov_rdx_rax(j);
+                ld_rax(j, V);
+                if (JIT_SYSV) mov_rdx_rax(j); else mov_r8_rax(j);
+                if (JIT_SYSV) mov_rcx_imm32(j, kv); else mov_r9_imm32(j, kv);
+                mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dict_set);
+                call_rax(j);
+                dec_temp(j, K, kt);
+                dec_temp(j, V, vt);
+            }
+            ld_rax(j, D);
+            st_rax(j, SLOT(j, d - 2 * k));
             break;
+        }
         case OP_RET: {
-            /* local chuỗi mới đã chết (không phải giá trị trả): nhả để khỏi leak
-               (wrapper không track GC). Bỏ qua hết khi trả chuỗi mượn (có thể alias). */
-            if (!j->mainmode && j->retty != JT_S) {
+            /* local chuỗi mới đã chết (không phải giá trị trả): nhả theo OWN(j, q) */
+            if (!j->mainmode) {
                 for (int q = 0; q < j->nl; q++) {
                     if (s->lt[q] == JT_SN) {
-                        size_t j1;
-                        ld_rax(j, LOC(q));                       /* rax = cũ */
-                        ld_rcx_r12(j, 8 * q);                    /* rcx = bản entry */
-                        eb3(j, 0x48, 0x39, 0xC8);
-                        eb2(j, 0x74, 0x00); j1 = j->n - 1;       /* je skip */
+                        size_t j_not_own, j_alias = 0;
+                        ld_rcx(j, OWN(j, q));
+                        eb3(j, 0x48, 0x85, 0xC9);
+                        eb2(j, 0x74, 0x00); j_not_own = j->n - 1;
+                        ld_rax(j, LOC(q));
+                        if (j->retty == JT_S) {
+                            ld_rcx(j, SLOT(j, d - 1));
+                            eb3(j, 0x48, 0x39, 0xC8);
+                            eb2(j, 0x74, 0x00); j_alias = j->n - 1;
+                        }
                         if (JIT_SYSV) mov_rdi_rax(j); else mov_rcx_rax(j);
                         mov_rax_imm(j, (int64_t)(intptr_t)&tjit_dec_sval);
                         call_rax(j);
-                        j->b[j1] = (uint8_t)(j->n - (j1 + 1));   /* skip: */
+                        if (j_alias) j->b[j_alias] = (uint8_t)(j->n - (j_alias + 1));
+                        j->b[j_not_own] = (uint8_t)(j->n - (j_not_own + 1));
                     }
                 }
             }
@@ -1762,10 +2002,19 @@ static int gen_body(JC *j) {
                     eb2(j, 0xFF, 0xD0);
                     keep_callee(j, F);
                 }
-                eb3(j, 0x83, 0x3B, 0x00);           /* cmp dword [rbx],0 */
-                if (j->osr) jguard(j, 0x85);        /* callee huỷ: deopt tại CALL (callee thuần -> gọi lại được) */
-                else jepi(j, 0x85);                 /* entry: truyền huỷ lên */
                 st_rax(j, SLOT(j, fd));
+                if (j->osr) {
+                    eb3(j, 0x83, 0x3B, 0x00);       /* cmp dword [rbx],0 */
+                    jguard(j, 0x85);                /* callee huỷ: deopt tại CALL */
+                    for (int q = 0; q < k; q++)
+                        if (st[fd + 1 + q] == JT_SN) dec_temp(j, SLOT(j, fd + 1 + q), JT_SN);
+                } else {
+                    for (int q = 0; q < k; q++)
+                        if (st[fd + 1 + q] == JT_SN) dec_temp(j, SLOT(j, fd + 1 + q), JT_SN);
+                    ld_rax(j, SLOT(j, fd));
+                    eb3(j, 0x83, 0x3B, 0x00);       /* cmp dword [rbx],0 */
+                    jepi(j, 0x85);                  /* entry: truyền huỷ lên */
+                }
             }
             break;
         }
@@ -1789,7 +2038,7 @@ static int finish(JC *j, JitUnit *u) {
     eb(j, 0xC3);
     if (j->ndfix) {
         /* deopt: [rbx+4] = mã điểm; [rbx] = 2; chép nsave qword frame ra ctx->save */
-        int32_t nsave = j->nl + j->maxd_seen + 2;
+        int32_t nsave = 2 * j->nl + j->maxd_seen + 2;
         size_t common = 0;
         size_t *stub = (size_t *)malloc(sizeof(size_t) * (size_t)j->ndfix);
         for (int q = 0; q < j->ndfix; q++) {
@@ -1867,7 +2116,8 @@ static int jc_setup(JC *j, TVM *vm, TFn *fn, int nest) {
 /* bảng deopt: trạng thái (stack + locals) tại từng điểm guard / lối ra */
 static void build_deopts(JC *j, JitOsr *o) {
     int nl = j->nl;
-    o->nsave = j->nl + j->maxd_seen + 2;
+    o->own_base = j->nl + j->maxd_seen + 2;
+    o->nsave = 2 * j->nl + j->maxd_seen + 2;
     o->ndeopt = j->ndfix;
     o->deopts = (JitDeopt *)calloc((size_t)j->ndfix + 1, sizeof(JitDeopt));
     for (int q = 0; q < j->ndfix; q++) {
@@ -1886,7 +2136,7 @@ static void build_deopts(JC *j, JitOsr *o) {
 }
 
 static void set_frame(JC *j) {
-    int32_t f = 32 + 8 * (j->nl + j->maxd_seen + 2);
+    int32_t f = 32 + 8 * (2 * j->nl + j->maxd_seen + 2);
     if ((f & 15) != 8) f += 8;              /* sau 2 push + ret: rsp chia hết 16 khi call */
     j->frame = f;
 }
@@ -1913,13 +2163,44 @@ static int compile_entry(TVM *vm, TFn *fn, const uint8_t *argty, int nest) {
     for (int i = 0; i < fn->nargs && i < fn->nlocals; i++) lt[i] = nat[i];
     uint8_t retty = JT_UNK;
     if (ok) {
-        /* đoán kiểu trả về cho lời gọi đệ quy: thử I, F, B */
-        static const uint8_t guesses[3] = {JT_I, JT_F, JT_B};
+        /* G9: đăng ký trước shape cho mọi kiểu struct xuất hiện trong thân hàm
+           để hàm đệ quy trả record (vd build(n)) đoán đúng retty ngay cả khi
+           lời gọi đệ quy đứng trước lệnh tạo record */
+        for (int qi = 0; qi < j.nops; qi++) {
+            if (j.ops[qi].op == OP_LOADG && (size_t)j.ops[qi].k < j.prog->nglobals) {
+                TVal *gv = &j.prog->globals[j.ops[qi].k];
+                if (gv->t == T_DICT && gv->u.dict->kind == DK_TYPE && !gv->u.dict->mod) {
+                    TDict *tp = gv->u.dict;
+                    int nf = (int)tp->fields->len;
+                    if (nf > 0 && nf <= JIT_SHAPE_MAXF) {
+                        uint8_t ft_i[JIT_SHAPE_MAXF], ft_f[JIT_SHAPE_MAXF];
+                        for (int f = 0; f < nf; f++) { ft_i[f] = JT_I; ft_f[f] = JT_F; }
+                        shape_reg(tp, nf, ft_i);
+                        shape_reg(tp, nf, ft_f);
+                    }
+                }
+            }
+        }
+        uint8_t guesses[256];
+        int ng = 0;
+        guesses[ng++] = JT_I;
+        guesses[ng++] = JT_F;
+        guesses[ng++] = JT_B;
+        guesses[ng++] = JT_SN;
+        guesses[ng++] = JT_S;
+        guesses[ng++] = JT_DN;
+        guesses[ng++] = JT_D;
+        guesses[ng++] = JT_NIL;
+        for (int s = 0; s < njshapes && ng + 2 < 256; s++) {
+            guesses[ng++] = own_of_shape(s);
+            guesses[ng++] = bor_of_shape(s);
+        }
         ok = 0;
-        for (int gi = 0; gi < 3 && !ok; gi++) {
+        for (int gi = 0; gi < ng && !ok; gi++) {
             j.self_retty_guess = guesses[gi];
             j.used_guess = 0;
             j.fail = 0; j.why = NULL;
+            memset(j.nodec, 0, (size_t)j.nl + 1);
             for (int i = 0; i < j.nops; i++) j.in[i].valid = 0;
             if (analyze(&j, 0, lt, &retty) && (!j.used_guess || retty == guesses[gi])) ok = 1;
             if (!ok && !j.used_guess) break;     /* thất bại không do đoán kiểu */
@@ -2020,6 +2301,7 @@ void t_jit_maybe(TVM *vm, TFn *fn, TVal *args) {
 static int to_ret(uint8_t ty, int64_t r, TVal *ret) {
     if (ty == JT_I) { ret->t = T_INT; ret->u.i = r; }
     else if (ty == JT_F) { ret->t = T_FLOAT; memcpy(&ret->u.f, &r, 8); }
+    else if (ty == JT_NIL) { ret->t = T_NIL; }
     else if (ty == JT_S) { *ret = *(const TVal *)(intptr_t)r; tval_retain(ret); }
     else if (ty == JT_SN) { *ret = *(TVal *)(intptr_t)r; tjit_wrap_free((TVal *)(intptr_t)r); }
     else if (is_rec_t(ty)) {
@@ -2166,25 +2448,30 @@ int t_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret) {
             JitDeopt *dp = &o->deopts[ctx.deopt_id];
             for (int i = 0; i < nl; i++) {
                 uint8_t t = dp->lt[i];
+                int is_own = (o->own_base + i < o->nsave) ? (save[o->own_base + i] != 0) : 1;
                 if (t == JT_I || t == JT_F || t == JT_B) {
+                    TVal nv = bits_val(vm, t, save[i], 0);
                     tval_free(&locals[i]);
-                    locals[i] = bits_val(vm, t, save[i], 0);
+                    locals[i] = nv;
                 } else if (is_own_rec_t(t)) {
-                    /* record mới: interpreter vẫn giữ ref cũ -> nhả rồi move ref native */
+                    uint8_t rt = is_own ? t : bor_of_shape(rec_shape(t));
+                    TVal nv = bits_val(vm, rt, save[i], 0);
                     tval_free(&locals[i]);
-                    locals[i].t = T_DICT; locals[i].u.dict = (TDict *)(intptr_t)save[i];
+                    locals[i] = nv;
                 } else if (is_rec_t(t)) {
-                    /* record mượn xem được gán trong native: free cũ + retain mới */
+                    TVal nv = bits_val(vm, t, save[i], 0);
                     tval_free(&locals[i]);
-                    locals[i] = bits_val(vm, t, save[i], 0);
-                } else if (t == JT_SN) {
-                    /* chuỗi mới: free cũ + move (wrapper về tay interpreter) */
+                    locals[i] = nv;
+                } else if (t == JT_SN || t == JT_S) {
+                    uint8_t rt = (t == JT_SN && is_own) ? JT_SN : JT_S;
+                    TVal nv = bits_val(vm, rt, save[i], 0);
                     tval_free(&locals[i]);
-                    locals[i] = bits_val(vm, t, save[i], 0);
+                    locals[i] = nv;
                 } else if (is_dict_t(t)) {
-                    /* dict gán trong native: free cũ + retain (mượn) / move (mới) */
+                    uint8_t rt = (t == JT_DN && is_own) ? JT_DN : JT_D;
+                    TVal nv = bits_val(vm, rt, save[i], 0);
                     tval_free(&locals[i]);
-                    locals[i] = bits_val(vm, t, save[i], 0);
+                    locals[i] = nv;
                 }
             }
             for (int q = 0; q < dp->depth; q++)

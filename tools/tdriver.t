@@ -1,8 +1,7 @@
-# tools/tdriver.t — chạy chương trình .t bằng evaluator self-host đã bundle.
-# Dùng sau khi bundle+biên dịch (không cần Python):
+# tools/tdriver.t — chạy chương trình .t bằng evaluator self-host (self/eval.t).
+# Dùng:
+#   trun tools/tdriver.t tests/demo.t
 #   trun tdriver.tb tests/demo.t
-# Chạy thử bằng interpreter (kết quả phải giống):
-#   python t.py tools/tdriver.t tests/demo.t
 import eval
 
 args = argv()

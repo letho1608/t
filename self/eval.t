@@ -883,6 +883,8 @@ fn eval_expr(e, env, mods):
         v = eval_expr(e[2], env, mods)
         if e[1] == "-":
             return 0 - v
+        if e[1] == "~":
+            return ~v
         return not v
     if k == "bin":
         op = e[1]
@@ -930,6 +932,16 @@ fn eval_expr(e, env, mods):
             return a <= b
         if op == ">=":
             return a >= b
+        if op == "&":
+            return a & b
+        if op == "|":
+            return a | b
+        if op == "^":
+            return a ^ b
+        if op == "<<":
+            return a << b
+        if op == ">>":
+            return a >> b
         raise "bad op " + op
     if k == "idx":
         c = eval_expr(e[1], env, mods)
@@ -981,13 +993,25 @@ fn eval_expr(e, env, mods):
 fn do_call(f, args, mods):
     if is_userfn(f):
         params = f["params"]
-        if params.len != args.len:
-            raise_err(f["name"] + " arity")
+        ndef = f.get("ndef", 0)
         le = env_new(f["closure"])
-        mut i = 0
-        while i < params.len:
-            env_decl(le, params[i], args[i], true)
-            i = i + 1
+        if ndef == -1:
+            fixed = params.len - 1
+            if args.len < fixed:
+                raise_err(f["name"] + " arity")
+            mut i = 0
+            while i < fixed:
+                env_decl(le, params[i], args[i], true)
+                i = i + 1
+            env_decl(le, params[fixed], args[fixed:], true)
+        else:
+            if args.len < params.len - ndef or args.len > params.len:
+                raise_err(f["name"] + " arity")
+            mut i = 0
+            while i < params.len:
+                v = args[i] if i < args.len else nil
+                env_decl(le, params[i], v, true)
+                i = i + 1
         r = exec_block(f["body"], le, mods)
         if is_sig(r, "ret"):
             return r[1]
@@ -1024,6 +1048,13 @@ fn do_call(f, args, mods):
             # module nạp lúc chạy -> bản ghi "module" (global top-level, bỏ "$"/"__type")
             if args.len != 1 or type(args[0]) != "str":
                 raise_err("load(name str)")
+            if args[0] == "__sys":
+                hs = load("__sys")
+                ks = ["clock", "time", "sleep", "getenv", "setenv", "platform", "exepath", "getcwd", "chdir", "abspath", "exists", "isfile", "isdir", "mtime", "mkdir", "remove", "listdir", "mktemp", "sha256", "run", "stdin_line", "stdin_read", "stdout_write", "stderr_write", "zip_pack", "zip_unpack", "exit"]
+                mut vs = []
+                for k in ks:
+                    vs.append(hs[k])
+                return mk_rec("module", ks, vs, {})
             m = load_mod(args[0], mods)
             mut ks = []
             mut vs = []
@@ -1127,7 +1158,10 @@ fn exec_stmt(s, env, mods):
             c[ix] = v
         return ["ok"]
     if k == "fn":
-        env_decl(env, s[1], mk_userfn(s[1], s[2], s[3], env), false)
+        uf = mk_userfn(s[1], s[2], s[3], env)
+        if s.len > 4:
+            uf["ndef"] = s[4]
+        env_decl(env, s[1], uf, false)
         return ["ok"]
     if k == "ret":
         return ["ret", eval_expr(s[1], env, mods)]
@@ -1236,10 +1270,3 @@ fn run_src(src):
         print("error: " + r[1])
     return r
 
-fn run_prog(ast):
-    mods = {}
-    env = env_new(nil)
-    r = exec_block(ast[1], env, mods)
-    if is_sig(r, "err"):
-        print("error: " + r[1])
-    return r

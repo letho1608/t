@@ -1,11 +1,27 @@
 /* tvm.c — T bytecode VM v1: stack machine + frames + refcount + try + natives. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "tvm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <direct.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <fcntl.h>
+#endif
 
 /* Vòng lặp interpreter có setjmp/longjmp (try/except). GCC >= 12 (mingw-w64)
    inline hỏng vòng lặp này: try/except im lặng khi build -O1/-O2/-Os
@@ -373,6 +389,12 @@ static const char *const OPNAMES[] = {
     "IN",
     "CALLM",
     "SETATTR",
+    "BAND",
+    "BOR",
+    "BXOR",
+    "BNOT",
+    "SHL",
+    "SHR",
     "NOP",
     "HALT"
 };
@@ -1075,7 +1097,6 @@ static TVal mk_bound(TNativeFn fn, const char *name, TVal obj) {
     if (cur_vm) gc_track(cur_vm, T_NATIVE, n);
     return v;
 }
-#define NERR(msg) do { die(vm, msg); } while (0)
 #define NARG(n) do { if (argc != (n)) die(vm, "arity"); } while (0)
 #define NMIN(a) do { if (argc < (a)) die(vm, "arity"); } while (0)
 #define NMAX(a) do { if (argc > (a)) die(vm, "arity"); } while (0)
@@ -1271,13 +1292,13 @@ int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out) {
     }
     if (fv.t != T_FN) return 0;
     TFn *f = fv.u.fn;
-    if (!f->native && argc == f->nargs) t_jit_maybe(vm, f, args);
-    if (f->native) {          /* fn đã JIT thành native: gọi thẳng, không lặp lại */
+    if (!f->vararg && !f->native && argc == f->nargs) t_jit_maybe(vm, f, args);
+    if (!f->vararg && f->native) {          /* fn đã JIT thành native: gọi thẳng, không lặp lại */
         TVal rv; rv.t = T_NIL;
         if (t_jit_call(vm, f, args, argc, &rv)) { *out = rv; return 1; }
         if (argc == f->nargs) t_jit_maybe(vm, f, args);    /* bộ kiểu mới: bản đặc hoá khác */
     }
-    if (argc != f->nargs) die(vm, "call arity");
+    if (argc < f->min_args || (!f->vararg && argc > f->nargs)) die(vm, "call arity");
     size_t sp0 = vm->sp, pc0 = vm->pc, nf0 = vm->nframes, stop0 = vm->stop_nf;
     TProg *prog0 = vm->prog;
     TFrame *fr = push_frame(vm);
@@ -1296,7 +1317,17 @@ int tvm_call_value(TVM *vm, TVal fv, TVal *args, int argc, TVal *out) {
         fill_undef(fr->locals, f->nlocals);
         fr->lcap = f->nlocals;
     }
-    for (int i = 0; i < argc; i++) fr->locals[i] = args[i];
+    if (f->vararg) {
+        int fixed = (int)f->min_args;
+        for (int i = 0; i < fixed; i++) fr->locals[i] = args[i];
+        TList *rest = list_new(argc > fixed ? (size_t)(argc - fixed) : 0);
+        for (int i = fixed; i < argc; i++) rest->items[rest->len++] = args[i];
+        fr->locals[fixed].t = T_LIST;
+        fr->locals[fixed].u.list = rest;
+    } else {
+        for (int i = 0; i < argc; i++) fr->locals[i] = args[i];
+        for (int i = argc; i < (int)f->nargs; i++) fr->locals[i] = mk_nil();
+    }
     vm->sp = sp0;
     vm->pc = (size_t)f->entry;
     vm->stop_nf = nf0;
@@ -2003,6 +2034,30 @@ int tjit_dict_getD(TDict *d, int64_t kbits, int kstr, int64_t *out) {
     tjit_last_i = i;
     return 0;
 }
+int64_t tjit_dict_has(TDict *d, int64_t kbits, int kstr) {
+    TVal k;
+    if (kstr) k = *(const TVal*)(intptr_t)kbits;
+    else { k.t = T_INT; k.u.i = kbits; }
+    return dict_find(d, &k) >= 0 ? 1 : 0;
+}
+int64_t tjit_dict_remove(TDict *d, int64_t kbits, int kstr) {
+    TVal k; int i;
+    if (kstr) k = *(const TVal*)(intptr_t)kbits;
+    else { k.t = T_INT; k.u.i = kbits; }
+    i = dict_find(d, &k);
+    if (i < 0) return 1;    /* thiếu key -> deopt để interpreter báo lỗi đúng dòng */
+    dict_del_at(d, (size_t)i);
+    return 0;
+}
+TVal *tjit_str_idx(const TVal *s, int64_t i) {
+    if (!s || s->t != T_STR || i < 0 || (uint64_t)i >= s->u.str.n) return NULL;
+    {
+        unsigned char ch = (unsigned char)s->u.str.s[i];
+        TVal *c = &str1_cache[ch];
+        if (c->t != T_STR) { *c = mk_str_uninit(1); c->u.str.s[0] = (char)ch; }
+        return c;
+    }
+}
 /* gọi method của record: obj = list [fn, self] */
 static void m_call_bound(TVM *vm, TVal *a, int argc, TVal *r) {
     TVal fn = a[0].u.list->items[0];
@@ -2519,8 +2574,40 @@ static void free_frame(TVM *vm) {
 }
 
 /* ---------- init/free ---------- */
-/* ---------- đọc .tb + load() (import động lúc chạy) ---------- */
+/* ---------- đọc .tb + bytecode verifier + load() + __sys ---------- */
 static int rd_exact(FILE *f, void *b, size_t n) { return n == 0 || fread(b, 1, n, f) == n; }
+
+static int verify_bytecode(const TProg *p, char *msg, size_t msgn) {
+    const uint8_t *c = p->code;
+    size_t len = p->len, pc = 0;
+    uint16_t ng = p->nglobals < NAT_NFIXED ? NAT_NFIXED : p->nglobals;
+    while (pc < len) {
+        uint8_t op = c[pc];
+        size_t ilen = tvm_oplen(c, len, pc);
+        if (op < OP_PUSH_NIL || op > OP_HALT) {
+            snprintf(msg, msgn, "bad opcode %u at %zu", (unsigned)op, pc);
+            return -1;
+        }
+        if (pc + ilen > len || ( (op == OP_PUSH_STR || op == OP_ATTR || op == OP_SETATTR || op == OP_CALLM) && ilen == 1 )) {
+            snprintf(msg, msgn, "truncated instruction at %zu", pc);
+            return -1;
+        }
+        if (op == OP_LOADG || op == OP_STOREG || op == OP_DECLG || op == OP_BINDG ||
+            op == OP_CAPG || op == OP_INC_G || op == OP_DEC_G || op == OP_INCB_G || op == OP_ADDI_G) {
+            uint16_t g;
+            memcpy(&g, c + pc + 1, 2);
+            if (g >= ng) { snprintf(msg, msgn, "global slot %u out of range (%u)", (unsigned)g, (unsigned)ng); return -1; }
+        } else if (op == OP_ADDS_G || op == OP_SUBS_G) {
+            uint16_t g1, g2;
+            memcpy(&g1, c + pc + 1, 2);
+            memcpy(&g2, c + pc + 3, 2);
+            if (g1 >= ng || g2 >= ng) { snprintf(msg, msgn, "global slot out of range"); return -1; }
+        }
+        pc += ilen;
+    }
+    return 0;
+}
+
 int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
     FILE *f = fopen(path, "rb");
     char magic[4];
@@ -2531,11 +2618,19 @@ int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
         snprintf(msg, msgn, "bad magic"); fclose(f); return -1;
     }
     if (!rd_exact(f, &ng, 2)) { snprintf(msg, msgn, "bad nglobals"); fclose(f); return -1; }
-    if (!rd_exact(f, &len, 4)) { snprintf(msg, msgn, "bad len"); fclose(f); return -1; }
-    p->nglobals = ng;
-    p->code = (uint8_t*)malloc(len ? len : 1); p->len = len;
+    if (!rd_exact(f, &len, 4) || len > 64u * 1024u * 1024u) {
+        snprintf(msg, msgn, "bad len"); fclose(f); return -1;
+    }
+    p->nglobals = ng < NAT_NFIXED ? NAT_NFIXED : ng;
+    p->code = (uint8_t*)calloc((size_t)len + 16, 1);
+    if (!p->code) { snprintf(msg, msgn, "out of memory"); fclose(f); return -1; }
+    p->len = len;
     if (!rd_exact(f, p->code, len)) {
         snprintf(msg, msgn, "short read"); fclose(f); free(p->code); p->code = NULL; return -1;
+    }
+    p->code[len] = OP_HALT;
+    if (verify_bytecode(p, msg, msgn) != 0) {
+        fclose(f); free(p->code); p->code = NULL; return -1;
     }
     {
         /* bảng dòng tuỳ chọn: "LN01" u16 nfile (u16 len + tên)* u32 n (u32 pc, u32 dòng, u16 file)* */
@@ -2551,14 +2646,16 @@ int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
                 ok = rd_exact(f, &ln, 2);
                 if (!ok) break;
                 p->lfiles[i] = (char*)calloc((size_t)ln + 1, 1);
+                if (!p->lfiles[i]) { ok = 0; break; }
                 ok = rd_exact(f, p->lfiles[i], ln);
                 p->nlfiles = (uint16_t)(i + 1);
             }
-            if (ok) ok = rd_exact(f, &nl, 4);
+            if (ok) ok = rd_exact(f, &nl, 4) && nl <= 16u * 1024u * 1024u;
             if (ok && nl) {
-                p->lpc = (uint32_t*)malloc(sizeof(uint32_t) * nl);
-                p->lline = (uint32_t*)malloc(sizeof(uint32_t) * nl);
-                p->lfile = (uint16_t*)malloc(sizeof(uint16_t) * nl);
+                p->lpc = (uint32_t*)malloc(sizeof(uint32_t) * (size_t)nl);
+                p->lline = (uint32_t*)malloc(sizeof(uint32_t) * (size_t)nl);
+                p->lfile = (uint16_t*)malloc(sizeof(uint16_t) * (size_t)nl);
+                if (!p->lpc || !p->lline || !p->lfile) ok = 0;
                 for (uint32_t i = 0; ok && i < nl; i++) {
                     ok = rd_exact(f, &p->lpc[i], 4) && rd_exact(f, &p->lline[i], 4) &&
                          rd_exact(f, &p->lfile[i], 2);
@@ -2575,22 +2672,24 @@ int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn) {
                 p->exnames = (char**)calloc(ne ? ne : 1, sizeof(char*));
                 p->exslots = (uint16_t*)calloc(ne ? ne : 1, sizeof(uint16_t));
                 p->exmut = (uint8_t*)calloc(ne ? ne : 1, 1);
+                if (!p->exnames || !p->exslots || !p->exmut) ok = 0;
             }
             for (uint16_t i = 0; ok && i < ne; i++) {
                 uint16_t ln = 0;
                 ok = rd_exact(f, &ln, 2);
                 if (!ok) break;
                 p->exnames[i] = (char*)calloc((size_t)ln + 1, 1);
+                if (!p->exnames[i]) { ok = 0; break; }
                 ok = rd_exact(f, p->exnames[i], ln) && rd_exact(f, &p->exslots[i], 2) &&
                      rd_exact(f, &p->exmut[i], 1);
-                if (ok) p->nexports = (uint16_t)(i + 1);
-                else { free(p->exnames[i]); p->exnames[i] = NULL; }
+                if (ok && p->exslots[i] < p->nglobals) p->nexports = (uint16_t)(i + 1);
+                else { free(p->exnames[i]); p->exnames[i] = NULL; ok = 0; }
             }
         }
     }
     fclose(f);
     p->path = (char*)malloc(strlen(path) + 1);
-    strcpy(p->path, path);
+    if (p->path) strcpy(p->path, path);
     return 0;
 }
 void tvm_prog_release(TProg *p) {
@@ -2612,9 +2711,20 @@ static int file_exists(const char *path) {
     return 1;
 }
 const char *tvm_exe_path = NULL;
+static int stat_clean(const char *path, struct stat *st) {
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    while (n > 1 && (tmp[n - 1] == '/' || tmp[n - 1] == '\\')) {
+        if (n == 3 && tmp[1] == ':') break;
+        tmp[--n] = 0;
+    }
+    return stat(tmp, st);
+}
 static double file_mtime(const char *path) {
     struct stat st;
-    if (stat(path, &st) != 0) return -1;
+    if (stat_clean(path, &st) != 0) return -1;
     return (double)st.st_mtime;
 }
 /* tcomp.tb: $TCOMP, cạnh trun, thư mục hiện tại */
@@ -2632,39 +2742,825 @@ static int find_tcomp(char *out, size_t n) {
     snprintf(out, n, "tcomp.tb");
     return file_exists(out);
 }
-/* src.t mới hơn (hoặc chưa có) out.tb: dịch bằng "trun tcomp.tb src.t out.tb".
-   0 = không cần/không dịch được (không có trun/tcomp), 1 = đã dịch, -1 = lỗi biên dịch */
+
+/* Chạy tiến trình con KHÔNG qua shell (chống command injection CWE-78 tuyệt đối),
+   thu stdout/stderr vào Buf, truyền stdin_data, cwd và env_dict tuỳ chọn. */
+static int tvm_run_proc(const char **av, int ac, const char *in_s, size_t in_n,
+                        const char *cwd, const TDict *env_d, Buf *bout, Buf *berr) {
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa;
+    HANDLE in_rd = NULL, in_wr = NULL, out_rd = NULL, out_wr = NULL, err_rd = NULL, err_wr = NULL;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    Buf cmd = {0, 0, 0};
+    DWORD rc = 1;
+    /* ghép command line chuẩn CRT Windows (quote từng arg an toàn, không qua cmd.exe) */
+    for (int i = 0; i < ac; i++) {
+        const char *s = av[i];
+        if (i > 0) buf_c(&cmd, ' ');
+        buf_c(&cmd, '"');
+        for (size_t j = 0; s[j]; j++) {
+            size_t bs = 0;
+            while (s[j] == '\\') { bs++; j++; }
+            if (!s[j]) {
+                for (size_t k = 0; k < bs * 2; k++) buf_c(&cmd, '\\');
+                break;
+            } else if (s[j] == '"') {
+                for (size_t k = 0; k < bs * 2 + 1; k++) buf_c(&cmd, '\\');
+                buf_c(&cmd, '"');
+            } else {
+                for (size_t k = 0; k < bs; k++) buf_c(&cmd, '\\');
+                buf_c(&cmd, s[j]);
+            }
+        }
+        buf_c(&cmd, '"');
+    }
+    buf_c(&cmd, 0);
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&in_rd, &in_wr, &sa, 0) ||
+        !CreatePipe(&out_rd, &out_wr, &sa, 0) ||
+        !CreatePipe(&err_rd, &err_wr, &sa, 0)) {
+        free(cmd.s);
+        return -1;
+    }
+    SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = in_rd;
+    si.hStdOutput = out_wr;
+    si.hStdError = err_wr;
+    memset(&pi, 0, sizeof(pi));
+    /* áp biến môi trường tạm nếu có env_d */
+    if (env_d) {
+        for (size_t i = 0; i < env_d->len; i++) {
+            if (env_d->keys[i].t == T_STR && env_d->vals[i].t == T_STR)
+                _putenv_s(env_d->keys[i].u.str.s, env_d->vals[i].u.str.s);
+        }
+    }
+    if (!CreateProcessA(NULL, cmd.s, NULL, NULL, TRUE, 0, NULL,
+                        (cwd && *cwd) ? cwd : NULL, &si, &pi)) {
+        CloseHandle(in_rd); CloseHandle(in_wr);
+        CloseHandle(out_rd); CloseHandle(out_wr);
+        CloseHandle(err_rd); CloseHandle(err_wr);
+        free(cmd.s);
+        return -1;
+    }
+    CloseHandle(in_rd);
+    CloseHandle(out_wr);
+    CloseHandle(err_wr);
+    if (in_s && in_n > 0) {
+        DWORD wr = 0;
+        WriteFile(in_wr, in_s, (DWORD)in_n, &wr, NULL);
+    }
+    CloseHandle(in_wr);
+    {
+        char tmp[4096];
+        for (;;) {
+            DWORD av_out = 0, av_err = 0, rd = 0;
+            int busy = 0;
+            if (PeekNamedPipe(out_rd, NULL, 0, NULL, &av_out, NULL) && av_out > 0) {
+                if (ReadFile(out_rd, tmp, sizeof(tmp), &rd, NULL) && rd > 0) {
+                    if (bout) buf_put(bout, tmp, rd);
+                    busy = 1;
+                }
+            }
+            if (PeekNamedPipe(err_rd, NULL, 0, NULL, &av_err, NULL) && av_err > 0) {
+                if (ReadFile(err_rd, tmp, sizeof(tmp), &rd, NULL) && rd > 0) {
+                    if (berr) buf_put(berr, tmp, rd);
+                    busy = 1;
+                }
+            }
+            if (!busy) {
+                if (WaitForSingleObject(pi.hProcess, 1) == WAIT_OBJECT_0) {
+                    while (PeekNamedPipe(out_rd, NULL, 0, NULL, &av_out, NULL) && av_out > 0 &&
+                           ReadFile(out_rd, tmp, sizeof(tmp), &rd, NULL) && rd > 0)
+                        if (bout) buf_put(bout, tmp, rd);
+                    while (PeekNamedPipe(err_rd, NULL, 0, NULL, &av_err, NULL) && av_err > 0 &&
+                           ReadFile(err_rd, tmp, sizeof(tmp), &rd, NULL) && rd > 0)
+                        if (berr) buf_put(berr, tmp, rd);
+                    break;
+                }
+            }
+        }
+    }
+    GetExitCodeProcess(pi.hProcess, &rc);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(out_rd);
+    CloseHandle(err_rd);
+    free(cmd.s);
+    return (int)rc;
+#else
+    int in_p[2], out_p[2], err_p[2];
+    pid_t pid;
+    if (pipe(in_p) != 0) return -1;
+    if (pipe(out_p) != 0) { close(in_p[0]); close(in_p[1]); return -1; }
+    if (pipe(err_p) != 0) { close(in_p[0]); close(in_p[1]); close(out_p[0]); close(out_p[1]); return -1; }
+    pid = fork();
+    if (pid < 0) {
+        close(in_p[0]); close(in_p[1]); close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        char **xav = (char**)calloc((size_t)ac + 1, sizeof(char*));
+        dup2(in_p[0], 0); dup2(out_p[1], 1); dup2(err_p[1], 2);
+        close(in_p[0]); close(in_p[1]); close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+        if (cwd && *cwd) { if (chdir(cwd) != 0) _exit(127); }
+        if (env_d) {
+            for (size_t i = 0; i < env_d->len; i++) {
+                if (env_d->keys[i].t == T_STR && env_d->vals[i].t == T_STR)
+                    setenv(env_d->keys[i].u.str.s, env_d->vals[i].u.str.s, 1);
+            }
+        }
+        for (int i = 0; i < ac; i++) xav[i] = (char*)av[i];
+        xav[ac] = NULL;
+        execvp(xav[0], xav);
+        _exit(127);
+    }
+    close(in_p[0]); close(out_p[1]); close(err_p[1]);
+    if (in_s && in_n > 0) {
+        size_t off = 0;
+        while (off < in_n) {
+            ssize_t w = write(in_p[1], in_s + off, in_n - off);
+            if (w <= 0) break;
+            off += (size_t)w;
+        }
+    }
+    close(in_p[1]);
+    {
+        struct pollfd fds[2];
+        int open_cnt = 2;
+        char tmp[4096];
+        fds[0].fd = out_p[0]; fds[0].events = POLLIN;
+        fds[1].fd = err_p[0]; fds[1].events = POLLIN;
+        while (open_cnt > 0) {
+            if (poll(fds, 2, -1) <= 0) break;
+            if (fds[0].revents & (POLLIN | POLLHUP)) {
+                ssize_t r = read(out_p[0], tmp, sizeof(tmp));
+                if (r > 0) { if (bout) buf_put(bout, tmp, (size_t)r); }
+                else { fds[0].fd = -1; open_cnt--; }
+            }
+            if (fds[1].revents & (POLLIN | POLLHUP)) {
+                ssize_t r = read(err_p[0], tmp, sizeof(tmp));
+                if (r > 0) { if (berr) buf_put(berr, tmp, (size_t)r); }
+                else { fds[1].fd = -1; open_cnt--; }
+            }
+        }
+    }
+    close(out_p[0]); close(err_p[0]);
+    {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+#endif
+}
+
+int tvm_compile_src(const char *src, const char *out, int bundle, char *msg, size_t msgn) {
+    char tc[1024];
+    const char *av[6];
+    int ac = 0, rc;
+    Buf bout = {0, 0, 0}, berr = {0, 0, 0};
+    if (msgn) msg[0] = 0;
+    if (!tvm_exe_path || !find_tcomp(tc, sizeof(tc))) {
+        if (msgn) snprintf(msg, msgn, "không tìm thấy tcomp.tb");
+        return -1;
+    }
+    av[ac++] = tvm_exe_path;
+    av[ac++] = tc;
+    if (bundle) av[ac++] = "-b";
+    av[ac++] = "-q";
+    av[ac++] = src;
+    av[ac++] = out;
+    fflush(stdout); fflush(stderr);
+    rc = tvm_run_proc(av, ac, NULL, 0, NULL, NULL, &bout, &berr);
+    if (rc != 0 && msgn) {
+        if (berr.s && berr.n > 0) {
+            size_t eol = 0;
+            while (eol < berr.n && berr.s[eol] != '\n' && berr.s[eol] != '\r') eol++;
+            berr.s[eol] = 0;
+            const char *p = berr.s;
+            if (!strncmp(p, "T error: ", 9)) p += 9;
+            snprintf(msg, msgn, "%s", p);
+        } else {
+            snprintf(msg, msgn, "lỗi biên dịch");
+        }
+    }
+    free(bout.s);
+    free(berr.s);
+    return rc == 0 ? 1 : -1;
+}
+
 static int compile_if_stale(const char *src, const char *out, char *msg, size_t msgn) {
-    char tc[1024], cmd[4096], ef[1100];
-    int rc;
+    char tc[1024];
     double ts = file_mtime(src), tb = file_mtime(out);
     if (ts < 0 || (tb >= 0 && tb >= ts)) return 0;
     if (!tvm_exe_path || !find_tcomp(tc, sizeof(tc))) return 0;
-    snprintf(ef, sizeof(ef), "%s.err", out);
-#ifdef _WIN32
-    /* cmd /c: bọc cả lệnh trong một cặp nháy ngoài để giữ nháy bên trong */
-    snprintf(cmd, sizeof(cmd), "\"\"%s\" \"%s\" \"%s\" \"%s\" >nul 2>\"%s\"\"", tvm_exe_path, tc, src, out, ef);
-#else
-    snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\" \"%s\" >/dev/null 2>\"%s\"", tvm_exe_path, tc, src, out, ef);
-#endif
-    fflush(stdout); fflush(stderr);
-    rc = system(cmd);
-    msg[0] = 0;
-    {
-        /* dòng đầu stderr của compiler (bỏ tiền tố "T error: ") làm thông điệp lỗi */
-        FILE *f = fopen(ef, "rb");
-        if (f) {
-            if (fgets(msg, (int)msgn, f)) {
-                size_t k = strlen(msg);
-                while (k && (msg[k - 1] == '\n' || msg[k - 1] == '\r')) msg[--k] = 0;
-                if (!strncmp(msg, "T error: ", 9)) memmove(msg, msg + 9, k - 9 + 1);
-            }
-            fclose(f);
-        }
-        remove(ef);
-    }
-    return rc == 0 ? 1 : -1;
+    return tvm_compile_src(src, out, 0, msg, msgn);
 }
+
+/* ---------- SHA-256 chuẩn FIPS 180-4 (dùng cho tpkg / std/os.t) ---------- */
+static uint32_t sha_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static void sha256_hex(const uint8_t *data, size_t len, char out[65]) {
+    static const uint32_t K[64] = {
+        0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+        0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+        0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+        0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+        0x27b70a85u,0x2e1b2138u,0x4d2c6dfc,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+        0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+        0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+        0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u
+    };
+    uint32_t H[8] = {
+        0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+        0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u
+    };
+    size_t bitlen = len * 8;
+    size_t padlen = ((len + 8) / 64 + 1) * 64;
+    uint8_t *buf = (uint8_t*)calloc(padlen, 1);
+    if (!buf) exit(1);
+    if (len) memcpy(buf, data, len);
+    buf[len] = 0x80;
+    for (int i = 0; i < 8; i++) buf[padlen - 1 - i] = (uint8_t)((uint64_t)bitlen >> (8 * i));
+    for (size_t off = 0; off < padlen; off += 64) {
+        uint32_t W[64], a, b, c, d, e, f, g, h;
+        for (int i = 0; i < 16; i++)
+            W[i] = ((uint32_t)buf[off + 4*i] << 24) | ((uint32_t)buf[off + 4*i + 1] << 16) |
+                   ((uint32_t)buf[off + 4*i + 2] << 8) | (uint32_t)buf[off + 4*i + 3];
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = sha_rotr(W[i-15], 7) ^ sha_rotr(W[i-15], 18) ^ (W[i-15] >> 3);
+            uint32_t s1 = sha_rotr(W[i-2], 17) ^ sha_rotr(W[i-2], 19) ^ (W[i-2] >> 10);
+            W[i] = W[i-16] + s0 + W[i-7] + s1;
+        }
+        a = H[0]; b = H[1]; c = H[2]; d = H[3]; e = H[4]; f = H[5]; g = H[6]; h = H[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25);
+            uint32_t ch = (e & f) ^ ((~e) & g);
+            uint32_t t1 = h + S1 + ch + K[i] + W[i];
+            uint32_t S0 = sha_rotr(a, 2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22);
+            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t t2 = S0 + maj;
+            h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        H[0] += a; H[1] += b; H[2] += c; H[3] += d;
+        H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+    }
+    free(buf);
+    for (int i = 0; i < 8; i++) snprintf(out + i * 8, 9, "%08x", H[i]);
+    out[64] = 0;
+}
+
+/* ---------- Các hàm hệ thống của load("__sys") ---------- */
+static void sys_clock(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)vm; (void)a; (void)argc;
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    *r = mk_float((double)c.QuadPart / (double)f.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    *r = mk_float((double)ts.tv_sec + (double)ts.tv_nsec * 1e-9);
+#endif
+}
+static void sys_time(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)vm; (void)a; (void)argc;
+    *r = mk_float((double)time(NULL));
+}
+static void sys_sleep(TVM *vm, TVal *a, int argc, TVal *r) {
+    int ok = 1;
+    double s = argc > 0 ? to_num(&a[0], &ok) : 0.0;
+    if (!ok) die(vm, "sleep(sec)");
+    if (s > 0) {
+#ifdef _WIN32
+        Sleep((DWORD)(s * 1000.0));
+#else
+        usleep((useconds_t)(s * 1e6));
+#endif
+    }
+    *r = mk_nil();
+}
+static void sys_getenv(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || a[0].t != T_STR) die(vm, "getenv(str)");
+    const char *v = getenv(a[0].u.str.s);
+    if (v && *v) *r = mk_str(v);
+    else if (argc >= 2) { *r = a[1]; tval_retain(r); }
+    else *r = mk_nil();
+}
+static void sys_setenv(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR || (a[1].t != T_STR && a[1].t != T_NIL))
+        die(vm, "setenv(str, str|nil)");
+#ifdef _WIN32
+    _putenv_s(a[0].u.str.s, a[1].t == T_STR ? a[1].u.str.s : "");
+#else
+    if (a[1].t == T_STR && a[1].u.str.n > 0) setenv(a[0].u.str.s, a[1].u.str.s, 1);
+    else unsetenv(a[0].u.str.s);
+#endif
+    *r = mk_bool(1);
+}
+static void sys_platform(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)vm; (void)a; (void)argc;
+#ifdef _WIN32
+    *r = mk_str("win32");
+#else
+    *r = mk_str("posix");
+#endif
+}
+static void sys_exepath(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)vm; (void)a; (void)argc;
+    *r = mk_str(tvm_exe_path ? tvm_exe_path : "trun");
+}
+static void sys_getcwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    char buf[4096];
+    (void)vm; (void)a; (void)argc;
+#ifdef _WIN32
+    *r = _getcwd(buf, sizeof(buf)) ? mk_str(buf) : mk_str(".");
+#else
+    *r = getcwd(buf, sizeof(buf)) ? mk_str(buf) : mk_str(".");
+#endif
+}
+static void sys_chdir(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "chdir(str)");
+#ifdef _WIN32
+    *r = mk_bool(_chdir(a[0].u.str.s) == 0);
+#else
+    *r = mk_bool(chdir(a[0].u.str.s) == 0);
+#endif
+}
+static void sys_abspath(TVM *vm, TVal *a, int argc, TVal *r) {
+    char buf[4096];
+    if (argc != 1 || a[0].t != T_STR) die(vm, "abspath(str)");
+#ifdef _WIN32
+    if (_fullpath(buf, a[0].u.str.s, sizeof(buf))) *r = mk_str(buf);
+    else *r = mk_str_n(a[0].u.str.s, a[0].u.str.n);
+#else
+    if (realpath(a[0].u.str.s, buf)) *r = mk_str(buf);
+    else if (a[0].u.str.n > 0 && a[0].u.str.s[0] == '/') *r = mk_str_n(a[0].u.str.s, a[0].u.str.n);
+    else if (getcwd(buf, sizeof(buf) - a[0].u.str.n - 2)) {
+        size_t bl = strlen(buf);
+        buf[bl] = '/';
+        memcpy(buf + bl + 1, a[0].u.str.s, a[0].u.str.n + 1);
+        *r = mk_str(buf);
+    } else *r = mk_str_n(a[0].u.str.s, a[0].u.str.n);
+#endif
+}
+static void sys_exists(TVM *vm, TVal *a, int argc, TVal *r) {
+    struct stat st;
+    if (argc != 1 || a[0].t != T_STR) die(vm, "exists(str)");
+    *r = mk_bool(stat_clean(a[0].u.str.s, &st) == 0);
+}
+static void sys_isfile(TVM *vm, TVal *a, int argc, TVal *r) {
+    struct stat st;
+    if (argc != 1 || a[0].t != T_STR) die(vm, "isfile(str)");
+    *r = mk_bool(stat_clean(a[0].u.str.s, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG);
+}
+static void sys_isdir(TVM *vm, TVal *a, int argc, TVal *r) {
+    struct stat st;
+    if (argc != 1 || a[0].t != T_STR) die(vm, "isdir(str)");
+    *r = mk_bool(stat_clean(a[0].u.str.s, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR);
+}
+static void sys_mtime(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "mtime(str)");
+    *r = mk_float(file_mtime(a[0].u.str.s));
+}
+static int mkdir_rec(const char *path) {
+    char tmp[4096];
+    size_t n = strlen(path);
+    struct stat st;
+    if (n == 0 || n >= sizeof(tmp)) return 0;
+    if (stat_clean(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR) return 1;
+    memcpy(tmp, path, n + 1);
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] == '/' || tmp[i] == '\\') {
+            char sv = tmp[i];
+            if (i == 2 && tmp[1] == ':') continue;
+            tmp[i] = 0;
+#ifdef _WIN32
+            _mkdir(tmp);
+#else
+            mkdir(tmp, 0777);
+#endif
+            tmp[i] = sv;
+        }
+    }
+#ifdef _WIN32
+    _mkdir(tmp);
+#else
+    mkdir(tmp, 0777);
+#endif
+    return stat_clean(tmp, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR;
+}
+static void sys_mkdir(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "mkdir(str)");
+    *r = mk_bool(mkdir_rec(a[0].u.str.s));
+}
+static int rmtree_rec(const char *path) {
+    struct stat st;
+    if (stat_clean(path, &st) != 0) return 0;
+    if ((st.st_mode & S_IFMT) != S_IFDIR) return remove(path) == 0;
+#ifdef _WIN32
+    {
+        char pat[4096], sub[4096];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        snprintf(pat, sizeof(pat), "%s\\*", path);
+        h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                snprintf(sub, sizeof(sub), "%s\\%s", path, fd.cFileName);
+                rmtree_rec(sub);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        return _rmdir(path) == 0;
+    }
+#else
+    {
+        DIR *d = opendir(path);
+        struct dirent *de;
+        char sub[4096];
+        if (d) {
+            while ((de = readdir(d)) != NULL) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+                snprintf(sub, sizeof(sub), "%s/%s", path, de->d_name);
+                rmtree_rec(sub);
+            }
+            closedir(d);
+        }
+        return rmdir(path) == 0;
+    }
+#endif
+}
+static void sys_remove(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "remove(str)");
+    *r = mk_bool(rmtree_rec(a[0].u.str.s));
+}
+static int cmp_tstr(const void *p1, const void *p2) {
+    const TVal *a = (const TVal*)p1, *b = (const TVal*)p2;
+    size_t n = a->u.str.n < b->u.str.n ? a->u.str.n : b->u.str.n;
+    int c = n ? memcmp(a->u.str.s, b->u.str.s, n) : 0;
+    if (c != 0) return c;
+    return a->u.str.n < b->u.str.n ? -1 : (a->u.str.n > b->u.str.n ? 1 : 0);
+}
+static void sys_listdir(TVM *vm, TVal *a, int argc, TVal *r) {
+    TList *l = list_new(8);
+    if (argc != 1 || a[0].t != T_STR) { TVal lv; lv.t = T_LIST; lv.u.list = l; tval_free(&lv); die(vm, "listdir(str)"); }
+#ifdef _WIN32
+    {
+        char pat[4096];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        snprintf(pat, sizeof(pat), "%s\\*", a[0].u.str.s);
+        h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                list_push(l, mk_str(fd.cFileName));
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+#else
+    {
+        DIR *d = opendir(a[0].u.str.s);
+        struct dirent *de;
+        if (d) {
+            while ((de = readdir(d)) != NULL) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+                list_push(l, mk_str(de->d_name));
+            }
+            closedir(d);
+        }
+    }
+#endif
+    if (l->len > 1) qsort(l->items, l->len, sizeof(TVal), cmp_tstr);
+    r->t = T_LIST; r->u.list = l;
+}
+static void sys_mktemp(TVM *vm, TVal *a, int argc, TVal *r) {
+    static int seq = 0;
+    const char *pre = (argc >= 1 && a[0].t == T_STR) ? a[0].u.str.s : "ttmp";
+    const char *base = getenv("TEMP");
+    char path[4096];
+    (void)vm;
+    if (!base || !*base) base = getenv("TMP");
+#ifdef _WIN32
+    if (!base || !*base) base = ".";
+    snprintf(path, sizeof(path), "%s\\%s_%lu_%d", base, pre, (unsigned long)GetCurrentProcessId(), ++seq);
+#else
+    if (!base || !*base) base = "/tmp";
+    snprintf(path, sizeof(path), "%s/%s_%lu_%d", base, pre, (unsigned long)getpid(), ++seq);
+#endif
+    mkdir_rec(path);
+    *r = mk_str(path);
+}
+static void sys_sha256(TVM *vm, TVal *a, int argc, TVal *r) {
+    char hex[65];
+    if (argc != 1 || a[0].t != T_STR) die(vm, "sha256(str)");
+    sha256_hex((const uint8_t*)a[0].u.str.s, a[0].u.str.n, hex);
+    *r = mk_str_n(hex, 64);
+}
+static void sys_run(TVM *vm, TVal *a, int argc, TVal *r) {
+    const char **av;
+    int ac, rc;
+    const char *in_s = NULL, *cwd = NULL;
+    size_t in_n = 0;
+    const TDict *env_d = NULL;
+    Buf bout = {0, 0, 0}, berr = {0, 0, 0};
+    TDict *d;
+    if (argc < 1 || a[0].t != T_LIST || a[0].u.list->len == 0) die(vm, "run(args list[, input, cwd, env])");
+    ac = (int)a[0].u.list->len;
+    av = (const char**)calloc((size_t)ac + 1, sizeof(char*));
+    for (int i = 0; i < ac; i++) {
+        if (a[0].u.list->items[i].t != T_STR) { free((void*)av); die(vm, "run: arg phải là str"); }
+        av[i] = a[0].u.list->items[i].u.str.s;
+    }
+    if (argc >= 2 && a[1].t == T_STR) { in_s = a[1].u.str.s; in_n = a[1].u.str.n; }
+    if (argc >= 3 && a[2].t == T_STR) cwd = a[2].u.str.s;
+    if (argc >= 4 && a[3].t == T_DICT) env_d = a[3].u.dict;
+    rc = tvm_run_proc(av, ac, in_s, in_n, cwd, env_d, &bout, &berr);
+    free((void*)av);
+    d = dict_new();
+    dict_set(d, mk_str("rc"), mk_int(rc));
+    dict_set(d, mk_str("out"), mk_str_n(bout.s ? bout.s : "", bout.n));
+    dict_set(d, mk_str("err"), mk_str_n(berr.s ? berr.s : "", berr.n));
+    free(bout.s);
+    free(berr.s);
+    r->t = T_DICT; r->u.dict = d;
+}
+static void sys_stdin_line(TVM *vm, TVal *a, int argc, TVal *r) {
+    Buf b = {0, 0, 0};
+    int c, got = 0;
+    (void)vm; (void)a; (void)argc;
+    while ((c = fgetc(stdin)) != EOF) {
+        got = 1;
+        buf_c(&b, (char)c);
+        if (c == '\n') break;
+    }
+    if (!got) { free(b.s); *r = mk_nil(); return; }
+    *r = mk_str_n(b.s ? b.s : "", b.n);
+    free(b.s);
+}
+static void sys_stdin_read(TVM *vm, TVal *a, int argc, TVal *r) {
+    size_t n, got;
+    TVal v;
+    if (argc != 1 || a[0].t != T_INT || a[0].u.i < 0) die(vm, "stdin_read(n int)");
+    n = (size_t)a[0].u.i;
+    if (n == 0) { *r = mk_str_n("", 0); return; }
+    v = mk_str_uninit(n);
+    got = fread(v.u.str.s, 1, n, stdin);
+    if (got == 0) { tval_free(&v); *r = mk_nil(); return; }
+    v.u.str.n = got;
+    v.u.str.s[got] = 0;
+    *r = v;
+}
+static void sys_stdout_write(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "stdout_write(str)");
+    fwrite(a[0].u.str.s, 1, a[0].u.str.n, stdout);
+    fflush(stdout);
+    *r = mk_int((int64_t)a[0].u.str.n);
+}
+static void sys_stderr_write(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "stderr_write(str)");
+    fwrite(a[0].u.str.s, 1, a[0].u.str.n, stderr);
+    fflush(stderr);
+    *r = mk_int((int64_t)a[0].u.str.n);
+}
+static uint32_t zip_crc32(const uint8_t *buf, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+static void buf_u16le(Buf *b, uint16_t v) {
+    uint8_t x[2]; x[0] = (uint8_t)(v & 0xFF); x[1] = (uint8_t)((v >> 8) & 0xFF);
+    buf_put(b, (const char*)x, 2);
+}
+static void buf_u32le(Buf *b, uint32_t v) {
+    uint8_t x[4];
+    x[0] = (uint8_t)(v & 0xFF); x[1] = (uint8_t)((v >> 8) & 0xFF);
+    x[2] = (uint8_t)((v >> 16) & 0xFF); x[3] = (uint8_t)((v >> 24) & 0xFF);
+    buf_put(b, (const char*)x, 4);
+}
+static uint16_t rd_u16le(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
+static uint32_t rd_u32le(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static int zip_safe_arcname(const char *nm, size_t n) {
+    if (n == 0 || nm[0] == '/' || nm[0] == '\\') return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (nm[i] == ':' || nm[i] == '\0') return 0;
+        if (nm[i] == '.' && i + 1 < n && nm[i + 1] == '.') {
+            int at_start = (i == 0 || nm[i - 1] == '/' || nm[i - 1] == '\\');
+            int at_end = (i + 2 == n || nm[i + 2] == '/' || nm[i + 2] == '\\');
+            if (at_start && at_end) return 0;
+        }
+    }
+    return 1;
+}
+static void sys_zip_pack(TVM *vm, TVal *a, int argc, TVal *r) {
+    Buf body = {0, 0, 0}, cdir = {0, 0, 0};
+    TDict *d;
+    uint16_t count = 0;
+    FILE *fp;
+    if (argc != 2 || a[0].t != T_DICT || a[1].t != T_STR) die(vm, "zip_pack(dict, out_path)");
+    d = a[0].u.dict;
+    for (size_t i = 0; i < d->len; i++) {
+        if (d->keys[i].t != T_STR || d->vals[i].t != T_STR) {
+            free(body.s); free(cdir.s);
+            die(vm, "zip_pack: key/val phải là str");
+        }
+        const char *nm = d->keys[i].u.str.s;
+        size_t nlen = d->keys[i].u.str.n;
+        const uint8_t *dat = (const uint8_t*)d->vals[i].u.str.s;
+        size_t dlen = d->vals[i].u.str.n;
+        if (!zip_safe_arcname(nm, nlen)) {
+            free(body.s); free(cdir.s);
+            die(vm, "zip_pack: unsafe arcname");
+        }
+        uint32_t crc = zip_crc32(dat, dlen);
+        uint32_t off = (uint32_t)body.n;
+        /* Local File Header */
+        buf_put(&body, "PK\x03\x04", 4);
+        buf_u16le(&body, 20);
+        buf_u16le(&body, 0);
+        buf_u16le(&body, 0); /* method 0 = stored */
+        buf_u16le(&body, 0);
+        buf_u16le(&body, 0x21);
+        buf_u32le(&body, crc);
+        buf_u32le(&body, (uint32_t)dlen);
+        buf_u32le(&body, (uint32_t)dlen);
+        buf_u16le(&body, (uint16_t)nlen);
+        buf_u16le(&body, 0);
+        buf_put(&body, nm, nlen);
+        buf_put(&body, (const char*)dat, dlen);
+        /* Central Directory File Header */
+        buf_put(&cdir, "PK\x01\x02", 4);
+        buf_u16le(&cdir, 20);
+        buf_u16le(&cdir, 20);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0x21);
+        buf_u32le(&cdir, crc);
+        buf_u32le(&cdir, (uint32_t)dlen);
+        buf_u32le(&cdir, (uint32_t)dlen);
+        buf_u16le(&cdir, (uint16_t)nlen);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0);
+        buf_u16le(&cdir, 0);
+        buf_u32le(&cdir, 0);
+        buf_u32le(&cdir, off);
+        buf_put(&cdir, nm, nlen);
+        count++;
+    }
+    uint32_t cd_off = (uint32_t)body.n;
+    uint32_t cd_sz = (uint32_t)cdir.n;
+    if (cdir.n) buf_put(&body, cdir.s, cdir.n);
+    free(cdir.s);
+    /* End of Central Directory */
+    buf_put(&body, "PK\x05\x06", 4);
+    buf_u16le(&body, 0);
+    buf_u16le(&body, 0);
+    buf_u16le(&body, count);
+    buf_u16le(&body, count);
+    buf_u32le(&body, cd_sz);
+    buf_u32le(&body, cd_off);
+    buf_u16le(&body, 0);
+    fp = fopen(a[1].u.str.s, "wb");
+    if (!fp) { free(body.s); die(vm, "zip_pack: không ghi được file"); }
+    if (body.n) fwrite(body.s, 1, body.n, fp);
+    fclose(fp);
+    free(body.s);
+    *r = mk_bool(1);
+}
+static void sys_zip_unpack(TVM *vm, TVal *a, int argc, TVal *r) {
+    FILE *fp;
+    long flen;
+    uint8_t *buf;
+    size_t n, pos = 0;
+    TList *out;
+    if (argc != 2 || a[0].t != T_STR || a[1].t != T_STR) die(vm, "zip_unpack(zip_path, dest_dir)");
+    fp = fopen(a[0].u.str.s, "rb");
+    if (!fp) die(vm, "zip_unpack: không mở được file zip");
+    fseek(fp, 0, SEEK_END);
+    flen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (flen < 22) { fclose(fp); die(vm, "zip_unpack: file zip hỏng"); }
+    n = (size_t)flen;
+    buf = (uint8_t*)malloc(n + 1);
+    if (fread(buf, 1, n, fp) != n) { fclose(fp); free(buf); die(vm, "zip_unpack: lỗi đọc"); }
+    fclose(fp);
+    mkdir_rec(a[1].u.str.s);
+    out = list_new(8);
+    while (pos + 4 <= n) {
+        if (memcmp(buf + pos, "PK\x01\x02", 4) == 0 || memcmp(buf + pos, "PK\x05\x06", 4) == 0)
+            break;
+        if (memcmp(buf + pos, "PK\x03\x04", 4) != 0 || pos + 30 > n) {
+            free(buf);
+            { TVal lv; lv.t = T_LIST; lv.u.list = out; tval_free(&lv); }
+            die(vm, "zip_unpack: header hỏng");
+        }
+        uint16_t method = rd_u16le(buf + pos + 8);
+        uint32_t crc = rd_u32le(buf + pos + 14);
+        uint32_t csz = rd_u32le(buf + pos + 18);
+        uint32_t usz = rd_u32le(buf + pos + 22);
+        uint16_t nlen = rd_u16le(buf + pos + 26);
+        uint16_t xlen = rd_u16le(buf + pos + 28);
+        pos += 30;
+        if (pos + nlen + xlen + csz > n || method != 0 || csz != usz) {
+            free(buf);
+            { TVal lv; lv.t = T_LIST; lv.u.list = out; tval_free(&lv); }
+            die(vm, "zip_unpack: định dạng nén không hỗ trợ hoặc dữ liệu cụt");
+        }
+        const char *nm = (const char*)(buf + pos);
+        if (!zip_safe_arcname(nm, nlen)) {
+            free(buf);
+            { TVal lv; lv.t = T_LIST; lv.u.list = out; tval_free(&lv); }
+            die(vm, "zip_unpack: unsafe path (zip-slip)");
+        }
+        const uint8_t *dat = buf + pos + nlen + xlen;
+        if (zip_crc32(dat, csz) != crc) {
+            free(buf);
+            { TVal lv; lv.t = T_LIST; lv.u.list = out; tval_free(&lv); }
+            die(vm, "zip_unpack: CRC32 sai");
+        }
+        char full[4096], arc[1024];
+        if (nlen >= sizeof(arc)) nlen = sizeof(arc) - 1;
+        memcpy(arc, nm, nlen); arc[nlen] = 0;
+        snprintf(full, sizeof(full), "%s/%s", a[1].u.str.s, arc);
+        /* tạo thư mục cha nếu có */
+        char *sl = strrchr(full, '/');
+        char *bsl = strrchr(full, '\\');
+        if (bsl && (!sl || bsl > sl)) sl = bsl;
+        if (sl && sl > full) {
+            *sl = 0;
+            mkdir_rec(full);
+            *sl = '/';
+        }
+        FILE *of = fopen(full, "wb");
+        if (!of) {
+            free(buf);
+            { TVal lv; lv.t = T_LIST; lv.u.list = out; tval_free(&lv); }
+            die(vm, "zip_unpack: không tạo được file đích");
+        }
+        if (csz) fwrite(dat, 1, csz, of);
+        fclose(of);
+        list_push(out, mk_str_n(arc, nlen));
+        pos += nlen + xlen + csz;
+    }
+    free(buf);
+    r->t = T_LIST; r->u.list = out;
+}
+static void sys_exit(TVM *vm, TVal *a, int argc, TVal *r) {
+    int code = (argc >= 1 && a[0].t == T_INT) ? (int)a[0].u.i : 0;
+    (void)vm; (void)r;
+    fflush(stdout); fflush(stderr);
+    exit(code);
+}
+static TVal mk_native(TNativeFn fn, const char *name);
+static void make_sys_mod(TVM *vm, TVal *r) {
+    static const struct { const char *name; TNativeFn fn; } S[] = {
+        {"clock", sys_clock}, {"time", sys_time}, {"sleep", sys_sleep},
+        {"getenv", sys_getenv}, {"setenv", sys_setenv}, {"platform", sys_platform},
+        {"exepath", sys_exepath}, {"getcwd", sys_getcwd}, {"chdir", sys_chdir},
+        {"abspath", sys_abspath}, {"exists", sys_exists}, {"isfile", sys_isfile},
+        {"isdir", sys_isdir}, {"mtime", sys_mtime}, {"mkdir", sys_mkdir},
+        {"remove", sys_remove}, {"listdir", sys_listdir}, {"mktemp", sys_mktemp},
+        {"sha256", sys_sha256}, {"run", sys_run}, {"stdin_line", sys_stdin_line},
+        {"stdin_read", sys_stdin_read}, {"stdout_write", sys_stdout_write},
+        {"stderr_write", sys_stderr_write}, {"zip_pack", sys_zip_pack},
+        {"zip_unpack", sys_zip_unpack}, {"exit", sys_exit}
+    };
+    size_t ne = sizeof(S) / sizeof(S[0]);
+    TList *fl = list_new(ne);
+    TVal targs[3], tp, *vals;
+    for (size_t i = 0; i < ne; i++) list_push(fl, mk_str(S[i].name));
+    targs[0] = mk_str("module");
+    targs[1].t = T_LIST; targs[1].u.list = fl;
+    targs[2].t = T_DICT; targs[2].u.dict = dict_new();
+    n___struct(vm, targs, 3, &tp);
+    for (int i = 0; i < 3; i++) tval_free(&targs[i]);
+    vals = (TVal*)malloc(sizeof(TVal) * (ne + 1));
+    vals[0] = tp;
+    for (size_t i = 0; i < ne; i++) vals[i + 1] = mk_native(S[i].fn, S[i].name);
+    n___new(vm, vals, (int)(ne + 1), r);
+    for (size_t i = 1; i <= ne; i++) tval_free(&vals[i]);
+    free(vals);
+    tval_free(&tp);
+}
+
 /* load("tên"): nạp tên.tb (thư mục hiện tại, rồi thư mục của chương trình chính),
    chạy top-level của nó một lần (cache theo đường dẫn) -> bản ghi kiểu "module"
    gồm các global top-level (giá trị lúc nạp xong). */
@@ -2672,9 +3568,12 @@ static void n_load(TVM *vm, TVal *a, int argc, TVal *r) {
     char path[4200], eb[1200];
     TProg *root = vm->root;
     if (argc != 1 || a[0].t != T_STR) die(vm, "load(name str)");
+    if (a[0].u.str.n == 5 && !memcmp(a[0].u.str.s, "__sys", 5)) {
+        make_sys_mod(vm, r);
+        return;
+    }
     if (a[0].u.str.n > 900) die(vm, "load: tên quá dài");
-    /* validate tên module: chỉ ký tự an toàn cho tên file — chặn shell metachar
-       (" ; & | ` $ \\n ...) tránh command injection qua system() trong compile_if_stale */
+    /* validate tên module: chỉ ký tự an toàn cho tên file — chặn shell metachar */
     {
         const char *s = a[0].u.str.s;
         size_t n = a[0].u.str.n;
@@ -2994,27 +3893,29 @@ static void call_value(TVM *vm, uint8_t k) {
             TVal fv = vm->stack[vm->sp - k - 1];
             if (fv.t == T_FN) {
                 TFn *f = fv.u.fn;
-                if (k != f->nargs) {
+                if (k < f->min_args || (!f->vararg && k > f->nargs)) {
                     char eb[64];
                     snprintf(eb, sizeof(eb), "%.40s arity", "call");
                     die(vm, eb);
                 }
                 /* JIT hot-path: đếm + thử biên dịch, rồi chạy native nếu tag khớp */
-                if (!f->native)
-                    t_jit_maybe(vm, f, &vm->stack[vm->sp - k]);
-                if (f->native) {
-                    TVal rv; rv.t = T_NIL;
-                    if (t_jit_call(vm, f, &vm->stack[vm->sp - k], k, &rv)) {
-                        int i;
-                        for (i = 0; i < k + 1; i++)
-                            TV_FREE(&vm->stack[vm->sp - k - 1 + i]);
-                        vm->sp -= k + 1;
-                        push(vm, rv);
-                        return;
+                if (!f->vararg && k == f->nargs) {
+                    if (!f->native)
+                        t_jit_maybe(vm, f, &vm->stack[vm->sp - k]);
+                    if (f->native) {
+                        TVal rv; rv.t = T_NIL;
+                        if (t_jit_call(vm, f, &vm->stack[vm->sp - k], k, &rv)) {
+                            int i;
+                            for (i = 0; i < k + 1; i++)
+                                TV_FREE(&vm->stack[vm->sp - k - 1 + i]);
+                            vm->sp -= k + 1;
+                            push(vm, rv);
+                            return;
+                        }
+                        /* kiểu không khớp bản nào / deopt: có thể biên dịch bản đặc hoá
+                           mới cho bộ kiểu này, rồi rẽ interpreter bên dưới */
+                        t_jit_maybe(vm, f, &vm->stack[vm->sp - k]);
                     }
-                    /* kiểu không khớp bản nào / deopt: có thể biên dịch bản đặc hoá
-                       mới cho bộ kiểu này, rồi rẽ interpreter bên dưới */
-                    t_jit_maybe(vm, f, &vm->stack[vm->sp - k]);
                 }
                 TFrame *fr = push_frame(vm);
                 size_t bp = vm->sp - k - 1;
@@ -3035,8 +3936,21 @@ static void call_value(TVM *vm, uint8_t k) {
                     fill_undef(fr->locals, f->nlocals);
                     fr->lcap = f->nlocals;
                 }
-                for (uint8_t i = 0; i < k; i++)
-                    fr->locals[i] = vm->stack[bp + 1 + i];
+                if (f->vararg) {
+                    uint8_t fixed = f->min_args;
+                    for (uint8_t i = 0; i < fixed; i++)
+                        fr->locals[i] = vm->stack[bp + 1 + i];
+                    TList *rest = list_new(k > fixed ? (size_t)(k - fixed) : 0);
+                    for (uint8_t i = fixed; i < k; i++)
+                        rest->items[rest->len++] = vm->stack[bp + 1 + i];
+                    fr->locals[fixed].t = T_LIST;
+                    fr->locals[fixed].u.list = rest;
+                } else {
+                    for (uint8_t i = 0; i < k; i++)
+                        fr->locals[i] = vm->stack[bp + 1 + i];
+                    for (uint8_t i = k; i < f->nargs; i++)
+                        fr->locals[i] = mk_nil();
+                }
                 vm->sp = bp;
                 vm->pc = (size_t)f->entry;
             } else if (fv.t == T_NATIVE) {
@@ -3079,7 +3993,17 @@ static void enter_fn(TVM *vm, TFn *f, size_t bp, int nargs) {
         fill_undef(fr->locals, f->nlocals);
         fr->lcap = f->nlocals;
     }
-    for (int i = 0; i < nargs; i++) fr->locals[i] = vm->stack[bp + i];
+    if (f->vararg) {
+        int fixed = (int)f->min_args;
+        for (int i = 0; i < fixed; i++) fr->locals[i] = vm->stack[bp + i];
+        TList *rest = list_new(nargs > fixed ? (size_t)(nargs - fixed) : 0);
+        for (int i = fixed; i < nargs; i++) rest->items[rest->len++] = vm->stack[bp + i];
+        fr->locals[fixed].t = T_LIST;
+        fr->locals[fixed].u.list = rest;
+    } else {
+        for (int i = 0; i < nargs; i++) fr->locals[i] = vm->stack[bp + i];
+        for (int i = nargs; i < (int)f->nargs; i++) fr->locals[i] = mk_nil();
+    }
     vm->sp = bp;
     vm->pc = (size_t)f->entry;
 }
@@ -3108,18 +4032,20 @@ static void call_method(TVM *vm, uint8_t k, const char *nm, size_t len, TAttrIC 
         }
         if (mi >= 0 && (size_t)mi < tp->len && tp->vals[mi].t == T_FN) {
             TFn *f = tp->vals[mi].u.fn;
-            if ((int)k + 1 != f->nargs) die(vm, "call arity");
+            if ((int)k + 1 < f->min_args || (!f->vararg && (int)k + 1 > f->nargs)) die(vm, "call arity");
             /* JIT: method nóng (self = record mượn) chạy native nếu kiểu khớp */
-            if (!f->native) t_jit_maybe(vm, f, &vm->stack[bp]);
-            if (f->native) {
-                TVal rv; rv.t = T_NIL;
-                if (t_jit_call(vm, f, &vm->stack[bp], k + 1, &rv)) {
-                    for (int i = 0; i <= k; i++) TV_FREE(&vm->stack[bp + i]);
-                    vm->sp = bp;
-                    push(vm, rv);
-                    return;
+            if (!f->vararg && (int)k + 1 == f->nargs) {
+                if (!f->native) t_jit_maybe(vm, f, &vm->stack[bp]);
+                if (f->native) {
+                    TVal rv; rv.t = T_NIL;
+                    if (t_jit_call(vm, f, &vm->stack[bp], k + 1, &rv)) {
+                        for (int i = 0; i <= k; i++) TV_FREE(&vm->stack[bp + i]);
+                        vm->sp = bp;
+                        push(vm, rv);
+                        return;
+                    }
+                    t_jit_maybe(vm, f, &vm->stack[bp]);    /* bộ kiểu mới */
                 }
-                t_jit_maybe(vm, f, &vm->stack[bp]);    /* bộ kiểu mới */
             }
             enter_fn(vm, f, bp, k + 1);
             return;
@@ -3872,10 +4798,27 @@ int tvm_run(TVM *vm) {
             uint16_t nl = rd_u16(c, &pc);
             uint16_t nu = rd_u16(c, &pc);
             TFn *f = (TFn*)malloc(sizeof(TFn));
-            f->refc = 1; f->gc_mark = 0; f->entry = e; f->nargs = na; f->nlocals = nl;
+            f->refc = 1; f->gc_mark = 0; f->entry = e;
+            if ((na & 0xF0) == 0xF0) {
+                f->nargs = na & 0x0F;
+                f->min_args = f->nargs > 0 ? (uint8_t)(f->nargs - 1) : 0;
+                f->vararg = 1;
+            } else if (na & 0x80) {
+                f->nargs = na & 0x0F;
+                uint8_t ndef = (na >> 4) & 0x07;
+                f->min_args = (ndef <= f->nargs) ? (uint8_t)(f->nargs - ndef) : 0;
+                f->vararg = 0;
+            } else {
+                f->nargs = na;
+                f->min_args = na;
+                f->vararg = 0;
+            }
+            f->nlocals = nl;
             f->nupvals = nu; f->ncap = 0;
             f->upvals = nu ? (TVal*)calloc(nu, sizeof(TVal)) : NULL;
-            f->ncalls = 0; f->native = NULL; f->loops = 0; f->jit_off = 0; f->jit = NULL;
+            f->ncalls = 0; f->native = NULL; f->loops = 0;
+            f->jit_off = f->vararg ? 3 : 0;
+            f->jit = NULL;
             f->prog = vm->prog;
             TVal v; v.t = T_FN; v.u.fn = f;
             gc_track(vm, T_FN, f);
@@ -4195,6 +5138,53 @@ int tvm_run(TVM *vm) {
             b = pop(vm); a = pop(vm);
             tval_free(&a); tval_free(&b);
             push(vm, mk_bool(res)); break;
+        }
+        case OP_BAND: {
+            TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
+            if (a->t == T_INT && b->t == T_INT) {
+                a->u.i = (int64_t)((uint64_t)a->u.i & (uint64_t)b->u.i); vm->sp--; break;
+            }
+            die(vm, "bitwise & requires int"); break;
+        }
+        case OP_BOR: {
+            TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
+            if (a->t == T_INT && b->t == T_INT) {
+                a->u.i = (int64_t)((uint64_t)a->u.i | (uint64_t)b->u.i); vm->sp--; break;
+            }
+            die(vm, "bitwise | requires int"); break;
+        }
+        case OP_BXOR: {
+            TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
+            if (a->t == T_INT && b->t == T_INT) {
+                a->u.i = (int64_t)((uint64_t)a->u.i ^ (uint64_t)b->u.i); vm->sp--; break;
+            }
+            die(vm, "bitwise ^ requires int"); break;
+        }
+        case OP_BNOT: {
+            TVal *a = &vm->stack[vm->sp - 1];
+            if (a->t == T_INT) {
+                a->u.i = (int64_t)(~(uint64_t)a->u.i); break;
+            }
+            die(vm, "bitwise ~ requires int"); break;
+        }
+        case OP_SHL: {
+            TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
+            if (a->t == T_INT && b->t == T_INT) {
+                if (b->u.i < 0) die(vm, "negative shift count");
+                a->u.i = b->u.i >= 64 ? 0 : (int64_t)((uint64_t)a->u.i << (unsigned)b->u.i);
+                vm->sp--; break;
+            }
+            die(vm, "bitwise << requires int"); break;
+        }
+        case OP_SHR: {
+            TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
+            if (a->t == T_INT && b->t == T_INT) {
+                if (b->u.i < 0) die(vm, "negative shift count");
+                if (b->u.i >= 64) a->u.i = a->u.i < 0 ? -1 : 0;
+                else a->u.i = a->u.i >> (unsigned)b->u.i;
+                vm->sp--; break;
+            }
+            die(vm, "bitwise >> requires int"); break;
         }
         case OP_NOP:
             /* đệm của superop peephole (INC_L... thay 4 lệnh, phần dư là NOP; không đích

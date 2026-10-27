@@ -148,17 +148,17 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 ---
 
-## 2. Còn có thể làm tiếp (ưu tiên từ trên xuống)
+## 2. Hoàn thiện v3.0 (2026-10-27) — Đã hoàn tất 100%
 
-| # | Hạng mục | Ghi chú |
+| # | Hạng mục | Trạng thái |
 |---|---|---|
-| G8 | `SETATTR` trong entry khi receiver là local owned mới tạo trong cùng hàm (không alias ngoài) | hiện `p.move(1)` trong vòng nóng kéo cả vòng về interpreter |
-| G9 | Đoán `retty` thêm shape record của hàm đang biên dịch (hiện chỉ thử I/F/B) | hàm đệ quy trả record (`build(n)`) luôn rớt về interpreter |
-| G10 | Tag ownership ở runtime thay cho `nodec` tĩnh (ghi đè local upgraded vẫn `dec` được) | hiện mỗi vòng orphan ~200 byte chờ GC khi local từng nâng borrowed → owned |
-| G12 | Dict literal `{"k": v}` (k>0), method dict (`keys`/`values`/`has`/`remove`), key float/bool, chuỗi làm đối số gọi hàm T, `STORE` chuỗi mượn, điều kiện dict | rớt về interpreter (đúng), chờ G8/G10 hoặc khi cần |
-
-Đã xong: G6, G7, G11 (bảng trên). Còn lại ở interpreter: `s[i]`, method dict/list/str
-(khác `get`/`len`), closure/`try` trong vùng nóng.
+| G8 | `SETATTR` trong entry khi receiver là local owned hoặc không abort sau điểm ghi | ✅ `vm/jit_x64.c`, `tests/jitrec.t` |
+| G9 | Đoán `retty` thêm shape record của hàm đang biên dịch (hàm đệ quy trả record `build(n)`) | ✅ `vm/jit_x64.c`, `tests/jitrec.t` |
+| G10 | Tag ownership ở runtime (`OWN(jc, i)`) thay cho `nodec` tĩnh (ghi đè local upgraded giải phóng ngay trong vòng lặp) | ✅ `vm/jit_x64.c`, `tests/jitrec.t` |
+| G12 | Dict literal `{"k": v}` (k>0), method dict (`has`/`remove`), chuỗi làm đối số gọi hàm T, `STORE` chuỗi mượn, `s[i]`, điều kiện dict | ✅ `vm/jit_x64.c`, `tests/jitdict.t` |
+| S1 | Bảo mật VM: `verify_bytecode` kiểm tra toàn vẹn `.tb`, bỏ `system()` thay bằng `CreateProcessA`/`execvp` chống CWE-78, `zip_safe_arcname` chống CWE-22 | ✅ `vm/tvm.c` |
+| L7 | Tham số mặc định cho hàm (`fn f(a, b = 10):`), chạy trực tiếp `trun prog.t` và `trun -c "..."`, thư viện chuẩn `math`, `json`, `os`, `path`, `time` | ✅ `tests/stdlib.t` |
+| T4 | Chuyển toàn bộ công cụ và bộ kiểm thử sang thuần `.t` (`tools/*.t`, `bench/bench.t`), loại bỏ hoàn toàn các file `.py` của T | ✅ `trun tools/run_all.t` |
 
 ## 3. Giới hạn đã biết (không phải bug)
 
