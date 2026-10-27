@@ -148,7 +148,7 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 ---
 
-## 2. Hoàn thiện v3.0 (2026-10-27) — Đã hoàn tất 100%
+## 2. Hoàn thiện v3.0 & v3.1 (2026-10-27) — Đã hoàn tất 100%
 
 | # | Hạng mục | Trạng thái |
 |---|---|---|
@@ -159,12 +159,27 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | S1 | Bảo mật VM: `verify_bytecode` kiểm tra toàn vẹn `.tb`, bỏ `system()` thay bằng `CreateProcessA`/`execvp` chống CWE-78, `zip_safe_arcname` chống CWE-22 | ✅ `vm/tvm.c` |
 | L7 | Tham số mặc định cho hàm (`fn f(a, b = 10):`), chạy trực tiếp `trun prog.t` và `trun -c "..."`, thư viện chuẩn `math`, `json`, `os`, `path`, `time` | ✅ `tests/stdlib.t` |
 | T4 | Chuyển toàn bộ công cụ và bộ kiểm thử sang thuần `.t` (`tools/*.t`, `bench/bench.t`), loại bỏ hoàn toàn các file `.py` của T | ✅ `trun tools/run_all.t` |
+| L8 | Cú pháp mở rộng v3.1: Toán tử bitwise 64-bit (`&`, `\|`, `^`, `~`, `<<`, `>>`, compound `&=..>>=`), `try/except/finally` bảo đảm dọn dẹp, tham số biến thiên `*args` | ✅ `self/parse2.t`, `vm/tvm.c`, `tests/stdlib.t` |
+| J6 | JIT x86-64 bitwise: mã máy gốc cho `not`, `and`, `or`, `xor`, `shl`, `sar` với guard tràn bit | ✅ `vm/jit_x64.c`, `tests/stdlib.t` |
+| S2 | Thư viện chuẩn mở rộng: `std/random.t` (PRNG 64-bit có hạt giống), `std/re.t` (Regex engine thuần T), `std/csv.t` (RFC 4180), `std/http.t` (URL & HTTP client) | ✅ `tests/stdlib.t` |
+| P4 | Kho mã nguồn chuẩn: `LICENSE` (MIT), 4 bài mẫu trong `examples/`, tiện ích mở rộng VS Code trong `editors/vscode/` | ✅ `examples/*.t` |
 
-## 3. Giới hạn đã biết (không phải bug)
+## 3. Giới hạn hiện tại (không phải bug)
 
 | Giới hạn | Ghi chú |
 |---|---|
 | Biến `for` khai báo **sau** hàm thì closure không capture | `tests/hoist.t` khoá hành vi |
 | `==`/`!=` trên tensor so toàn bộ (bool) | so từng phần tử: `.eq()` / `.ne()`; `< > <= >=` là từng phần tử |
-| `mem()` trên `t.py`/`eval.t` trả `objs=0, gc=0` | chỉ `trun` có số liệu GC thật |
 | Thông điệp vài lỗi hiếm (vd unhashable key) khác chữ giữa runtime | output bình thường khớp từng byte |
+| Chạy đơn luồng cho 1 tiến trình VM | Không có tranh chấp lock/GIL; đa luồng nằm trong lộ trình v4.0 |
+
+---
+
+## 4. Lộ trình hạ tầng nâng cao (v4.0 Roadmap — Industrial Scale)
+
+| # | Hạng mục | Mục tiêu |
+|---|---|---|
+| **F1** | **C FFI (`load_lib` / `ffi`)** | Nạp động `.dll` / `.so` bằng `LoadLibraryA` / `dlopen`, gọi trực tiếp hàm C ngoài (SQLite, Raylib, Win32 API, OpenGL...) từ mã nguồn T. |
+| **T1** | **Đa luồng & Mô hình Kênh (Worker Threads & Channels)** | Hỗ trợ `thread.spawn(fn)` và `Channel` trao đổi dữ liệu an toàn bộ nhớ, chạy song song không cần GIL, tận dụng 100% CPU đa nhân. |
+| **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere, Raspberry Pi). |
+| **A1** | **GPU Tensor Backend** | Tích hợp backend tăng tốc phần cứng (CUDA hoặc Vulkan Compute) để xử lý ma trận khổng lồ trên GPU bên cạnh CPU tensor hiện có. |
