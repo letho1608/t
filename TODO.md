@@ -182,4 +182,17 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | **F1** | **C FFI (`load_lib` / `ffi`)** | Nạp động `.dll` / `.so` bằng `LoadLibraryA` / `dlopen`, gọi trực tiếp hàm C ngoài (SQLite, Raylib, Win32 API, OpenGL...) từ mã nguồn T. |
 | **T1** | **Đa luồng & Mô hình Kênh (Worker Threads & Channels)** | Hỗ trợ `thread.spawn(fn)` và `Channel` trao đổi dữ liệu an toàn bộ nhớ, chạy song song không cần GIL, tận dụng 100% CPU đa nhân. |
 | **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere, Raspberry Pi). |
-| **A1** | **GPU Tensor Backend** | Tích hợp backend tăng tốc phần cứng (CUDA hoặc Vulkan Compute) để xử lý ma trận khổng lồ trên GPU bên cạnh CPU tensor hiện có. |
+
+---
+
+## 5. Lộ trình Chạy Mô hình AI Lớn (v5.0 LLM & Foundation Models Engine)
+
+Đưa T từ cấp độ nghiên cứu/mô hình nhỏ trên CPU thành **Động cơ thực thi mô hình ngôn ngữ lớn (Large Language Models — LLM)** độc lập không cần Python/PyTorch (tương tự kiến trúc tối ưu của `llama.cpp` nhưng viết trên nền tảng ngôn ngữ T):
+
+| # | Trụ cột kỹ thuật | Chi tiết hiện thực |
+|---|---|---|
+| **M1** | **Memory-Mapped I/O (`mmap`)** | Ánh xạ trực tiếp file mô hình từ 1 GB đến 32 GB từ ổ đĩa SSD vào không gian địa chỉ ảo qua `CreateFileMappingA`/`MapViewOfFile` (Windows) và `mmap` (POSIX). Khởi động mô hình trong 0.05 giây, zero-copy, tiết kiệm RAM. |
+| **M2** | **Bộ đọc GGUF & Safetensors** | Parser nhị phân cho định dạng chuẩn quốc tế `.gguf` (Hugging Face / llama.cpp) và `.safetensors`: đọc thông tin kiến trúc (architecture, context length, head count), từ điển vocab, danh sách trọng số (weight tensors) và offset. |
+| **M3** | **Lượng tử hóa (Quantization 4-bit / 8-bit / FP16)** | Hỗ trợ các kiểu nén trọng số `Q4_0`, `Q4_K_M`, `Q8_0` và `FP16`. Giảm dung lượng mô hình 7B/8B từ 32 GB RAM (FP32) xuống còn **~4.5 GB RAM** (Q4), giúp laptop/máy tính cá nhân chạy mượt mà. Tích hợp phép nhân ma trận lượng tử hóa vectorized AVX2 / FMA. |
+| **M4** | **Động cơ Transformer suy luận (Llama / Mistral / Qwen Engine)** | - **BPE Tokenizer**: Bộ tách từ vựng byte-pair encoding đa ngữ.<br>- **RoPE (Rotary Position Embeddings)**: Mã hóa vị trí xoay cho ngữ cảnh văn bản dài.<br>- **KV-Cache**: Bộ đệm nhớ Key-Value giúp sinh từ tự hồi quy (autoregressive) với tốc độ cao, không phải tính lại các token cũ.<br>- **GQA (Grouped-Query Attention)** & **SwiGLU**: Cấu trúc mạng Transformer thế hệ mới.<br>- **Bộ lấy mẫu (Sampling)**: `temperature`, `top_p`, `top_k`, `repetition_penalty`, sinh chữ dạng luồng (streaming tokens). |
+| **M5** | **Tăng tốc phần cứng GPU (CUDA / Vulkan Backend)** | Tận dụng cơ chế C FFI nạp `nvcuda.dll` / `cublas64.dll` hoặc Vulkan Compute Shader để offload toàn bộ hoặc một phần các lớp Transformer sang GPU NVIDIA / AMD / Intel. |
