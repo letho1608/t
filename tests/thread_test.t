@@ -28,7 +28,15 @@ print("=== 2. Kiểm thử Worker Thread song song qua Channel ===")
 let ch_in = thread.channel(5)
 let ch_out = thread.channel(5)
 
-let h = thread.spawn("tests/_worker.t", [ch_in.id, ch_out.id])
+let worker_src = "tests/_worker.t"
+let worker_bin = "tests/_worker.tb"
+if not os.exists(worker_src):
+    mut wf = open(worker_src, "w")
+    write(wf, "# Worker\nimport thread\nlet args = argv()\nlet ch_in = thread.channel_from_id(int(args[1]))\nlet ch_out = thread.channel_from_id(int(args[2]))\nlet num = ch_in.recv()\nch_out.send(num * num)\n")
+    close(wf)
+
+let worker_target = os.abspath(worker_bin if os.exists(worker_bin) else worker_src)
+let h = thread.spawn(worker_target, [ch_in.id, ch_out.id])
 assert h >= 0
 
 ch_in.send(9)
