@@ -3,6 +3,7 @@
 
 import math
 import random
+import gguf
 
 # =========================================================================
 # 1. Các khối toán học cốt lõi (Core Math Blocks)
@@ -295,3 +296,71 @@ struct TransformerModel:
             pos += 1
 
         return tokenizer.decode(generated)
+
+# =========================================================================
+# 6. Tải mô hình trực tiếp từ file GGUF
+# =========================================================================
+
+fn match_matmul_weight(w, in_dim):
+    if w == nil:
+        return nil
+    if w.ndim == 2 and w.shape[0] != in_dim and w.shape[1] == in_dim:
+        return w.T
+    return w
+
+fn load_model_from_gguf(gguf_path):
+    let reader = gguf.open_gguf(gguf_path)
+    if reader == nil:
+        return nil
+    let arch = reader.metadata.get("general.architecture", "llama")
+    let dim = reader.metadata.get(arch + ".embedding_length", 0)
+    let n_layers = reader.metadata.get(arch + ".block_count", 0)
+    let n_heads = reader.metadata.get(arch + ".attention.head_count", 0)
+    let n_kv_heads = reader.metadata.get(arch + ".attention.head_count_kv", n_heads)
+    let ffn_hidden = reader.metadata.get(arch + ".feed_forward_length", 0)
+    let head_dim = int(dim / n_heads) if n_heads > 0 else 0
+
+    # Xây dựng Tokenizer từ metadata
+    let tokens = reader.metadata.get("tokenizer.ggml.tokens", [])
+    let bos_id = reader.metadata.get("tokenizer.ggml.bos_token_id", 1)
+    let eos_id = reader.metadata.get("tokenizer.ggml.eos_token_id", 2)
+    mut vocab = {}
+    for i in range(len(tokens)):
+        vocab[tokens[i]] = i
+    let tokenizer = Tokenizer(vocab, tokens, bos_id, eos_id)
+
+    # Nạp các tensor trọng số
+    let tok_embd = reader.get_tensor("token_embd.weight")
+    let norm_w = reader.get_tensor("output_norm.weight")
+    mut output_w = reader.get_tensor("output.weight")
+    if output_w == nil and tok_embd != nil:
+        output_w = tok_embd.T
+
+    output_w = match_matmul_weight(output_w, dim)
+
+    mut layers = []
+    for i in range(n_layers):
+        let prefix = "blk." + str(i) + "."
+        let attn_norm_w = reader.get_tensor(prefix + "attn_norm.weight")
+        let wq = match_matmul_weight(reader.get_tensor(prefix + "attn_q.weight"), dim)
+        let wk = match_matmul_weight(reader.get_tensor(prefix + "attn_k.weight"), dim)
+        let wv = match_matmul_weight(reader.get_tensor(prefix + "attn_v.weight"), dim)
+        let wo = match_matmul_weight(reader.get_tensor(prefix + "attn_output.weight"), dim)
+        let ffn_norm_w = reader.get_tensor(prefix + "ffn_norm.weight")
+        let w_gate = match_matmul_weight(reader.get_tensor(prefix + "ffn_gate.weight"), dim)
+        let w_up = match_matmul_weight(reader.get_tensor(prefix + "ffn_up.weight"), dim)
+        let w_down = match_matmul_weight(reader.get_tensor(prefix + "ffn_down.weight"), ffn_hidden)
+
+        let layer = TransformerLayer(
+            i, n_heads, n_kv_heads, head_dim, dim,
+            attn_norm_w, wq, wk, wv, wo,
+            ffn_norm_w, w_gate, w_up, w_down
+        )
+        layers.append(layer)
+
+    let vocab_size = len(tokens) if len(tokens) > 0 else (tok_embd.shape[0] if tok_embd != nil else 0)
+    let model = TransformerModel(
+        vocab_size, dim, n_layers, n_heads, n_kv_heads,
+        head_dim, ffn_hidden, tok_embd, layers, norm_w, output_w
+    )
+    return [model, tokenizer, reader]
