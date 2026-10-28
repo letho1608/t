@@ -4138,30 +4138,50 @@ static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
         }
     }
 
+    int has_float_arg = 0;
+    for (size_t i = 0; i < ntypes; i++) {
+        if (argtypes[i] == 'd' || argtypes[i] == 'f') has_float_arg = 1;
+    }
+
     if (retty == 'd' || retty == 'f') {
         double res_d = 0.0;
-        if (args->len == 1) {
-            res_d = ((double(*)(double))fn)(d[0]);
-        } else if (args->len == 2) {
-            res_d = ((double(*)(double, double))fn)(d[0], d[1]);
-        } else if (args->len == 3) {
-            res_d = ((double(*)(double, double, double))fn)(d[0], d[1], d[2]);
+        if (!has_float_arg) {
+            switch (args->len) {
+            case 0: res_d = ((double(*)(void))fn)(); break;
+            case 1: res_d = ((double(*)(uint64_t))fn)(u[0]); break;
+            case 2: res_d = ((double(*)(uint64_t, uint64_t))fn)(u[0], u[1]); break;
+            case 3: res_d = ((double(*)(uint64_t, uint64_t, uint64_t))fn)(u[0], u[1], u[2]); break;
+            case 4: res_d = ((double(*)(uint64_t, uint64_t, uint64_t, uint64_t))fn)(u[0], u[1], u[2], u[3]); break;
+            default: die(vm, "ffi_call: max 4 args for double return with int args");
+            }
         } else {
-            res_d = ((double(*)(void))fn)();
+            if (args->len == 1) {
+                res_d = ((double(*)(double))fn)(d[0]);
+            } else if (args->len == 2) {
+                res_d = ((double(*)(double, double))fn)(d[0], d[1]);
+            } else if (args->len == 3) {
+                res_d = ((double(*)(double, double, double))fn)(d[0], d[1], d[2]);
+            } else {
+                res_d = ((double(*)(void))fn)();
+            }
         }
         *r = mk_float(res_d);
         return;
     }
 
     uint64_t res = 0;
-    switch (args->len) {
-    case 0: res = ((uint64_t(*)(void))fn)(); break;
-    case 1: res = ((uint64_t(*)(uint64_t))fn)(u[0]); break;
-    case 2: res = ((uint64_t(*)(uint64_t,uint64_t))fn)(u[0], u[1]); break;
-    case 3: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2]); break;
-    case 4: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3]); break;
-    case 5: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4]); break;
-    case 6: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5]); break;
+    if (args->len == 3 && (argtypes[2] == 'd' || argtypes[2] == 'f')) {
+        res = ((uint64_t(*)(uint64_t, uint64_t, double))fn)(u[0], u[1], d[2]);
+    } else {
+        switch (args->len) {
+        case 0: res = ((uint64_t(*)(void))fn)(); break;
+        case 1: res = ((uint64_t(*)(uint64_t))fn)(u[0]); break;
+        case 2: res = ((uint64_t(*)(uint64_t,uint64_t))fn)(u[0], u[1]); break;
+        case 3: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2]); break;
+        case 4: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3]); break;
+        case 5: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4]); break;
+        case 6: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5]); break;
+        }
     }
 
     if (retty == 'v') *r = mk_nil();
@@ -4546,6 +4566,67 @@ static void sys_thread_join(TVM *vm, TVal *a, int argc, TVal *r) {
     slot->in_use = 0;
     *r = mk_bool(1);
 }
+
+/* ========================================================================= */
+/* Raw Memory Primitives (Buffer allocation & pointer dereference for FFI)  */
+/* ========================================================================= */
+
+static void sys_mem_alloc(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT || a[0].u.i <= 0) die(vm, "mem_alloc(size: int > 0)");
+    size_t sz = (size_t)a[0].u.i;
+    void *ptr = calloc(1, sz);
+    *r = mk_int((int64_t)(uintptr_t)ptr);
+}
+
+static void sys_mem_free(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_free(ptr: int)");
+    void *ptr = (void*)(uintptr_t)a[0].u.i;
+    if (ptr) free(ptr);
+    *r = mk_nil();
+}
+
+static void sys_mem_read_ptr(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_ptr(ptr: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_read_ptr: null pointer dereference");
+    uintptr_t val = *(uintptr_t*)p;
+    *r = mk_int((int64_t)val);
+}
+
+static void sys_mem_write_ptr(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mem_write_ptr(ptr: int, val: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_write_ptr: null pointer dereference");
+    *(uintptr_t*)p = (uintptr_t)a[1].u.i;
+    *r = mk_nil();
+}
+
+static void sys_mem_read_i32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_i32(ptr: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_read_i32: null pointer dereference");
+    int32_t val = *(int32_t*)p;
+    *r = mk_int((int64_t)val);
+}
+
+static void sys_mem_write_i32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mem_write_i32(ptr: int, val: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_write_i32: null pointer dereference");
+    *(int32_t*)p = (int32_t)a[1].u.i;
+    *r = mk_nil();
+}
+
+static void sys_mem_read_str(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_str(ptr: int)");
+    const char *p = (const char*)(uintptr_t)a[0].u.i;
+    if (!p) {
+        *r = mk_nil();
+    } else {
+        *r = mk_str(p);
+    }
+}
+
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -4578,6 +4659,12 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         /* C FFI */
         {"ffi_open", sys_ffi_open}, {"ffi_close", sys_ffi_close},
         {"ffi_sym", sys_ffi_sym}, {"ffi_call", sys_ffi_call},
+
+        /* raw memory */
+        {"mem_alloc", sys_mem_alloc}, {"mem_free", sys_mem_free},
+        {"mem_read_ptr", sys_mem_read_ptr}, {"mem_write_ptr", sys_mem_write_ptr},
+        {"mem_read_i32", sys_mem_read_i32}, {"mem_write_i32", sys_mem_write_i32},
+        {"mem_read_str", sys_mem_read_str},
 
         /* thread & channel */
         {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},

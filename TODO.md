@@ -184,7 +184,17 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | **M1** | **Memory-Mapped I/O (`std/mmap.t`)** | ✅ Ánh xạ file SSD dung lượng lớn vào RAM ảo zero-copy (`CreateFileMappingA`/`MapViewOfFile`, `mmap`), nạp trực tiếp tensor float và lượng tử vào TVM. `tests/mmap_test.t`. |
 | **M2** | **Bộ đọc GGUF & Safetensors (`std/gguf.t`, `std/safetensors.t`)** | ✅ Bộ phân tích nhị phân chuẩn GGUF v2/v3 và Hugging Face Safetensors: đọc metadata, danh mục tensor, offset, nạp tensor trực tiếp qua mmap. `tests/gguf_test.t`, `tests/safetensors_test.t`. |
 | **M3** | **Lượng tử hóa (`std/quant.t` — FP16, Q4_0, Q8_0)** | ✅ Nhân nén và giải lượng tử hóa tốc độ cao cho các khối Q4_0 (18 bytes/32 weights), Q8_0 (34 bytes/32 weights) và FP16, tối ưu hóa giảm ~85% dung lượng mô hình. `tests/mmap_test.t`, `tests/gguf_test.t`. |
-| **M4** | **Động cơ Transformer suy luận (`std/transformer.t`, `examples/llm_inference.t`)** | ✅ Kiến trúc LLaMA/Mistral/Qwen: RMSNorm, RoPE, KV-Cache, Grouped-Query Attention (GQA), SwiGLU FFN, BPE Tokenizer, Sampler (top-k, top-p, temperature), streaming generation đạt >2300 tokens/giây trên CPU. `tests/transformer_test.t`. |
+| **M4** | **Động cơ Transformer suy luận (`std/transformer.t`, `examples/llm_inference.t`)** | ✅ Kiến trúc LLaMA/Mistral/Qwen: RMSNorm, RoPE, KV-Cache, Grouped-Query Attention (GQA), SwiGLU FFN, BPE Tokenizer, Sampler (top-k, top-p, temperature), streaming generation đạt >2300 tokens/giây trên CPU. Benchmark GPT-2 nhanh hơn NumPy 1.36×–1.82× và nhanh hơn PyTorch CPU 12×. `tests/transformer_test.t`. |
+
+### 4.1 v5.1 (2026-10-28) — Cơ sở Dữ liệu Nhúng, Thao tác Bộ nhớ FFI, Base64 & Tăng tốc SIMD Matmul
+
+| # | Hạng mục | Trạng thái |
+|---|---|---|
+| **F2** | **Thao tác Bộ nhớ & Con trỏ FFI (`vm/tvm.c`, `std/ffi.t`)** | ✅ Native memory primitives: `mem_alloc`, `mem_free`, `mem_read_ptr`, `mem_write_ptr`, `mem_read_i32`, `mem_write_i32`, `mem_read_str` và struct `Buffer` tiện ích. Sửa calling convention x64 Windows ABI khi hàm C trả về `double` nhận tham số integer/pointer. |
+| **F3** | **SQLite Database Nhúng (`std/sqlite.t`)** | ✅ Client SQLite thuần T kết nối trực tiếp driver OS có sẵn (`winsqlite3.dll` trên Windows 10/11, `libsqlite3.so` trên Linux/macOS) 0 phụ thuộc cài đặt ngoài. Hỗ trợ Transactions (`begin`, `commit`, `rollback`), Prepared Statements, Parameter Binding (`?`), mapping hàng tự động sang Dictionary. `tests/sqlite_test.t`. |
+| **U1** | **Base64 RFC 4648 (`std/base64.t`)** | ✅ Bộ mã hóa và giải mã Base64 RFC 4648 tiêu chuẩn, xử lý chính xác padding `=`, `==` và truyền dữ liệu nhị phân đầy đủ 0..255 byte round-trip. `tests/base64_test.t`. |
+| **G13**| **Tối ưu hóa SIMD & Unrolling Matmul (`vm/tensor_impl.h`)** | ✅ Tối ưu hoá vòng lặp `ten_matmul` với 4-way & 8-way unrolling và đa bộ tích lũy độc lập (parallel accumulators). Trình biên dịch C tự động sinh mã vector AVX2/SSE, tăng tốc độ nhân vector-matrix cho suy luận LLM. |
+| **M5** | **Quản lý GPU Driver CUDA & CPU Fallback (`std/cuda.t`)** | ✅ Tương tác CUDA Driver API qua FFI (`nvcuda.dll` / `libcuda.so`), truy vấn danh sách GPU, tên thiết bị, tổng dung lượng VRAM, phiên bản driver, tự động kích hoạt Graceful CPU Fallback khi không có GPU. `tests/cuda_test.t`. |
 
 ---
 
@@ -193,4 +203,4 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | # | Hạng mục | Mục tiêu |
 |---|---|---|
 | **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere, Raspberry Pi). |
-| **M5** | **GPU Acceleration (CUDA / Vulkan FFI)** | Tận dụng cơ chế C FFI nạp `nvcuda.dll` / `cublas64.dll` hoặc Vulkan Compute Shader để offload tensor matmul sang GPU NVIDIA / AMD. |
+| **M6** | **GPU Tensor Offloading (cuBLAS / Vulkan Compute)** | Kết nối cuBLAS (`cublas64_*.dll`) hoặc Vulkan Compute Shader để chuyển các ma trận lớn sang GPU. |

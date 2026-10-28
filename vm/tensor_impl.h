@@ -362,8 +362,16 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
     if (a->ndim == 1) ten_sync(a);
     if (a->ndim == 1 && b->ndim == 1) {
         if (a->len != b->len) die(vm, "matmul shape");
-        double acc = 0.0;
-        for (size_t i = 0; i < a->len; i++) acc += a->d[i] * b->d[i];
+        double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+        size_t i = 0;
+        for (; i + 3 < a->len; i += 4) {
+            acc0 += a->d[i+0] * b->d[i+0];
+            acc1 += a->d[i+1] * b->d[i+1];
+            acc2 += a->d[i+2] * b->d[i+2];
+            acc3 += a->d[i+3] * b->d[i+3];
+        }
+        double acc = (acc0 + acc1) + (acc2 + acc3);
+        for (; i < a->len; i++) acc += a->d[i] * b->d[i];
         return mk_float(acc);
     }
     if (a->ndim > 2 || b->ndim > 2) die(vm, "matmul: tối đa 2 chiều");
@@ -390,9 +398,23 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
         if (n == 1) {
             for (size_t i = 0; i < m; i++) {
                 const double *Ai = A + (ptrdiff_t)i * sa0;
-                double acc = 0.0;
-                for (size_t q = 0; q < k; q++) acc += Ai[(ptrdiff_t)q * sa1] * B[q];
-                C[i] = acc;
+                double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+                size_t q = 0;
+                if (sa1 == 1) {
+                    for (; q + 3 < k; q += 4) {
+                        acc0 += Ai[q+0] * B[q+0];
+                        acc1 += Ai[q+1] * B[q+1];
+                        acc2 += Ai[q+2] * B[q+2];
+                        acc3 += Ai[q+3] * B[q+3];
+                    }
+                    double acc = (acc0 + acc1) + (acc2 + acc3);
+                    for (; q < k; q++) acc += Ai[q] * B[q];
+                    C[i] = acc;
+                } else {
+                    double acc = 0.0;
+                    for (size_t q2 = 0; q2 < k; q2++) acc += Ai[(ptrdiff_t)q2 * sa1] * B[q2];
+                    C[i] = acc;
+                }
             }
             return ten_val(r);
         }
@@ -403,7 +425,18 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
             for (size_t q = 0; q < k; q++) {
                 double aiq = Ai[(ptrdiff_t)q * sa1];
                 const double *TRESTRICT Bq = B + q * n;
-                for (size_t j = 0; j < n; j++) Ci[j] += aiq * Bq[j];
+                size_t j = 0;
+                for (; j + 7 < n; j += 8) {
+                    Ci[j+0] += aiq * Bq[j+0];
+                    Ci[j+1] += aiq * Bq[j+1];
+                    Ci[j+2] += aiq * Bq[j+2];
+                    Ci[j+3] += aiq * Bq[j+3];
+                    Ci[j+4] += aiq * Bq[j+4];
+                    Ci[j+5] += aiq * Bq[j+5];
+                    Ci[j+6] += aiq * Bq[j+6];
+                    Ci[j+7] += aiq * Bq[j+7];
+                }
+                for (; j < n; j++) Ci[j] += aiq * Bq[j];
             }
         }
         return ten_val(r);
