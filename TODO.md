@@ -198,9 +198,23 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 ---
 
-## 5. Lộ trình Mở rộng Tiếp theo
+## 5. Phân tích Hiệu năng AI: Suy luận (Inference) vs Huấn luyện (Training)
 
-| # | Hạng mục | Mục tiêu |
+| Khía cạnh | Suy luận (Inference / Generation) | Huấn luyện (Training / Backpropagation) |
 |---|---|---|
-| **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere, Raspberry Pi). |
-| **M6** | **GPU Tensor Offloading (cuBLAS / Vulkan Compute)** | Kết nối cuBLAS (`cublas64_*.dll`) hoặc Vulkan Compute Shader để chuyển các ma trận lớn sang GPU. |
+| **Kích thước xử lý** | Batch size = 1 (từng vector token liên tiếp) | Mini-batch lớn ($B = 32, 64, 128, 256$, seq = $1024..4096$) |
+| **Bản chất tính toán** | **Memory/Latency-Bound** (Nghẽn bởi độ trễ điều phối vòng lặp và băng thông đọc RAM) | **Compute-Bound** (Nghẽn bởi năng lực tính toán FLOPs thuần túy của CPU/GPU) |
+| **Trọng số thời gian** | 70% – 90% là chi phí gọi hàm, quản lý frame, dispatch table, boxing đối tượng | 99% là các phép nhân ma trận khổng lồ ($M \times K \times N$) ở cả Forward và Backward pass |
+| **Hiện trạng T vs Python** | **T vượt trội hoàn toàn**: nhanh hơn NumPy **1.36× – 1.82×**, nhanh hơn PyTorch CPU **12.2× – 12.6×** nhờ zero-overhead C runtime và JIT x86-64 | **PyTorch có lợi thế ở batch lớn**: nhờ Intel MKL / oneDNN đa luồng Assembly chia tile L3 cache. T vẫn nhanh hơn ở mô hình nhỏ / batch nhỏ / Online Learning |
+
+---
+
+## 6. Lộ trình Mở rộng Tiếp theo (Hỗ trợ Toàn diện Huấn luyện & Tăng tốc Phần cứng)
+
+| # | Hạng mục | Mục tiêu & Kỹ thuật |
+|---|---|---|
+| **T2** | **Multi-threaded Cache-Blocked GEMM** | Đa luồng hóa phép nhân ma trận lớn ($M, N, K \ge 1024$) trong `vm/tensor_impl.h`. Chia tile theo bộ nhớ đệm CPU L1/L2/L3 (Cache Blocking) và phân bổ song song qua Worker Threads/OpenMP để tận dụng 100% tất cả các CPU cores khi training. |
+| **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | Tận dụng `std/ffi.t` và `std/cuda.t` liên kết với `cublas64_*.dll` / `libcublas.so` để chuyển các phép tính GEMM và Convolution lớn sang GPU NVIDIA Tensor Cores (FP16 / BF16). |
+| **M7** | **Cross-Platform GPU (Vulkan Compute Shader)** | Tăng tốc GPU phi độc quyền cho cả AMD Radeon, Intel Arc và Apple qua Vulkan Compute / SPIR-V, mang lại khả năng tăng tốc phần cứng trên mọi thiết bị. |
+| **A1** | **Fused Backward Kernels trong `std/autograd.t`** | Tối ưu hóa Reverse-mode Autograd với các kernel C gộp (Fused Backward): gộp gradient của RMSNorm/LayerNorm, Softmax và SwiGLU/GELU để giảm tối đa băng thông bộ nhớ khi tính lan truyền ngược. |
+| **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere Altra, AWS Graviton, Raspberry Pi). |
