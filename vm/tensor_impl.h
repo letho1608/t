@@ -946,6 +946,16 @@ static void m_ten_clip(TVM *vm, TVal *a, int argc, TVal *r) {
     }
     *r = ten_val(o);
 }
+/* con trỏ thô tới dữ liệu row-major của tensor (đã ten_sync).
+   Dùng cho FFI (vd. std/cublas.t đưa buffer vào CUDA). CẢNH BÁO UNSAFE:
+   ghi qua con trỏ bỏ qua ten_wrote -> view theo bước có thể lỗi ver; chỉ đọc
+   hoặc ghi khi không có view nào khác dùng chung. */
+static void m_ten_data_ptr(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(1);
+    TTensor *t = (TTensor*)a[0].u.ten;
+    ten_sync(t);
+    *r = mk_int((int64_t)(uintptr_t)t->d);
+}
 static void m_ten_softmax(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(1);
     const TTensor *t = a[0].u.ten;
@@ -1152,6 +1162,7 @@ static TNativeFn tensor_method(const char *nb) {
         {"reshape", m_ten_reshape}, {"transpose", m_ten_transpose}, {"flatten", m_ten_flatten},
         {"tolist", m_ten_tolist}, {"copy", m_ten_copy}, {"dot", m_ten_dot}, {"clip", m_ten_clip},
         {"softmax", m_ten_softmax}, {"item", m_ten_item}, {"eq", m_ten_eq}, {"ne", m_ten_ne},
+        {"data_ptr", m_ten_data_ptr},
         {"gelu", m_ten_gelu}, {"gelu_bwd", m_ten_gelu_bwd},
         {"rmsnorm", m_ten_rmsnorm}, {"rmsnorm_bwd", m_ten_rmsnorm_bwd},
         {"layernorm", m_ten_layernorm}, {"layernorm_bwd", m_ten_layernorm_bwd},

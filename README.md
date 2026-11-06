@@ -15,7 +15,7 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 47 bộ test (7 subsystem + 40 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 48 bộ test (7 subsystem + 41 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
 ```
 
@@ -90,12 +90,13 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import autograd as ag`: Reverse-mode automatic differentiation trên Tensor n-chiều (`param`, `const`, `add`, `sub`, `mul`, `div`, `matmul`, `relu`, `tanh`, `sigmoid`, `exp`, `log`, `sumall`, `mean`, `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu` — backward của 5 phép cuối dùng kernel C gộp `softmax_bwd`/`gelu_bwd`/`rmsnorm_bwd`/`layernorm_bwd`/`swiglu_bwd`, `backward`, `sgd`).
 - `import ai`: Tiện ích học máy (`mse`, `grad`, `linear`, `relu`, `gelu`, `softmax`, `dot`, `zeros`, `ones`).
 - `import sqlite`: Client SQLite thuần T nối thẳng driver OS sẵn có (`winsqlite3.dll` / `libsqlite3.so`, 0 phụ thuộc cài đặt), transaction, prepared statement, bind tham số `?`.
-- `import ffi`: Nạp `.dll`/`.so`, gọi hàm C (tới 6 đối số đa kiểu) và primitive bộ nhớ thô (`mem_alloc`, `mem_read_ptr`, `mem_write_i32`, `Buffer`) — **unsafe**, xem mục Giới hạn.
+- `import ffi`: Nạp `.dll`/`.so`, gọi hàm C (tới 16 đối số đa kiểu) và primitive bộ nhớ thô (`mem_alloc`, `mem_read_ptr`, `mem_write_i32`, `mem_read_f64`, `mem_write_f64`, `Buffer`) — **unsafe**, xem mục Giới hạn.
 - `import mmap`: Ánh xạ file lớn vào RAM zero-copy, nạp thẳng tensor float/quant từ đĩa.
 - `import gguf` / `import safetensors`: Đọc định dạng mô hình GGUF v2/v3 và Hugging Face Safetensors (metadata, catalog tensor, offset) qua mmap.
 - `import quant`: Lượng tử hóa & giải lượng tử hóa FP16, Q8_0, Q4_0 (giảm ~85% dung lượng mã).
 - `import transformer`: Suy luận LLaMA/Mistral/Qwen trên CPU (RMSNorm, RoPE, KV-Cache, GQA, SwiGLU, BPE tokenizer, sampler top-k/top-p/temperature).
 - `import cuda`: Truy vấn driver CUDA qua FFI (thiết bị, VRAM, phiên bản) với fallback CPU êm khi không có GPU.
+- `import cublas`: GEMM trên GPU NVIDIA qua cuBLAS (`gemm`/`matmul` double-precision, qua FFI 16 đối số + `tensor.data_ptr()`), không có GPU/lib thì tự fallback về `@` CPU.
 - `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
 - `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
 

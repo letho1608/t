@@ -58,6 +58,12 @@ fn write_i32(ptr, val):
 fn read_str(ptr):
     return _sys.mem_read_str(ptr)
 
+fn read_f64(ptr):
+    return _sys.mem_read_f64(ptr)
+
+fn write_f64(ptr, val):
+    return _sys.mem_write_f64(ptr, val)
+
 struct Buffer:
     ptr
     size
@@ -76,6 +82,12 @@ struct Buffer:
 
     fn read_str(self):
         return _sys.mem_read_str(self.ptr)
+
+    fn read_f64(self):
+        return _sys.mem_read_f64(self.ptr)
+
+    fn write_f64(self, val):
+        return _sys.mem_write_f64(self.ptr, val)
 
     fn free(self):
         if self.ptr != 0:

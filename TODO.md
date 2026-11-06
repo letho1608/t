@@ -1,7 +1,7 @@
 ﻿# T — trạng thái & việc còn thiếu
 
 Cập nhật: 2026-11-06 · phiên bản v5.1 · mọi mục ✅ đã verify bằng `.\trun.exe tools\run_all.t`
-→ 47/47 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
+→ 48/48 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
 Lưu ý: các mục nhắc `t.py`/`vm/tcomp.py`/`*.py` ở phần lịch sử là trạng thái trước hạng mục T4 —
 toàn bộ file `.py` của T đã bị xoá, giờ chỉ còn `.t`.
 
@@ -181,7 +181,7 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 | # | Hạng mục | Trạng thái |
 |---|---|---|
-| **F1** | **C FFI (`std/ffi.t`)** | ✅ Nạp động `.dll` / `.so` (`LoadLibraryA` / `dlopen`, `GetProcAddress` / `dlsym`), gọi trực tiếp hàm C ngoài, dispatch lên tới 6 đối số đa kiểu (int, pointer, string, double). `tests/ffi_test.t`. |
+| **F1** | **C FFI (`std/ffi.t`)** | ✅ Nạp động `.dll` / `.so` (`LoadLibraryA` / `dlopen`, `GetProcAddress` / `dlsym`), gọi trực tiếp hàm C ngoài, dispatch lên tới 16 đối số đa kiểu (int, pointer, string, double) — đủ cho `cublasDgemm_v2` 14 đối số (M6). `tests/ffi_test.t`. |
 | **T1** | **Đa luồng & Kênh (Worker Threads & Channels `std/thread.t`)** | ✅ Kiến trúc Actor/Worker không GIL (`CRITICAL_SECTION`/`pthread_mutex_t`, `CONDITION_VARIABLE`), hàng đợi MPMC cách ly sâu bộ nhớ 100%, TVM thread-local pool. `tests/thread_test.t`. |
 | **M1** | **Memory-Mapped I/O (`std/mmap.t`)** | ✅ Ánh xạ file SSD dung lượng lớn vào RAM ảo zero-copy (`CreateFileMappingA`/`MapViewOfFile`, `mmap`), nạp trực tiếp tensor float và lượng tử vào TVM. `tests/mmap_test.t`. |
 | **M2** | **Bộ đọc GGUF & Safetensors (`std/gguf.t`, `std/safetensors.t`)** | ✅ Bộ phân tích nhị phân chuẩn GGUF v2/v3 và Hugging Face Safetensors: đọc metadata, danh mục tensor, offset, nạp tensor trực tiếp qua mmap. `tests/gguf_test.t`, `tests/safetensors_test.t`. |
@@ -192,7 +192,7 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 | # | Hạng mục | Trạng thái |
 |---|---|---|
-| **F2** | **Thao tác Bộ nhớ & Con trỏ FFI (`vm/tvm.c`, `std/ffi.t`)** | ✅ Native memory primitives: `mem_alloc`, `mem_free`, `mem_read_ptr`, `mem_write_ptr`, `mem_read_i32`, `mem_write_i32`, `mem_read_str` và struct `Buffer` tiện ích. Sửa calling convention x64 Windows ABI khi hàm C trả về `double` nhận tham số integer/pointer. |
+| **F2** | **Thao tác Bộ nhớ & Con trỏ FFI (`vm/tvm.c`, `std/ffi.t`)** | ✅ Native memory primitives: `mem_alloc`, `mem_free`, `mem_read_ptr`, `mem_write_ptr`, `mem_read_i32`, `mem_write_i32`, `mem_read_str`, `mem_read_f64`, `mem_write_f64` và struct `Buffer` tiện ích. Sửa calling convention x64 Windows ABI khi hàm C trả về `double` nhận tham số integer/pointer. |
 | **F3** | **SQLite Database Nhúng (`std/sqlite.t`)** | ✅ Client SQLite thuần T kết nối trực tiếp driver OS có sẵn (`winsqlite3.dll` trên Windows 10/11, `libsqlite3.so` trên Linux/macOS) 0 phụ thuộc cài đặt ngoài. Hỗ trợ Transactions (`begin`, `commit`, `rollback`), Prepared Statements, Parameter Binding (`?`), mapping hàng tự động sang Dictionary. `tests/sqlite_test.t`. |
 | **U1** | **Base64 RFC 4648 (`std/base64.t`)** | ✅ Bộ mã hóa và giải mã Base64 RFC 4648 tiêu chuẩn, xử lý chính xác padding `=`, `==` và truyền dữ liệu nhị phân đầy đủ 0..255 byte round-trip. `tests/base64_test.t`. |
 | **G13**| **Tối ưu hóa SIMD & Unrolling Matmul (`vm/tensor_impl.h`)** | ✅ Tối ưu hoá vòng lặp `ten_matmul` với 4-way & 8-way unrolling và đa bộ tích lũy độc lập (parallel accumulators). Trình biên dịch C tự động sinh mã vector AVX2/SSE, tăng tốc độ nhân vector-matrix cho suy luận LLM. |
@@ -216,7 +216,7 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | # | Hạng mục | Mục tiêu & Kỹ thuật |
 |---|---|---|
 | **T2** | **Multi-threaded Cache-Blocked GEMM** | ✅ `vm/tensor_impl.h`: `ten_matmul` chia C theo hàng cho worker (`CreateThread`/`pthread_create`, main chạy task 0), kernel i-k-j chặn cache MC=64 / KC=128 / NC=128; thứ tự cộng mỗi `C[i,j]` vẫn q tăng dần nên **trùng bit** với tuần tự. Env `TVM_GEMM_THREADS` (=1 tuần tự, =N đúng N luồng, auto theo số nhân), ngưỡng `m*n*k ≥ 1M && m ≥ 32`. Đo 192³×30: 111.7ms → 44.2ms (**2.53×** trên 8 nhân, checksum trùng). `tests/gemm_mt.t` (trùng byte giữa 1/6/auto + khớp tham chiếu ba vòng). |
-| **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | Tận dụng `std/ffi.t` và `std/cuda.t` liên kết với `cublas64_*.dll` / `libcublas.so` để chuyển các phép tính GEMM và Convolution lớn sang GPU NVIDIA Tensor Cores (FP16 / BF16). |
+| **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | ✅ `std/cublas.t` qua `std/ffi.t` + `std/cuda.t`: probe `cudart`/`cublas` (`cudaMalloc`/`cudaFree`/`cudaMemcpy`/`cudaGetDeviceCount`, `cublasCreate_v2`/`cublasDgemm_v2` 14 đối số — cần FFI nâng 6→16 đối số trong `vm/tvm.c` và tensor method `data_ptr()` để đưa buffer row-major sang GPU). Đổi chiều row↔column-major bằng trick `C^T = B^T @ A^T` nên chỉ dùng `cublasDgemm_v2`. Thiếu GPU/driver/lib hoặc bất kỳ bước nào lỗi → fallback êm về `@` CPU (GEMM đa luồng T2). `tests/cublas_test.t` (không GPU: fallback khớp `@` < 1e-9 + round-trip `mem_read/write_f64` + `data_ptr`). FP16/BF16 Tensor Cores và cuDNN convolution vẫn là việc mở rộng sau. |
 | **M7** | **Cross-Platform GPU (Vulkan Compute Shader)** | Tăng tốc GPU phi độc quyền cho cả AMD Radeon, Intel Arc và Apple qua Vulkan Compute / SPIR-V, mang lại khả năng tăng tốc phần cứng trên mọi thiết bị. |
 | **A1** | **Fused Backward Kernels trong `std/autograd.t`** | ✅ Kernel C gộp trong `vm/tensor_impl.h`: `softmax_bwd` (Jacobian gộp), `gelu_bwd` + forward `gelu` (erf chính xác), `rmsnorm`/`rmsnorm_bwd`, `layernorm`/`layernorm_bwd`, `swiglu_bwd` → `[dgate, dup]` — mỗi kernel vài pass trên bộ nhớ gốc, **không tensor trung gian**. `std/autograd.t` thêm `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu`; `std/ai.t` thêm `gelu`; `self/eval.t` cập nhật whitelist method. `tests/fusedbwd.t`: khớp sai phân hữu hạn 1e-6 cho cả 5 phép + softmax khớp compose trong T. |
 | **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere Altra, AWS Graviton, Raspberry Pi). |

@@ -4113,10 +4113,10 @@ static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
     size_t ntypes = a[2].u.str.n;
     TList *args = a[3].u.list;
     if (args->len != ntypes) die(vm, "ffi_call: arg count mismatch");
-    if (args->len > 6) die(vm, "ffi_call: max 6 arguments supported");
+    if (args->len > 16) die(vm, "ffi_call: max 16 arguments supported");
 
-    uint64_t u[6] = {0};
-    double d[6] = {0.0};
+    uint64_t u[16] = {0};
+    double d[16] = {0.0};
     for (size_t i = 0; i < args->len; i++) {
         char t = argtypes[i];
         TVal *arg = &args->items[i];
@@ -4181,6 +4181,16 @@ static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
         case 4: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3]); break;
         case 5: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4]); break;
         case 6: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5]); break;
+        case 7: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6]); break;
+        case 8: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]); break;
+        case 9: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8]); break;
+        case 10: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9]); break;
+        case 11: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10]); break;
+        case 12: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11]); break;
+        case 13: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12]); break;
+        case 14: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13]); break;
+        case 15: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14]); break;
+        case 16: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]); break;
         }
     }
 
@@ -4627,6 +4637,25 @@ static void sys_mem_read_str(TVM *vm, TVal *a, int argc, TVal *r) {
     }
 }
 
+static void sys_mem_read_f64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_f64(ptr: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_read_f64: null pointer dereference");
+    double val = *(double*)p;
+    *r = mk_float(val);
+}
+
+static void sys_mem_write_f64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT) die(vm, "mem_write_f64(ptr: int, val: float)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_write_f64: null pointer dereference");
+    int ok = 1;
+    double val = to_num(&a[1], &ok);
+    if (!ok) die(vm, "mem_write_f64: expected number");
+    *(double*)p = val;
+    *r = mk_nil();
+}
+
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -4665,6 +4694,7 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"mem_read_ptr", sys_mem_read_ptr}, {"mem_write_ptr", sys_mem_write_ptr},
         {"mem_read_i32", sys_mem_read_i32}, {"mem_write_i32", sys_mem_write_i32},
         {"mem_read_str", sys_mem_read_str},
+        {"mem_read_f64", sys_mem_read_f64}, {"mem_write_f64", sys_mem_write_f64},
 
         /* thread & channel */
         {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},

@@ -406,6 +406,8 @@ fn tensor_attr(o, f):
         return o.eq
     if f == "ne":
         return o.ne
+    if f == "data_ptr":
+        return o.data_ptr
     if f == "exp":
         return o.exp
     if f == "log":

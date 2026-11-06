@@ -390,6 +390,8 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   `flatten() tolist() copy() clip(lo, hi) softmax()` (trục cuối) `item()`;
   từng phần tử `exp log sqrt tanh sin cos abs relu sigmoid gelu floor ceil`
   (cũng là builtin cho số: `sqrt(2)`; `floor/ceil` của số ra int).
+  `data_ptr()`: **unsafe** — con trỏ thô (int) tới buffer row-major đã đồng bộ,
+  chỉ dùng cho FFI (vd. `std/cublas.t`); ghi qua nó bỏ qua cơ chế view.
 - Chuẩn hóa & backward gộp (A1): `rmsnorm([eps]) layernorm([eps])` (trục cuối);
   backward `softmax_bwd(dy) gelu_bwd(dy) rmsnorm_bwd(dy[, eps])
   layernorm_bwd(dy[, eps]) swiglu_bwd(dy, up) -> [dgate, dup]` — mỗi kernel
