@@ -15,7 +15,7 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 48 bộ test (7 subsystem + 41 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 49 bộ test (7 subsystem + 42 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
 ```
 
@@ -97,6 +97,7 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import transformer`: Suy luận LLaMA/Mistral/Qwen trên CPU (RMSNorm, RoPE, KV-Cache, GQA, SwiGLU, BPE tokenizer, sampler top-k/top-p/temperature).
 - `import cuda`: Truy vấn driver CUDA qua FFI (thiết bị, VRAM, phiên bản) với fallback CPU êm khi không có GPU.
 - `import cublas`: GEMM trên GPU NVIDIA qua cuBLAS (`gemm`/`matmul` double-precision, qua FFI 16 đối số + `tensor.data_ptr()`), không có GPU/lib thì tự fallback về `@` CPU.
+- `import vulkan`: Probe Vulkan Loader + liệt kê physical devices mọi hãng (API, `device_count`, `devices`) qua FFI; compute shader SPIR-V chưa có nên `gemm` fallback CPU êm.
 - `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
 - `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
 
