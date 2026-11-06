@@ -802,7 +802,7 @@ static void ten_reduce(TVM *vm, int kind, TVal *a, int argc, TVal *r) {
 }
 
 /* ---------- hàm từng phần tử ---------- */
-enum { U_EXP, U_LOG, U_SQRT, U_TANH, U_SIN, U_COS, U_ABS, U_RELU, U_SIGMOID, U_FLOOR, U_CEIL };
+enum { U_EXP, U_LOG, U_SQRT, U_TANH, U_SIN, U_COS, U_ABS, U_RELU, U_SIGMOID, U_GELU, U_FLOOR, U_CEIL };
 TVM_INLINE double un_apply(int k, double x) {
     switch (k) {
     case U_EXP: return exp(x);
@@ -814,6 +814,7 @@ TVM_INLINE double un_apply(int k, double x) {
     case U_ABS: return fabs(x);
     case U_RELU: return x > 0 ? x : 0.0;
     case U_SIGMOID: return 1.0 / (1.0 + exp(-x));
+    case U_GELU: return 0.5 * x * (1.0 + erf(x * 0.7071067811865476));
     case U_FLOOR: return floor(x);
     default: return ceil(x);
     }
@@ -828,7 +829,8 @@ static TTensor *ten_unary(const TTensor *t, int k) {
 #define TU_CASE(K) case K: for (size_t i = 0; i < n; i++) R[i] = un_apply(K, X[i]); break;
     switch (k) {
     TU_CASE(U_EXP) TU_CASE(U_LOG) TU_CASE(U_SQRT) TU_CASE(U_TANH) TU_CASE(U_SIN)
-    TU_CASE(U_COS) TU_CASE(U_ABS) TU_CASE(U_RELU) TU_CASE(U_SIGMOID) TU_CASE(U_FLOOR)
+    TU_CASE(U_COS) TU_CASE(U_ABS) TU_CASE(U_RELU) TU_CASE(U_SIGMOID) TU_CASE(U_GELU)
+    TU_CASE(U_FLOOR)
     default: for (size_t i = 0; i < n; i++) R[i] = un_apply(U_CEIL, X[i]); break;
     }
 #undef TU_CASE
@@ -872,6 +874,7 @@ TENU(m_ten_relu, U_RELU)
 TENU(m_ten_sigmoid, U_SIGMOID)
 TENU(m_ten_floor, U_FLOOR)
 TENU(m_ten_ceil, U_CEIL)
+TENU(m_ten_gelu, U_GELU)
 
 static void m_ten_reshape(TVM *vm, TVal *a, int argc, TVal *r) {
     const TTensor *t = a[0].u.ten;
@@ -959,6 +962,172 @@ static void m_ten_softmax(TVM *vm, TVal *a, int argc, TVal *r) {
     }
     *r = ten_val(o);
 }
+/* ---------- A1: fused backward & chuẩn hóa (autograd) ----------
+   Mỗi kernel làm 1-3 pass trên bộ nhớ gốc theo trục cuối, KHÔNG tạo tensor
+   trung gian -> giảm băng thông bộ nhớ khi lan truyền ngược. */
+
+static int ten_same_shape(const TTensor *x, const TTensor *y) {
+    if (x->ndim != y->ndim) return 0;
+    for (int i = 0; i < x->ndim; i++) if (x->shape[i] != y->shape[i]) return 0;
+    return 1;
+}
+static double ten_eps_arg(TVM *vm, TVal *a, int argc, int idx, double dflt) {
+    if (argc <= idx) return dflt;
+    int ok = 1;
+    double e = to_num(&a[idx], &ok);
+    if (!ok || a[idx].t == T_BOOL) die(vm, "eps float");
+    return e;
+}
+static void ten_shape_die(TVM *vm, const char *what) { die(vm, what); }
+
+/* y = softmax(x): dx = y * (dy - Σ dy*y) theo trục cuối */
+static void m_ten_softmax_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(2);
+    const TTensor *y = a[0].u.ten, *dy = a[1].u.ten;
+    if (!ten_same_shape(y, dy)) ten_shape_die(vm, "softmax_bwd shape");
+    size_t n = y->shape[y->ndim - 1];
+    TTensor *o = ten_alloc(y->ndim, y->shape);
+    ten_sync(y); ten_sync(dy);
+    if (!n) { *r = ten_val(o); return; }
+    for (size_t off = 0; off < y->len; off += n) {
+        double dot = 0.0;
+        for (size_t i = 0; i < n; i++) dot += dy->d[off + i] * y->d[off + i];
+        for (size_t i = 0; i < n; i++) o->d[off + i] = y->d[off + i] * (dy->d[off + i] - dot);
+    }
+    *r = ten_val(o);
+}
+
+/* gelu(x) = x*Φ(x) (chính xác qua erf); dx = dy * Φ'(x) */
+static void m_ten_gelu_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(2);
+    const TTensor *x = a[0].u.ten, *dy = a[1].u.ten;
+    if (!ten_same_shape(x, dy)) ten_shape_die(vm, "gelu_bwd shape");
+    TTensor *o = ten_alloc(x->ndim, x->shape);
+    ten_sync(x); ten_sync(dy);
+    for (size_t i = 0; i < x->len; i++) {
+        double v = x->d[i];
+        double cdf = 0.5 * (1.0 + erf(v * 0.7071067811865476));
+        double pdf = exp(-0.5 * v * v) * 0.3989422804014327;   /* 1/sqrt(2π) */
+        o->d[i] = dy->d[i] * (cdf + v * pdf);
+    }
+    *r = ten_val(o);
+}
+
+/* rmsnorm(x) = x / sqrt(mean(x²) + eps) theo trục cuối */
+static void m_ten_rmsnorm(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || argc > 2) die(vm, "rmsnorm([eps])");
+    double eps = ten_eps_arg(vm, a, argc, 1, 1e-5);
+    const TTensor *t = a[0].u.ten;
+    size_t n = t->shape[t->ndim - 1];
+    TTensor *o = ten_alloc(t->ndim, t->shape);
+    ten_sync(t);
+    if (!n) { *r = ten_val(o); return; }
+    for (size_t off = 0; off < t->len; off += n) {
+        double s2 = 0.0;
+        for (size_t i = 0; i < n; i++) s2 += t->d[off + i] * t->d[off + i];
+        double sc = 1.0 / sqrt(s2 / (double)n + eps);
+        for (size_t i = 0; i < n; i++) o->d[off + i] = t->d[off + i] * sc;
+    }
+    *r = ten_val(o);
+}
+
+/* dx cho y = x/rms: dx = (dy - y*mean(dy*y)) / rms, tính trực tiếp từ x, dy */
+static void m_ten_rmsnorm_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 2 || argc > 3) die(vm, "rmsnorm_bwd(dy[, eps])");
+    double eps = ten_eps_arg(vm, a, argc, 2, 1e-5);
+    const TTensor *x = a[0].u.ten, *dy = a[1].u.ten;
+    if (!ten_same_shape(x, dy)) ten_shape_die(vm, "rmsnorm_bwd shape");
+    size_t n = x->shape[x->ndim - 1];
+    TTensor *o = ten_alloc(x->ndim, x->shape);
+    ten_sync(x); ten_sync(dy);
+    if (!n) { *r = ten_val(o); return; }
+    for (size_t off = 0; off < x->len; off += n) {
+        double s2 = 0.0, t = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double xv = x->d[off + i];
+            s2 += xv * xv;
+            t += dy->d[off + i] * xv;
+        }
+        double rms = sqrt(s2 / (double)n + eps);
+        double m = (t / (double)n) / rms;              /* mean(dy*y), y = x/rms */
+        for (size_t i = 0; i < n; i++)
+            o->d[off + i] = (dy->d[off + i] - (x->d[off + i] / rms) * m) / rms;
+    }
+    *r = ten_val(o);
+}
+
+/* layernorm(x) = (x - mean) / sqrt(var + eps) theo trục cuối */
+static void m_ten_layernorm(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || argc > 2) die(vm, "layernorm([eps])");
+    double eps = ten_eps_arg(vm, a, argc, 1, 1e-5);
+    const TTensor *t = a[0].u.ten;
+    size_t n = t->shape[t->ndim - 1];
+    TTensor *o = ten_alloc(t->ndim, t->shape);
+    ten_sync(t);
+    if (!n) { *r = ten_val(o); return; }
+    for (size_t off = 0; off < t->len; off += n) {
+        double mu = 0.0;
+        for (size_t i = 0; i < n; i++) mu += t->d[off + i];
+        mu /= (double)n;
+        double var = 0.0;
+        for (size_t i = 0; i < n; i++) { double d = t->d[off + i] - mu; var += d * d; }
+        double sc = 1.0 / sqrt(var / (double)n + eps);
+        for (size_t i = 0; i < n; i++) o->d[off + i] = (t->d[off + i] - mu) * sc;
+    }
+    *r = ten_val(o);
+}
+
+/* dx cho layernorm: dx = (dy - mean(dy) - xhat*mean(dy*xhat)) / sigma */
+static void m_ten_layernorm_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 2 || argc > 3) die(vm, "layernorm_bwd(dy[, eps])");
+    double eps = ten_eps_arg(vm, a, argc, 2, 1e-5);
+    const TTensor *x = a[0].u.ten, *dy = a[1].u.ten;
+    if (!ten_same_shape(x, dy)) ten_shape_die(vm, "layernorm_bwd shape");
+    size_t n = x->shape[x->ndim - 1];
+    TTensor *o = ten_alloc(x->ndim, x->shape);
+    ten_sync(x); ten_sync(dy);
+    if (!n) { *r = ten_val(o); return; }
+    for (size_t off = 0; off < x->len; off += n) {
+        double mu = 0.0, md = 0.0;
+        for (size_t i = 0; i < n; i++) { mu += x->d[off + i]; md += dy->d[off + i]; }
+        mu /= (double)n; md /= (double)n;
+        double var = 0.0;
+        for (size_t i = 0; i < n; i++) { double d = x->d[off + i] - mu; var += d * d; }
+        double sig = sqrt(var / (double)n + eps);
+        double t = 0.0;
+        for (size_t i = 0; i < n; i++) t += dy->d[off + i] * ((x->d[off + i] - mu) / sig);
+        t /= (double)n;
+        for (size_t i = 0; i < n; i++) {
+            double xhat = (x->d[off + i] - mu) / sig;
+            o->d[off + i] = (dy->d[off + i] - md - xhat * t) / sig;
+        }
+    }
+    *r = ten_val(o);
+}
+
+/* SwiGLU: h = silu(gate)*up; trả [dgate, dup] (thứ tự khớp parents) */
+static void m_ten_swiglu_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(3);
+    const TTensor *g = a[0].u.ten, *dy = a[1].u.ten, *up = a[2].u.ten;
+    if (!ten_same_shape(g, dy) || !ten_same_shape(g, up)) ten_shape_die(vm, "swiglu_bwd shape");
+    TTensor *og = ten_alloc(g->ndim, g->shape);
+    TTensor *ou = ten_alloc(up->ndim, up->shape);
+    ten_sync(g); ten_sync(dy); ten_sync(up);
+    for (size_t i = 0; i < g->len; i++) {
+        double z = g->d[i];
+        double s = 1.0 / (1.0 + exp(-z));
+        double silu = z * s;
+        double dsilu = s * (1.0 + z * (1.0 - s));
+        og->d[i] = dy->d[i] * up->d[i] * dsilu;
+        ou->d[i] = dy->d[i] * silu;
+    }
+    TList *l = list_new(2);
+    list_push(l, ten_val(og));
+    list_push(l, ten_val(ou));
+    r->t = T_LIST;
+    r->u.list = l;
+}
+
 static void ten_cmp_m(TVM *vm, TVal *a, int argc, TVal *r, int op) {
     NARG(2);
     if (a[1].t != T_TENSOR && a[1].t != T_INT && a[1].t != T_FLOAT) die(vm, "bad tensor op");
@@ -983,6 +1152,10 @@ static TNativeFn tensor_method(const char *nb) {
         {"reshape", m_ten_reshape}, {"transpose", m_ten_transpose}, {"flatten", m_ten_flatten},
         {"tolist", m_ten_tolist}, {"copy", m_ten_copy}, {"dot", m_ten_dot}, {"clip", m_ten_clip},
         {"softmax", m_ten_softmax}, {"item", m_ten_item}, {"eq", m_ten_eq}, {"ne", m_ten_ne},
+        {"gelu", m_ten_gelu}, {"gelu_bwd", m_ten_gelu_bwd},
+        {"rmsnorm", m_ten_rmsnorm}, {"rmsnorm_bwd", m_ten_rmsnorm_bwd},
+        {"layernorm", m_ten_layernorm}, {"layernorm_bwd", m_ten_layernorm_bwd},
+        {"softmax_bwd", m_ten_softmax_bwd}, {"swiglu_bwd", m_ten_swiglu_bwd},
     };
     for (size_t i = 0; i < sizeof(tb) / sizeof(tb[0]); i++) if (!strcmp(nb, tb[i].n)) return tb[i].f;
     return NULL;

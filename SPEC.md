@@ -388,8 +388,12 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   `t[i] = số | tensor shape[1:]`; `t[a:b:c]` cắt theo trục 0; `for row in t`.
 - Biến đổi: `reshape(...)` (một `-1`), `T`/`transpose()` (đảo mọi trục),
   `flatten() tolist() copy() clip(lo, hi) softmax()` (trục cuối) `item()`;
-  từng phần tử `exp log sqrt tanh sin cos abs relu sigmoid floor ceil`
+  từng phần tử `exp log sqrt tanh sin cos abs relu sigmoid gelu floor ceil`
   (cũng là builtin cho số: `sqrt(2)`; `floor/ceil` của số ra int).
+- Chuẩn hóa & backward gộp (A1): `rmsnorm([eps]) layernorm([eps])` (trục cuối);
+  backward `softmax_bwd(dy) gelu_bwd(dy) rmsnorm_bwd(dy[, eps])
+  layernorm_bwd(dy[, eps]) swiglu_bwd(dy, up) -> [dgate, dup]` — mỗi kernel
+  làm vài pass trên bộ nhớ gốc, không tạo tensor trung gian.
 - Bảo đảm: VM C và `t.py` cho kết quả **trùng từng bit** trên cùng nền tảng
   (cùng libm); so với numpy sai số tương đối ≤ 1e-9 (`tools/test_tensor.py`).
 

@@ -23,6 +23,7 @@ CASES = [
     ["tests/gcstress.t", false], ["tests/tensor.t", false],
     ["tests/jitlist.t", false], ["tests/lambda.t", false],
     ["tests/jitmain.t", false], ["tests/agtest.t", false],
+    ["tests/fusedbwd.t", false],
     ["tests/aitest.t", false], ["tests/stdlib.t", false],
     ["tests/jitrec.t", false], ["tests/jitdict.t", false],
     ["tests/loadmod_m.t", false], ["tests/loadmod.t", false]
@@ -32,7 +33,7 @@ EVAL_CASES = [
     "tests/demo.t", "tests/core.t", "tests/assert.t", "tests/closure.t",
     "tests/fstr.t", "tests/hoist.t", "tests/builtins.t", "tests/lang.t",
     "tests/tryflow.t", "tests/bytesem.t", "tests/tensor.t",
-    "tests/lambda.t", "tests/loadmod.t"
+    "tests/lambda.t", "tests/loadmod.t", "tests/fusedbwd.t"
 ]
 
 fn compile_with(stage, src, out, bundle):

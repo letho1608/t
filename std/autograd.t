@@ -111,6 +111,36 @@ fn mean(a):
     n = a.val.size
     return mk(tensor([a.val.mean()]), [a], fn(g): [ones(a.val.shape) * (g.item() / n)], "mean")
 
+# ---- A1: backward kernel C gộp (không tensor trung gian) ----
+# softmax: Jacobian gộp dx = y * (dy - Σ dy*y) theo trục cuối
+fn softmax(a):
+    a = lift(a)
+    y = a.val.softmax()
+    return mk(y, [a], fn(g): [y.softmax_bwd(g)], "softmax")
+
+# gelu chính xác (erf): forward + backward gộp trong C
+fn gelu(a):
+    a = lift(a)
+    y = a.val.gelu()
+    return mk(y, [a], fn(g): [a.val.gelu_bwd(g)], "gelu")
+
+fn rms_norm(a, eps = 1e-5):
+    a = lift(a)
+    y = a.val.rmsnorm(eps)
+    return mk(y, [a], fn(g): [a.val.rmsnorm_bwd(g, eps)], "rms_norm")
+
+fn layer_norm(a, eps = 1e-5):
+    a = lift(a)
+    y = a.val.layernorm(eps)
+    return mk(y, [a], fn(g): [a.val.layernorm_bwd(g, eps)], "layer_norm")
+
+# SwiGLU: h = silu(gate) * up; kernel C trả về [dgate, dup] (khớp thứ tự parents)
+fn swiglu(gate, up):
+    gate = lift(gate)
+    up = lift(up)
+    y = (gate.val * gate.val.sigmoid()) * up.val
+    return mk(y, [gate, up], fn(g): gate.val.swiglu_bwd(g, up.val), "swiglu")
+
 # thứ tự topo (DFS) từ nút gốc
 fn topo(root):
     mut order = []

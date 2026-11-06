@@ -39,3 +39,8 @@ fn linear(weights, inputs, bias):
 fn softmax(x):
     t = x if type(x) == "tensor" else tensor(x)
     return t.softmax()
+
+# Hàm kích hoạt GELU chính xác (qua erf) — forward gộp trong kernel C
+fn gelu(x):
+    t = x if type(x) == "tensor" else tensor(x)
+    return t.gelu()

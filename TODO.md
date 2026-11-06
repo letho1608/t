@@ -1,7 +1,7 @@
 ﻿# T — trạng thái & việc còn thiếu
 
 Cập nhật: 2026-11-06 · phiên bản v5.1 · mọi mục ✅ đã verify bằng `.\trun.exe tools\run_all.t`
-→ 45/45 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
+→ 47/47 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
 Lưu ý: các mục nhắc `t.py`/`vm/tcomp.py`/`*.py` ở phần lịch sử là trạng thái trước hạng mục T4 —
 toàn bộ file `.py` của T đã bị xoá, giờ chỉ còn `.t`.
 
@@ -218,5 +218,5 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 | **T2** | **Multi-threaded Cache-Blocked GEMM** | ✅ `vm/tensor_impl.h`: `ten_matmul` chia C theo hàng cho worker (`CreateThread`/`pthread_create`, main chạy task 0), kernel i-k-j chặn cache MC=64 / KC=128 / NC=128; thứ tự cộng mỗi `C[i,j]` vẫn q tăng dần nên **trùng bit** với tuần tự. Env `TVM_GEMM_THREADS` (=1 tuần tự, =N đúng N luồng, auto theo số nhân), ngưỡng `m*n*k ≥ 1M && m ≥ 32`. Đo 192³×30: 111.7ms → 44.2ms (**2.53×** trên 8 nhân, checksum trùng). `tests/gemm_mt.t` (trùng byte giữa 1/6/auto + khớp tham chiếu ba vòng). |
 | **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | Tận dụng `std/ffi.t` và `std/cuda.t` liên kết với `cublas64_*.dll` / `libcublas.so` để chuyển các phép tính GEMM và Convolution lớn sang GPU NVIDIA Tensor Cores (FP16 / BF16). |
 | **M7** | **Cross-Platform GPU (Vulkan Compute Shader)** | Tăng tốc GPU phi độc quyền cho cả AMD Radeon, Intel Arc và Apple qua Vulkan Compute / SPIR-V, mang lại khả năng tăng tốc phần cứng trên mọi thiết bị. |
-| **A1** | **Fused Backward Kernels trong `std/autograd.t`** | Tối ưu hóa Reverse-mode Autograd với các kernel C gộp (Fused Backward): gộp gradient của RMSNorm/LayerNorm, Softmax và SwiGLU/GELU để giảm tối đa băng thông bộ nhớ khi tính lan truyền ngược. |
+| **A1** | **Fused Backward Kernels trong `std/autograd.t`** | ✅ Kernel C gộp trong `vm/tensor_impl.h`: `softmax_bwd` (Jacobian gộp), `gelu_bwd` + forward `gelu` (erf chính xác), `rmsnorm`/`rmsnorm_bwd`, `layernorm`/`layernorm_bwd`, `swiglu_bwd` → `[dgate, dup]` — mỗi kernel vài pass trên bộ nhớ gốc, **không tensor trung gian**. `std/autograd.t` thêm `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu`; `std/ai.t` thêm `gelu`; `self/eval.t` cập nhật whitelist method. `tests/fusedbwd.t`: khớp sai phân hữu hạn 1e-6 cho cả 5 phép + softmax khớp compose trong T. |
 | **J7** | **JIT ARM64 (AArch64)** | Trình phát mã máy gốc AArch64 cho Apple Silicon (M1/M2/M3/M4) và máy chủ Linux ARM64 (Ampere Altra, AWS Graviton, Raspberry Pi). |

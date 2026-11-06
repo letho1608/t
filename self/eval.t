@@ -384,6 +384,22 @@ fn tensor_attr(o, f):
         return o.clip
     if f == "softmax":
         return o.softmax
+    if f == "softmax_bwd":
+        return o.softmax_bwd
+    if f == "gelu":
+        return o.gelu
+    if f == "gelu_bwd":
+        return o.gelu_bwd
+    if f == "rmsnorm":
+        return o.rmsnorm
+    if f == "rmsnorm_bwd":
+        return o.rmsnorm_bwd
+    if f == "layernorm":
+        return o.layernorm
+    if f == "layernorm_bwd":
+        return o.layernorm_bwd
+    if f == "swiglu_bwd":
+        return o.swiglu_bwd
     if f == "item":
         return o.item
     if f == "eq":
