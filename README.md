@@ -15,14 +15,14 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 49 bộ test (7 subsystem + 42 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 50 bộ test (7 subsystem + 43 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
 ```
 
 ## Giới hạn đã biết & cảnh báo an toàn
 
 - **Đơn luồng cho interpreter**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Ngoại lệ: phép nhân ma trận lớn (`@`) đã **đa luồng + chặn cache** ở native (`TVM_GEMM_THREADS`, xem TODO mục T2). Đa luồng đầy đủ nằm trong lộ trình (TODO J7... xem §6).
-- **JIT chỉ x86-64**: `vm/jit_x64.c` sinh mã cho Win64 + System V; JIT ARM64 chưa có (mục J7 trong TODO). Nguồn không được JIT vẫn chạy qua interpreter (deopt).
+- **JIT chỉ x86-64**: `vm/jit_x64.c` sinh mã cho Win64 + System V; JIT ARM64 chỉ ở mức skeleton (`vm/jit_arm64.c` emitter + kiểm chứng byte qua `__sys.arm64_selftest`, chưa nối vào đường nóng — xem J7 trong TODO). Nguồn không được JIT vẫn chạy qua interpreter (deopt); trên ARM64 VM tự vô hiệu hoá JIT x64 để không phát nhầm mã.
 - **`for` khai báo sau hàm**: closure không capture biến `for` khai báo sau điểm định nghĩa hàm (`tests/hoist.t` ghi nhận hành vi này).
 - **`==`/`!=` trên tensor** so sánh cả tensor và trả `bool`; dùng `.eq()`/`.ne()` để so sánh từng phần tử (`<`, `>`, `<=`, `>=` là so sánh từng phần tử).
 - **`std/ffi.t` + primitive `mem_*` là unsafe**: đọc/ghi bộ nhớ thô theo con trỏ — ghi sai địa chỉ có thể làm hỏng dữ liệu hoặc crash tiến trình. Chỉ dùng khi đã tối ưu phần còn lại.

@@ -1,7 +1,7 @@
 ﻿# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v5.1, 2026-11-06)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`.\trun.exe tools\run_all.t` → ALL-GREEN** trên
-> Windows (MSVC 19.44): 49/49 bộ kiểm thử (7 subsystem + 42 `tests/*.t`), hoàn toàn tự thân
+> Windows (MSVC 19.44): 50/50 bộ kiểm thử (7 subsystem + 43 `tests/*.t`), hoàn toàn tự thân
 > thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G12 JIT x86-64,
 > bảo mật bytecode/process/archive, tham số mặc định, thư viện chuẩn đầy đủ (`math`, `json`,
 > `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `sqlite`, `ffi`, `mmap`, `gguf`,

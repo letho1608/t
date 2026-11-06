@@ -2288,6 +2288,11 @@ static int ty_ok(const TVal *v, uint8_t want) {
    kiểu list phải quét phần tử). */
 void t_jit_maybe(TVM *vm, TFn *fn, TVal *args) {
     uint8_t at[256];
+#if !defined(_M_X64) && !defined(__x86_64__)
+    (void)vm; (void)args;
+    fn->jit_off |= 1;    /* JIT x64 chỉ có trên x86-64; kiến trúc khác: interpreter */
+    return;
+#endif
     if (fn->jit_off & 1) return;
     if (++fn->ncalls < JIT_THRESHOLD) return;
     if (fn->native && (fn->ncalls & 255)) return;
@@ -2378,6 +2383,11 @@ int t_jit_call(TVM *vm, TFn *fn, TVal *args, int argc, TVal *ret) {
 }
 
 int t_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret) {
+#if !defined(_M_X64) && !defined(__x86_64__)
+    (void)vm; (void)locals; (void)pc; (void)ret;
+    fn->jit_off |= 2;    /* không có JIT x64 trên kiến trúc này -> interpreter */
+    return 0;
+#endif
     TJitFn *jf = jit_of(fn);
     JitOsr *o = NULL;
     int nl = fn->nlocals;
@@ -2512,6 +2522,10 @@ static int njmain;
 static TJitFn jmain_fn;         /* giữ ref các hàm mà code main gọi thẳng */
 
 int t_jit_osr_main(TVM *vm, size_t header, size_t end) {
+#if !defined(_M_X64) && !defined(__x86_64__)
+    (void)vm; (void)header; (void)end;
+    return -1;           /* không JIT được trên kiến trúc này */
+#endif
     JitMain *mu = NULL;
     TProg *P = vm->prog;
     TVal *G = P->globals;

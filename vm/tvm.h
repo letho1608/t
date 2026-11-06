@@ -407,6 +407,10 @@ int64_t tjit_dict_has(TDict *d, int64_t kbits, int kstr);
 int64_t tjit_dict_remove(TDict *d, int64_t kbits, int kstr);
 TVal *tjit_str_idx(const TVal *s, int64_t i); /* trả &str1_cache[ch] (mượn) hoặc NULL nếu ngoài biên */
 
+/* JIT ARM64 skeleton (jit_arm64.c): emitter byte + tự kiểm chứng oracle */
+int t_arm64_selftest(void);            /* 1 = khớp toàn bộ oracle byte */
+int t_arm64_dump(const char *path);    /* ghi kernel mẫu ra file; 1/0 */
+
 /* Debugger (tdbg.c) */
 extern int tvm_dbg_on;
 void dbg_enable(void);

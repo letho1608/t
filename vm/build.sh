@@ -12,7 +12,7 @@ VEC=""
 if $CC --version 2>/dev/null | grep -q "Free Software Foundation"; then VEC=" -fvect-cost-model=dynamic"; fi
 CFLAGS="${CFLAGS:--O2$VEC -std=c99 -Wall}"
 echo "[build] $CC $CFLAGS"
-$CC $CFLAGS -o trun vm/tvm.c vm/jit_x64.c vm/tdbg.c vm/trun.c -lm
+$CC $CFLAGS -o trun vm/tvm.c vm/jit_x64.c vm/jit_arm64.c vm/tdbg.c vm/trun.c -lm
 echo "[build] OK: ./trun"
 if [ -f tcomp.tb ]; then
     ./trun tcomp.tb -b self/tcli.t tcomp.new.tb >/dev/null

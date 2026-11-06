@@ -26,7 +26,7 @@ if errorlevel 1 (
   exit /b 1
 )
 if not exist build mkdir build
-cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fobuild\ /Fe"%ROOT%\trun.exe" vm\tvm.c vm\jit_x64.c vm\tdbg.c vm\trun.c
+cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fobuild\ /Fe"%ROOT%\trun.exe" vm\tvm.c vm\jit_x64.c vm\jit_arm64.c vm\tdbg.c vm\trun.c
 set BUILD_RC=%errorlevel%
 rmdir /s /q build 2>nul
 del /q *.obj 2>nul

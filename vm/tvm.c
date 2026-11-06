@@ -4656,6 +4656,16 @@ static void sys_mem_write_f64(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_nil();
 }
 
+static void sys_arm64_selftest(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)vm; (void)a; (void)argc;
+    *r = mk_bool(t_arm64_selftest());
+}
+
+static void sys_arm64_dump(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_STR) die(vm, "arm64_dump(path: str)");
+    *r = mk_bool(t_arm64_dump(a[0].u.str.s));
+}
+
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -4695,6 +4705,7 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"mem_read_i32", sys_mem_read_i32}, {"mem_write_i32", sys_mem_write_i32},
         {"mem_read_str", sys_mem_read_str},
         {"mem_read_f64", sys_mem_read_f64}, {"mem_write_f64", sys_mem_write_f64},
+        {"arm64_selftest", sys_arm64_selftest}, {"arm64_dump", sys_arm64_dump},
 
         /* thread & channel */
         {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},
