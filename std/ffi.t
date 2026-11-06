@@ -1,4 +1,9 @@
-# std/ffi.t — C Foreign Function Interface (FFI) cho T
+# std/ffi.t - C Foreign Function Interface (FFI) cho T
+#
+# CẢNH BÁO UNSAFE: FFI và primitive bộ nhớ (mem_alloc/mem_free/mem_read_*/mem_write_*)
+# thao tác bộ nhớ thô theo con trỏ, VM KHÔNG kiểm tra biên — ghi sai địa chỉ có thể
+# làm hỏng dữ liệu, leak bộ nhớ hoặc crash tiến trình. Chỉ dùng khi đã tối ưu phần
+# còn lại và tự chịu trách nhiệm kiểm tra địa chỉ/độ dài trước khi ghi.
 
 let _sys = load("__sys")
 
