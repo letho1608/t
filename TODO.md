@@ -1,7 +1,9 @@
-# T — trạng thái & việc còn thiếu
+﻿# T — trạng thái & việc còn thiếu
 
-Cập nhật: 2026-10-16 · phiên bản v2.6 · mọi mục ✅ đã verify bằng `python tools/run_all.py`
-(Windows MSVC + Linux gcc 13 qua Docker).
+Cập nhật: 2026-11-06 · phiên bản v5.1 · mọi mục ✅ đã verify bằng `.\trun.exe tools\run_all.t`
+→ 45/45 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
+Lưu ý: các mục nhắc `t.py`/`vm/tcomp.py`/`*.py` ở phần lịch sử là trạng thái trước hạng mục T4 —
+toàn bộ file `.py` của T đã bị xoá, giờ chỉ còn `.t`.
 
 Tóm một dòng: ngôn ngữ T có 4 runtime khớp từng byte, compiler thuần T tự biên dịch
 (fixed point), VM C có **method JIT x86-64 + OSR**, **tensor n-chiều** khớp numpy,
@@ -15,17 +17,17 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 
 | Thành phần | File | Trạng thái |
 |---|---|---|
-| Interpreter tham chiếu (+ REPL, đệ quy sâu ≥ 20k tầng) | `t.py` + `ttensor.py` | ✅ |
-| Compiler Python | `vm/tcomp.py` | ✅ |
+| Interpreter tham chiếu (từng là `t.py` + `ttensor.py`, đã xoá ở T4) | `self/eval.t` + REPL | ✅ |
+| Compiler Python (từng là `vm/tcomp.py`, đã xoá ở T4) | thay bằng `self/tcomp.t` | ✅ |
 | Compiler thuần T (tự gộp module khi có import) | `self/tcomp.t` | ✅ fixed point |
 | VM C (+ debugger `-d`, REPL khi không đối số) | `vm/tvm.c` `vm/trun.c` `vm/tdbg.c` | ✅ |
 | JIT x86-64 (Win64 + System V) | `vm/jit_x64.c` | ✅ |
 | Tensor n-chiều trong C | `vm/tensor_impl.h` | ✅ |
 | Evaluator thuần T | `self/eval.t` | ✅ |
 
-- Compiler Python và compiler T ra bytecode **giống từng byte** trên mọi suite (trước v2.2
-  sai ở `jit`, `selfhost`, `fmtself` do inliner khác nhau).
-- `tests/*.t` chạy qua `t.py`, VM (compiler T), và 11 suite qua `eval.t` trên VM: output khớp.
+- Compiler T ra bytecode **giống từng byte** trên mọi suite (trước T4 còn so với compiler Python;
+  trước v2.2 sai ở `jit`, `selfhost`, `fmtself` do inliner khác nhau).
+- `tests/*.t` chạy qua VM (compiler T), và 11 suite qua `eval.t` trên VM: output khớp.
 
 ### 1.2 Ngôn ngữ (v2.2 mới)
 
@@ -42,7 +44,7 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | số mũ `1e-5`; `%` kiểu floor ở mọi runtime | ✅ |
 | `let`/`fn` bất biến được kiểm cả ở compiler (trước đây chỉ `t.py`) | ✅ |
 | builtin "mềm" che được tên (`set input zeros ... pi`) | ✅ |
-| Lỗi cú pháp báo **đúng số dòng** (t.py + compiler T) | ✅ |
+| Lỗi cú pháp báo **đúng số dòng** (compiler T + VM) | ✅ |
 
 ### 1.3 Toolchain
 
@@ -51,9 +53,9 @@ REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 | L4 | REPL cho `trun` (`tools/repl.t` → `trepl.tb`, giữ biến qua các khối) | ✅ |
 | T1 | `import` khi build `.tb`: compiler tự gộp module, không cần `-b` | ✅ (liên kết lúc build) |
 | T2 | LSP biết từ khoá/builtin mới (`switch case default struct`, tensor, set...) | ✅ |
-| T3 | tpkg offline: registry thư mục / `file://`, index mọi phiên bản, cache sha, `install --offline` | ✅ `tools/test_tpkg.py` |
+| T3 | tpkg offline: registry thư mục / `file://`, index mọi phiên bản, cache sha, `install --offline` | ✅ `tools/test_tpkg.t` |
 | N1 | Verify POSIX thật: build gcc 13 + toàn bộ test + JIT System V trên Linux | ✅ |
-| N2 | CI: `.github/workflows/ci.yml` (Linux + Windows), `tools/run_all.py` | ✅ (workflow chưa chạy trên GitHub vì thư mục chưa là repo) |
+| N2 | CI: `.github/workflows/ci.yml` (gitleaks + trivy, build/test Linux gcc & Windows MSVC chạy `tools/run_all.t`) | ✅ workflow đã có trong repo; còn cần xác nhận trạng thái xanh trên GitHub Actions |
 | N3 | `tpm release patch/minor/major` + `CHANGELOG.md` (git log nếu có) | ✅ |
 
 ### 1.4 Hiệu năng

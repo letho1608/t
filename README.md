@@ -1,4 +1,4 @@
-# Ngôn ngữ lập trình T — README (v3.1: 100% tự thân thuần `.t`, VM C + x86-64 JIT, Tensor n-D & Autograd)
+﻿# Ngôn ngữ lập trình T — README (v5.1: 100% tự thân thuần `.t`, VM C + x86-64 JIT, Tensor n-D & Autograd)
 
 Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều là kiểu nguyên thủy**, **AI-first**, hoàn toàn độc lập không phụ thuộc Python:
 
@@ -15,11 +15,20 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 35 bộ test (7 subsystem + 28 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 45 bộ test (7 subsystem + 38 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
 ```
 
-## Tính năng ngôn ngữ (v3.1)
+## Giới hạn đã biết & cảnh báo an toàn
+
+- **Đơn luồng**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Đa luồng đầy đủ nằm trong lộ trình (TODO mục T2/J7).
+- **JIT chỉ x86-64**: `vm/jit_x64.c` sinh mã cho Win64 + System V; JIT ARM64 chưa có (mục J7 trong TODO). Nguồn không được JIT vẫn chạy qua interpreter (deopt).
+- **`for` khai báo sau hàm**: closure không capture biến `for` khai báo sau điểm định nghĩa hàm (`tests/hoist.t` ghi nhận hành vi này).
+- **`==`/`!=` trên tensor** so sánh cả tensor và trả `bool`; dùng `.eq()`/`.ne()` để so sánh từng phần tử (`<`, `>`, `<=`, `>=` là so sánh từng phần tử).
+- **`std/ffi.t` + primitive `mem_*` là unsafe**: đọc/ghi bộ nhớ thô theo con trỏ — ghi sai địa chỉ có thể làm hỏng dữ liệu hoặc crash tiến trình. Chỉ dùng khi đã tối ưu phần còn lại.
+- Một số thông điệp lỗi hiếm (vd. unhashable dict key) có thể khác văn bản giữa các runtime, dù output chính vẫn giống nhau.
+
+## Tính năng ngôn ngữ (v5.1)
 
 ```python
 let x = 10                      # bất biến (gán lại -> lỗi "x immutable (use mut)")
@@ -80,6 +89,15 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import http`: Tiện ích URL & HTTP client (`urlencode`, `urldecode`, `parse_query`, `build_query`, `parse_url`, `request`, `get`, `post`).
 - `import autograd as ag`: Reverse-mode automatic differentiation trên Tensor n-chiều (`param`, `const`, `add`, `sub`, `mul`, `div`, `matmul`, `relu`, `tanh`, `sigmoid`, `exp`, `log`, `sumall`, `mean`, `backward`, `sgd`).
 - `import ai`: Các lớp và hàm học sâu cấp cao (`mse`, `bce`, `cross_entropy`, `linear`, `relu`, `leaky_relu`, `gelu`, `sgd_step`, `MLP`, `Adam`).
+- `import sqlite`: Client SQLite thuần T nối thẳng driver OS sẵn có (`winsqlite3.dll` / `libsqlite3.so`, 0 phụ thuộc cài đặt), transaction, prepared statement, bind tham số `?`.
+- `import ffi`: Nạp `.dll`/`.so`, gọi hàm C (tới 6 đối số đa kiểu) và primitive bộ nhớ thô (`mem_alloc`, `mem_read_ptr`, `mem_write_i32`, `Buffer`) — **unsafe**, xem mục Giới hạn.
+- `import mmap`: Ánh xạ file lớn vào RAM zero-copy, nạp thẳng tensor float/quant từ đĩa.
+- `import gguf` / `import safetensors`: Đọc định dạng mô hình GGUF v2/v3 và Hugging Face Safetensors (metadata, catalog tensor, offset) qua mmap.
+- `import quant`: Lượng tử hóa & giải lượng tử hóa FP16, Q8_0, Q4_0 (giảm ~85% dung lượng mã).
+- `import transformer`: Suy luận LLaMA/Mistral/Qwen trên CPU (RMSNorm, RoPE, KV-Cache, GQA, SwiGLU, BPE tokenizer, sampler top-k/top-p/temperature).
+- `import cuda`: Truy vấn driver CUDA qua FFI (thiết bị, VRAM, phiên bản) với fallback CPU êm khi không có GPU.
+- `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
+- `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
 
 ## Các chương trình mẫu (`examples/`)
 
