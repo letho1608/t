@@ -355,6 +355,98 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b) {
     }
 }
 
+/* ---------- T2: GEMM chặn cache + đa luồng ----------
+   C chia theo hàng cho các worker (hàng độc lập -> không race), mỗi worker chạy
+   kernel i-k-j chặn cache MC x KC x NC. Thứ tự cộng mỗi C[i,j] vẫn là q tăng
+   dần trong mọi nhánh -> kết quả TRÙNG BIT với bản tuần tự đơn luồng.
+   TVM_GEMM_THREADS=1 -> tuần tự; =N -> đúng N luồng; không set/<=0 -> tự động
+   theo số nhân CPU. Ngưỡng kích hoạt: m*n*k >= 1M và m >= 32 hàng. */
+#define GEMM_MC 64
+#define GEMM_KC 128
+#define GEMM_NC 128
+#define GEMM_MIN_WORK 1000000ULL
+#define GEMM_MAX_THREADS 64
+
+typedef struct {
+    const double *A;
+    ptrdiff_t sa0, sa1;
+    const double *B;
+    double *C;
+    size_t n, k;
+    size_t r0, r1;                 /* hàng [r0, r1) của C mà task này xử lý */
+} GemmTask;
+
+static void gemm_run(const GemmTask *g) {
+    const double *TRESTRICT A = g->A;
+    const double *TRESTRICT B = g->B;
+    double *TRESTRICT C = g->C;
+    ptrdiff_t sa0 = g->sa0, sa1 = g->sa1;
+    size_t n = g->n, k = g->k;
+    for (size_t i = g->r0; i < g->r1; i++) {
+        double *TRESTRICT Ci = C + i * n;
+        for (size_t j = 0; j < n; j++) Ci[j] = 0.0;
+    }
+    for (size_t jj = 0; jj < n; jj += GEMM_NC) {          /* tile cột: B panel KC*NC */
+        size_t j1 = jj + GEMM_NC < n ? jj + GEMM_NC : n;
+        for (size_t i0 = g->r0; i0 < g->r1; i0 += GEMM_MC) {   /* tile dòng */
+            size_t i1 = i0 + GEMM_MC < g->r1 ? i0 + GEMM_MC : g->r1;
+            for (size_t q0 = 0; q0 < k; q0 += GEMM_KC) {       /* tile k */
+                size_t q1 = q0 + GEMM_KC < k ? q0 + GEMM_KC : k;
+                for (size_t i = i0; i < i1; i++) {
+                    double *TRESTRICT Ci = C + i * n;
+                    const double *Ai = A + (ptrdiff_t)i * sa0;
+                    for (size_t q = q0; q < q1; q++) {
+                        double aiq = Ai[(ptrdiff_t)q * sa1];
+                        const double *TRESTRICT Bq = B + q * n + jj;
+                        size_t cnt = j1 - jj, t = 0;
+                        for (; t + 7 < cnt; t += 8) {
+                            Ci[jj+t+0] += aiq * Bq[t+0];
+                            Ci[jj+t+1] += aiq * Bq[t+1];
+                            Ci[jj+t+2] += aiq * Bq[t+2];
+                            Ci[jj+t+3] += aiq * Bq[t+3];
+                            Ci[jj+t+4] += aiq * Bq[t+4];
+                            Ci[jj+t+5] += aiq * Bq[t+5];
+                            Ci[jj+t+6] += aiq * Bq[t+6];
+                            Ci[jj+t+7] += aiq * Bq[t+7];
+                        }
+                        for (; t < cnt; t++) Ci[jj + t] += aiq * Bq[t];
+                    }
+                }
+            }
+        }
+    }
+}
+
+static int gemm_cores(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+#else
+    long c = sysconf(_SC_NPROCESSORS_ONLN);
+    return c > 0 ? (int)c : 1;
+#endif
+}
+
+static size_t gemm_threads(size_t m, size_t n, size_t k) {
+    if ((unsigned long long)m * (unsigned long long)n * (unsigned long long)k
+        < GEMM_MIN_WORK || m < 32) return 1;
+    const char *e = getenv("TVM_GEMM_THREADS");
+    size_t nt;
+    if (e && *e && atol(e) >= 1) nt = (size_t)atol(e);
+    else nt = (size_t)gemm_cores();
+    if (nt > GEMM_MAX_THREADS) nt = GEMM_MAX_THREADS;
+    if (nt > m / 32) nt = m / 32;      /* mỗi luồng ít nhất 32 hàng */
+    if (nt < 1) nt = 1;
+    return nt;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI gemm_worker(LPVOID p) { gemm_run((const GemmTask *)p); return 0; }
+#else
+static void *gemm_worker(void *p) { gemm_run((const GemmTask *)p); return NULL; }
+#endif
+
 /* ---------- @ ---------- */
 static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
     /* A đọc theo bước (không cần gom view theo bước); B cần hàng liền -> sync */
@@ -418,25 +510,48 @@ static TVal ten_matmul(TVM *vm, const TTensor *a, const TTensor *b) {
             }
             return ten_val(r);
         }
-        for (size_t i = 0; i < m * n; i++) C[i] = 0.0;
-        for (size_t i = 0; i < m; i++) {
-            double *TRESTRICT Ci = C + i * n;
-            const double *Ai = A + (ptrdiff_t)i * sa0;
-            for (size_t q = 0; q < k; q++) {
-                double aiq = Ai[(ptrdiff_t)q * sa1];
-                const double *TRESTRICT Bq = B + q * n;
-                size_t j = 0;
-                for (; j + 7 < n; j += 8) {
-                    Ci[j+0] += aiq * Bq[j+0];
-                    Ci[j+1] += aiq * Bq[j+1];
-                    Ci[j+2] += aiq * Bq[j+2];
-                    Ci[j+3] += aiq * Bq[j+3];
-                    Ci[j+4] += aiq * Bq[j+4];
-                    Ci[j+5] += aiq * Bq[j+5];
-                    Ci[j+6] += aiq * Bq[j+6];
-                    Ci[j+7] += aiq * Bq[j+7];
+        {
+            size_t nt = gemm_threads(m, n, k);
+            GemmTask task;
+            task.A = A; task.sa0 = sa0; task.sa1 = sa1;
+            task.B = B; task.C = C; task.n = n; task.k = k;
+            if (nt <= 1) {
+                task.r0 = 0; task.r1 = m;
+                gemm_run(&task);
+            } else {
+                GemmTask tasks[GEMM_MAX_THREADS];
+                size_t base = m / nt, rem = m % nt, r = 0, t;
+                for (t = 0; t < nt; t++) {
+                    tasks[t] = task;
+                    tasks[t].r0 = r;
+                    r += base + (t < rem ? 1 : 0);
+                    tasks[t].r1 = r;
                 }
-                for (; j < n; j++) Ci[j] += aiq * Bq[j];
+                /* main thread chạy task 0, phần còn lại giao worker; worker
+                   nào không tạo được thì main tự chạy (kết quả vẫn đầy đủ) */
+#ifdef _WIN32
+                HANDLE hs[GEMM_MAX_THREADS];
+                char started[GEMM_MAX_THREADS];
+                for (t = 1; t < nt; t++) {
+                    hs[t] = CreateThread(NULL, 0, gemm_worker, &tasks[t], 0, NULL);
+                    started[t] = hs[t] != NULL;
+                }
+                gemm_run(&tasks[0]);
+                for (t = 1; t < nt; t++) {
+                    if (started[t]) { WaitForSingleObject(hs[t], INFINITE); CloseHandle(hs[t]); }
+                    else gemm_run(&tasks[t]);
+                }
+#else
+                pthread_t hs[GEMM_MAX_THREADS];
+                char started[GEMM_MAX_THREADS];
+                for (t = 1; t < nt; t++)
+                    started[t] = pthread_create(&hs[t], NULL, gemm_worker, &tasks[t]) == 0;
+                gemm_run(&tasks[0]);
+                for (t = 1; t < nt; t++) {
+                    if (started[t]) pthread_join(hs[t], NULL);
+                    else gemm_run(&tasks[t]);
+                }
+#endif
             }
         }
         return ten_val(r);

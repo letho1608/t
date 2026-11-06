@@ -434,7 +434,7 @@ Tên `$...` không lex được nên không đụng tên người dùng.
   sau 2000 vòng lặp. Entry chỉ cho hàm thuần (đọc list được) → guard hỏng thì huỷ
   và interpreter chạy lại. OSR được ghi phần tử list → guard hỏng thì deopt: native
   chép frame ra `ctx->save`, VM ghi locals + đẩy stack ảo rồi chạy tiếp tại pc của
-  lệnh hỏng. Biến môi trường: `TVM_NOJIT`, `TVM_JITLOG`, `TVM_JITDUMP`, `TVM_GCTHRESH`.
+  lệnh hỏng. Biến môi trường: `TVM_NOJIT`, `TVM_JITLOG`, `TVM_JITDUMP`, `TVM_GCTHRESH`, `TVM_GEMM_THREADS`.
 - JIT record (v2.4): kiểu trừu tượng "shape" = (kiểu struct, kiểu đoán từng field),
   tối đa 64 shape, JIT giữ ref kiểu struct. Record chỉ được mượn (đối số, global
   của vòng lặp top-level); `ATTR` đọc `vals[i]` + guard tag; `CALLM` gọi thẳng code

@@ -21,7 +21,7 @@ sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tco
 
 ## Giới hạn đã biết & cảnh báo an toàn
 
-- **Đơn luồng**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Đa luồng đầy đủ nằm trong lộ trình (TODO mục T2/J7).
+- **Đơn luồng cho interpreter**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Ngoại lệ: phép nhân ma trận lớn (`@`) đã **đa luồng + chặn cache** ở native (`TVM_GEMM_THREADS`, xem TODO mục T2). Đa luồng đầy đủ nằm trong lộ trình (TODO J7... xem §6).
 - **JIT chỉ x86-64**: `vm/jit_x64.c` sinh mã cho Win64 + System V; JIT ARM64 chưa có (mục J7 trong TODO). Nguồn không được JIT vẫn chạy qua interpreter (deopt).
 - **`for` khai báo sau hàm**: closure không capture biến `for` khai báo sau điểm định nghĩa hàm (`tests/hoist.t` ghi nhận hành vi này).
 - **`==`/`!=` trên tensor** so sánh cả tensor và trả `bool`; dùng `.eq()`/`.ne()` để so sánh từng phần tử (`<`, `>`, `<=`, `>=` là so sánh từng phần tử).

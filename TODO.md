@@ -215,7 +215,7 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 | # | Hạng mục | Mục tiêu & Kỹ thuật |
 |---|---|---|
-| **T2** | **Multi-threaded Cache-Blocked GEMM** | Đa luồng hóa phép nhân ma trận lớn ($M, N, K \ge 1024$) trong `vm/tensor_impl.h`. Chia tile theo bộ nhớ đệm CPU L1/L2/L3 (Cache Blocking) và phân bổ song song qua Worker Threads/OpenMP để tận dụng 100% tất cả các CPU cores khi training. |
+| **T2** | **Multi-threaded Cache-Blocked GEMM** | ✅ `vm/tensor_impl.h`: `ten_matmul` chia C theo hàng cho worker (`CreateThread`/`pthread_create`, main chạy task 0), kernel i-k-j chặn cache MC=64 / KC=128 / NC=128; thứ tự cộng mỗi `C[i,j]` vẫn q tăng dần nên **trùng bit** với tuần tự. Env `TVM_GEMM_THREADS` (=1 tuần tự, =N đúng N luồng, auto theo số nhân), ngưỡng `m*n*k ≥ 1M && m ≥ 32`. Đo 192³×30: 111.7ms → 44.2ms (**2.53×** trên 8 nhân, checksum trùng). `tests/gemm_mt.t` (trùng byte giữa 1/6/auto + khớp tham chiếu ba vòng). |
 | **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | Tận dụng `std/ffi.t` và `std/cuda.t` liên kết với `cublas64_*.dll` / `libcublas.so` để chuyển các phép tính GEMM và Convolution lớn sang GPU NVIDIA Tensor Cores (FP16 / BF16). |
 | **M7** | **Cross-Platform GPU (Vulkan Compute Shader)** | Tăng tốc GPU phi độc quyền cho cả AMD Radeon, Intel Arc và Apple qua Vulkan Compute / SPIR-V, mang lại khả năng tăng tốc phần cứng trên mọi thiết bị. |
 | **A1** | **Fused Backward Kernels trong `std/autograd.t`** | Tối ưu hóa Reverse-mode Autograd với các kernel C gộp (Fused Backward): gộp gradient của RMSNorm/LayerNorm, Softmax và SwiGLU/GELU để giảm tối đa băng thông bộ nhớ khi tính lan truyền ngược. |
