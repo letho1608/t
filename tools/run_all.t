@@ -27,7 +27,7 @@ T_TESTS = [
     "tests/test_run_gguf.t", "tests/sqlite_test.t", "tests/base64_test.t",
     "tests/cuda_test.t", "tests/gemm_mt.t", "tests/fusedbwd.t",
     "tests/cublas_test.t", "tests/vulkan_test.t", "tests/jitarm64.t",
-    "tests/v60_test.t"
+    "tests/v60_test.t", "tests/v70_rust_opt_test.t"
 ]
 
 fn pad_right(s, w):

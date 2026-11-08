@@ -71,12 +71,12 @@ fn parse_names(st):
         ns.append(eat_name(st))
     return ns
 
-# --- Type Annotations (v6.0 L10) ---
-# Lưu thông tin kiểu của biến, hàm, struct để std/typecheck.t kiểm tra tĩnh
-TYPE_ANNS = [{"vars": {}, "fns": {}, "structs": {}, "traits": {}}]
+# --- Type Annotations (v6.0 L10 & v7.0 L12) ---
+# Lưu thông tin kiểu của biến, hàm, struct, switches để std/typecheck.t kiểm tra tĩnh
+TYPE_ANNS = [{"vars": {}, "muts": {}, "fns": {}, "structs": {"Ok": [["val", "any"]], "Err": [["val", "any"]], "Some": [["val", "any"]], "None": []}, "traits": {}, "switches": []}]
 
 fn reset_type_anns():
-    TYPE_ANNS[0] = {"vars": {}, "fns": {}, "structs": {}, "traits": {}}
+    TYPE_ANNS[0] = {"vars": {}, "muts": {}, "fns": {}, "structs": {"Ok": [["val", "any"]], "Err": [["val", "any"]], "Some": [["val", "any"]], "None": []}, "traits": {}, "switches": []}
     return nil
 
 fn parse_type_ann(st):
@@ -229,6 +229,7 @@ fn parse_switch(st):
         else:
             raise tok_line(t) + "want case/default"
     eat_ded(st)
+    TYPE_ANNS[0]["switches"].append([subj, cases, dflt != nil])
     tmp = gensym("s")
     mut b = dflt
     mut i = cases.len - 1
@@ -794,6 +795,7 @@ fn parse_stmt0(st):
             st[1] = st[1] + 1
             nm = st[0][st[1]][1]
             st[1] = st[1] + 1
+            TYPE_ANNS[0]["muts"][nm] = (t[1] == "mut")
             if is_op(st[0][st[1]], ":"):
                 st[1] = st[1] + 1
                 vty = parse_type_ann(st)
@@ -1199,6 +1201,25 @@ fn parse_post(st):
             f = st[0][st[1]][1]
             st[1] = st[1] + 1
             e = ["attr", e, f]
+        elif is_op(st[0][st[1]], "?"):
+            st[1] = st[1] + 1
+            qv = gensym("q")
+            qt = gensym("qt")
+            hoist(["decl", "let", qv, e])
+            hoist(["decl", "let", qt, ["bltin", "type", [["var", qv]]]])
+            is_err_cond = ["bin", "or",
+                ["bin", "==", ["var", qv], ["lit", "nil"]],
+                ["bin", "or",
+                    ["bin", "==", ["var", qt], ["str", "Err"]],
+                    ["bin", "==", ["var", qt], ["str", "None"]]
+                ]
+            ]
+            hoist(["if", is_err_cond, [["ret", ["var", qv]]], nil])
+            is_wrap_cond = ["bin", "or",
+                ["bin", "==", ["var", qt], ["str", "Ok"]],
+                ["bin", "==", ["var", qt], ["str", "Some"]]
+            ]
+            e = ["cond", is_wrap_cond, ["attr", ["var", qv], "val"], ["var", qv]]
         else:
             go = false
     return e

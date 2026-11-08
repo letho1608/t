@@ -204,7 +204,7 @@ fn tokenize(src):
             elif two == "==" or two == "!=" or two == "<=" or two == ">=" or two == "**" or two == "->" or two == "+=" or two == "-=" or two == "*=" or two == "/=" or two == "%=" or two == "<<" or two == ">>" or two == "&=" or two == "|=" or two == "^=":
                 toks.append(["OP", two, str(line)])
                 i = i + 2
-            elif c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "@" or c == "<" or c == ">" or c == "=" or c == "(" or c == ")" or c == ":" or c == "," or c == "[" or c == "]" or c == "{" or c == "}" or c == "." or c == "&" or c == "|" or c == "^" or c == "~":
+            elif c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "@" or c == "<" or c == ">" or c == "=" or c == "(" or c == ")" or c == ":" or c == "," or c == "[" or c == "]" or c == "{" or c == "}" or c == "." or c == "&" or c == "|" or c == "^" or c == "~" or c == "?":
                 toks.append(["OP", c, str(line)])
                 i = i + 1
             else:

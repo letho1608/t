@@ -1,17 +1,18 @@
-# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v6.0, 2026-11-08)
+# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v7.0, 2026-11-08)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`.\trun.exe tools\run_all.t` → ALL-GREEN** trên
-> Windows (MSVC 19.44): 51/51 bộ kiểm thử (7 subsystem + 44 `tests/*.t`), hoàn toàn tự thân
-> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G14 JIT x86-64 & J7–J8 JIT ARM64 (AArch64),
-> L9 (Generators `yield`, Context Manager `with`, Operator Overloading), L10 (Optional Type Annotations & Static Type Checker `std/typecheck.t`),
+> Windows (MSVC 19.44): 52/52 bộ kiểm thử (7 subsystem + 45 `tests/*.t`), hoàn toàn tự thân
+> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G14 JIT x86-64 & J7–J9 JIT ARM64 (AArch64) + AOT Native Compiler (`std/aot.t`),
+> L9 (Generators `yield`, Context Manager `with`, Operator Overloading), L10–L12 (Optional Type Annotations, Static Type & Borrow/Exhaustiveness Checker `std/typecheck.t`, `Result`/`Option` & toán tử `?`),
 > L11 (Traits & Structural Pattern Matching), N4 (Native TCP/UDP Sockets `std/net.t` & `async`/`await` `std/async.t`),
+> S1 (`#[repr(C)]` Zero-Copy Struct Array `std/cstruct.t`, Lock-Free `AtomicInt`, `Mutex` & `SharedTensor` trong `std/thread.t`),
 > G14 (Multi-Dtype Native Tensor `f64`/`f32`/`f16`/`bf16`/`i32`/`i8`), T5 (Single-Binary Executable `--build-exe`),
 > M6 GPU cuBLAS (Tensor Cores FP16/BF16/FP32) & cuDNN Conv2D, M7 GPU Vulkan Compute Shader SPIR-V,
 > bảo mật bytecode/process/archive, tham số mặc định, thư viện chuẩn đầy đủ (`math`, `json`,
-> `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `net`, `async`, `typecheck`, `sqlite`, `ffi`, `mmap`, `gguf`,
+> `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `net`, `async`, `typecheck`, `result`, `cstruct`, `aot`, `sqlite`, `ffi`, `mmap`, `gguf`,
 > `safetensors`, `quant`, `transformer`, `cuda`, `cublas`, `cudnn`, `vulkan`, `base64`, `thread`, `autograd`, `ai`).
 >
-> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v6.0) và mục tiêu v4.0–v6.0 trong đó.
+> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v7.0) và mục tiêu v4.0–v7.0 trong đó.
 
 ## v3.0 — Tự thân hoàn toàn (`.t`), hoàn tất JIT G8/G9/G10/G12, chuẩn hóa bảo mật & stdlib
 

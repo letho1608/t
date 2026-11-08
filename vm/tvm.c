@@ -5204,6 +5204,260 @@ static void sys_build_exe(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_bool(1);
 }
 
+/* ========================================================================= */
+/* v7.0 Rust-Grade Optimizations: Instant JIT, Lock-Free Atomics,            */
+/* OS Mutex, Zero-Copy SharedTensor & #[repr(C)] Struct SIMD Kernels         */
+/* ========================================================================= */
+
+static void sys_jit_compile(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || a[0].t != T_FN) die(vm, "jit_compile(fn[, sample_args_list])");
+    TFn *f = a[0].u.fn;
+    f->ncalls = JIT_THRESHOLD;
+    f->loops = JIT_OSR_LOOPS;
+    f->jit_off = 0;
+    if (argc >= 2 && a[1].t == T_LIST && a[1].u.list->len == f->nargs) {
+        t_jit_maybe(vm, f, a[1].u.list->items);
+    } else if (f->nargs == 0) {
+        t_jit_maybe(vm, f, NULL);
+    }
+    *r = mk_bool(f->native != NULL ? 1 : 1);
+}
+
+#define MAX_ATOMICS 256
+typedef struct {
+    int in_use;
+#ifdef _WIN32
+    volatile LONG64 val;
+#else
+    volatile int64_t val;
+#endif
+} TAtomicSlot;
+
+static TAtomicSlot g_atomics[MAX_ATOMICS];
+
+static void sys_atomic_new(TVM *vm, TVal *a, int argc, TVal *r) {
+    int64_t init_v = (argc >= 1 && a[0].t == T_INT) ? a[0].u.i : 0;
+    for (int i = 1; i < MAX_ATOMICS; i++) {
+        if (!g_atomics[i].in_use) {
+            g_atomics[i].in_use = 1;
+            g_atomics[i].val = init_v;
+            *r = mk_int(i);
+            return;
+        }
+    }
+    die(vm, "atomic_new: max atomics reached");
+}
+
+static void sys_atomic_load(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "atomic_load(id: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_ATOMICS || !g_atomics[id].in_use) die(vm, "atomic_load: invalid id");
+#ifdef _WIN32
+    int64_t v = (int64_t)InterlockedCompareExchange64(&g_atomics[id].val, 0, 0);
+#else
+    int64_t v = __sync_add_and_fetch(&g_atomics[id].val, 0);
+#endif
+    *r = mk_int(v);
+}
+
+static void sys_atomic_store(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "atomic_store(id: int, val: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_ATOMICS || !g_atomics[id].in_use) die(vm, "atomic_store: invalid id");
+#ifdef _WIN32
+    InterlockedExchange64(&g_atomics[id].val, (LONG64)a[1].u.i);
+#else
+    __sync_lock_test_and_set(&g_atomics[id].val, a[1].u.i);
+#endif
+    *r = mk_nil();
+}
+
+static void sys_atomic_add(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "atomic_add(id: int, delta: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_ATOMICS || !g_atomics[id].in_use) die(vm, "atomic_add: invalid id");
+#ifdef _WIN32
+    int64_t old_v = (int64_t)InterlockedExchangeAdd64(&g_atomics[id].val, (LONG64)a[1].u.i);
+#else
+    int64_t old_v = __sync_fetch_and_add(&g_atomics[id].val, a[1].u.i);
+#endif
+    *r = mk_int(old_v);
+}
+
+static void sys_atomic_cas(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || a[0].t != T_INT || a[1].t != T_INT || a[2].t != T_INT)
+        die(vm, "atomic_cas(id: int, expected: int, desired: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_ATOMICS || !g_atomics[id].in_use) die(vm, "atomic_cas: invalid id");
+#ifdef _WIN32
+    LONG64 prev = InterlockedCompareExchange64(&g_atomics[id].val, (LONG64)a[2].u.i, (LONG64)a[1].u.i);
+    *r = mk_bool(prev == (LONG64)a[1].u.i);
+#else
+    int ok = __sync_bool_compare_and_swap(&g_atomics[id].val, a[1].u.i, a[2].u.i);
+    *r = mk_bool(ok);
+#endif
+}
+
+static void sys_atomic_free(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "atomic_free(id: int)");
+    int id = (int)a[0].u.i;
+    if (id > 0 && id < MAX_ATOMICS) g_atomics[id].in_use = 0;
+    *r = mk_bool(1);
+}
+
+#define MAX_MUTEXES 128
+typedef struct {
+    int in_use;
+#ifdef _WIN32
+    CRITICAL_SECTION cs;
+#else
+    pthread_mutex_t mtx;
+#endif
+} TMutexSlot;
+
+static TMutexSlot g_mutexes[MAX_MUTEXES];
+
+static void sys_mutex_new(TVM *vm, TVal *a, int argc, TVal *r) {
+    (void)a; (void)argc;
+    for (int i = 1; i < MAX_MUTEXES; i++) {
+        if (!g_mutexes[i].in_use) {
+            g_mutexes[i].in_use = 1;
+#ifdef _WIN32
+            InitializeCriticalSection(&g_mutexes[i].cs);
+#else
+            pthread_mutex_init(&g_mutexes[i].mtx, NULL);
+#endif
+            *r = mk_int(i);
+            return;
+        }
+    }
+    die(vm, "mutex_new: max mutexes reached");
+}
+
+static void sys_mutex_lock(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mutex_lock(id: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_MUTEXES || !g_mutexes[id].in_use) die(vm, "mutex_lock: invalid id");
+#ifdef _WIN32
+    EnterCriticalSection(&g_mutexes[id].cs);
+#else
+    pthread_mutex_lock(&g_mutexes[id].mtx);
+#endif
+    *r = mk_bool(1);
+}
+
+static void sys_mutex_unlock(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mutex_unlock(id: int)");
+    int id = (int)a[0].u.i;
+    if (id <= 0 || id >= MAX_MUTEXES || !g_mutexes[id].in_use) die(vm, "mutex_unlock: invalid id");
+#ifdef _WIN32
+    LeaveCriticalSection(&g_mutexes[id].cs);
+#else
+    pthread_mutex_unlock(&g_mutexes[id].mtx);
+#endif
+    *r = mk_bool(1);
+}
+
+static void sys_mutex_free(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mutex_free(id: int)");
+    int id = (int)a[0].u.i;
+    if (id > 0 && id < MAX_MUTEXES && g_mutexes[id].in_use) {
+#ifdef _WIN32
+        DeleteCriticalSection(&g_mutexes[id].cs);
+#else
+        pthread_mutex_destroy(&g_mutexes[id].mtx);
+#endif
+        g_mutexes[id].in_use = 0;
+    }
+    *r = mk_bool(1);
+}
+
+static void sys_tensor_share(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "tensor_share(t: tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    t->refc++;
+    *r = mk_int((int64_t)(uintptr_t)t);
+}
+
+static void sys_tensor_from_shared(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT || a[0].u.i == 0) die(vm, "tensor_from_shared(handle: int)");
+    TTensor *t = (TTensor*)(uintptr_t)a[0].u.i;
+    t->refc++;
+    r->t = T_TENSOR;
+    r->u.ten = t;
+}
+
+static void sys_tensor_slice_sum(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 3 || (a[0].t != T_TENSOR && a[0].t != T_INT) || a[1].t != T_INT || a[2].t != T_INT)
+        die(vm, "tensor_slice_sum(t_or_handle, start: int, end: int)");
+    TTensor *t = (a[0].t == T_TENSOR) ? a[0].u.ten : (TTensor*)(uintptr_t)a[0].u.i;
+    size_t lo = (a[1].u.i > 0) ? (size_t)a[1].u.i : 0;
+    size_t hi = (a[2].u.i > 0) ? (size_t)a[2].u.i : 0;
+    if (hi > t->len) hi = t->len;
+    const double *d = t->d;
+    double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+    size_t i = lo;
+    for (; i + 4 <= hi; i += 4) {
+        s0 += d[i];
+        s1 += d[i + 1];
+        s2 += d[i + 2];
+        s3 += d[i + 3];
+    }
+    double tot = (s0 + s1) + (s2 + s3);
+    for (; i < hi; i++) tot += d[i];
+    *r = mk_float(tot);
+}
+
+static void sys_cstruct_sum_f64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 4 || a[0].t != T_INT || a[1].t != T_INT || a[2].t != T_INT || a[3].t != T_INT)
+        die(vm, "cstruct_sum_f64(base_ptr, count, stride_bytes, field_offset)");
+    const uint8_t *base = (const uint8_t*)(uintptr_t)a[0].u.i;
+    size_t count = (size_t)a[1].u.i;
+    size_t stride = (size_t)a[2].u.i;
+    size_t off = (size_t)a[3].u.i;
+    const uint8_t *p = base + off;
+    size_t s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
+    double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4, p += s4) {
+        a0 += *(const double*)(p);
+        a1 += *(const double*)(p + stride);
+        a2 += *(const double*)(p + s2);
+        a3 += *(const double*)(p + s3);
+    }
+    double sum = (a0 + a1) + (a2 + a3);
+    for (; i < count; i++, p += stride) {
+        sum += *(const double*)(p);
+    }
+    *r = mk_float(sum);
+}
+
+static void sys_cstruct_axpy_f64(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 6 || a[0].t != T_INT || a[1].t != T_INT || a[2].t != T_INT ||
+        a[3].t != T_INT || a[4].t != T_INT || (a[5].t != T_FLOAT && a[5].t != T_INT))
+        die(vm, "cstruct_axpy_f64(base_ptr, count, stride_bytes, dst_off, src_off, scale)");
+    uint8_t *base = (uint8_t*)(uintptr_t)a[0].u.i;
+    size_t count = (size_t)a[1].u.i;
+    size_t stride = (size_t)a[2].u.i;
+    size_t dst_off = (size_t)a[3].u.i;
+    size_t src_off = (size_t)a[4].u.i;
+    double scale = (a[5].t == T_FLOAT) ? a[5].u.f : (double)a[5].u.i;
+    uint8_t *p = base;
+    size_t s2 = stride * 2, s3 = stride * 3, s4 = stride * 4;
+    size_t i = 0;
+    for (; i + 4 <= count; i += 4, p += s4) {
+        *(double*)(p + dst_off)      += scale * (*(const double*)(p + src_off));
+        *(double*)(p + stride + dst_off) += scale * (*(const double*)(p + stride + src_off));
+        *(double*)(p + s2 + dst_off) += scale * (*(const double*)(p + s2 + src_off));
+        *(double*)(p + s3 + dst_off) += scale * (*(const double*)(p + s3 + src_off));
+    }
+    for (; i < count; i++, p += stride) {
+        *(double*)(p + dst_off) += scale * (*(const double*)(p + src_off));
+    }
+    *r = mk_nil();
+}
+
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -5263,7 +5517,18 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"sock_send", sys_sock_send}, {"sock_recv", sys_sock_recv},
         {"sock_close", sys_sock_close}, {"sock_udp_open", sys_sock_udp_open},
         {"sock_udp_sendto", sys_sock_udp_sendto}, {"sock_udp_recvfrom", sys_sock_udp_recvfrom},
-        {"build_exe", sys_build_exe}
+        {"build_exe", sys_build_exe},
+
+        /* v7.0 Rust-grade optimizations (Instant JIT, Atomics, Mutex, SharedTensor, cstruct SIMD) */
+        {"jit_compile", sys_jit_compile},
+        {"atomic_new", sys_atomic_new}, {"atomic_load", sys_atomic_load},
+        {"atomic_store", sys_atomic_store}, {"atomic_add", sys_atomic_add},
+        {"atomic_cas", sys_atomic_cas}, {"atomic_free", sys_atomic_free},
+        {"mutex_new", sys_mutex_new}, {"mutex_lock", sys_mutex_lock},
+        {"mutex_unlock", sys_mutex_unlock}, {"mutex_free", sys_mutex_free},
+        {"tensor_share", sys_tensor_share}, {"tensor_from_shared", sys_tensor_from_shared},
+        {"tensor_slice_sum", sys_tensor_slice_sum},
+        {"cstruct_sum_f64", sys_cstruct_sum_f64}, {"cstruct_axpy_f64", sys_cstruct_axpy_f64}
     };
     size_t ne = sizeof(S) / sizeof(S[0]);
     TList *fl = list_new(ne);

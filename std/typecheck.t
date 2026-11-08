@@ -1,4 +1,4 @@
-# std/typecheck.t — Bộ kiểm tra kiểu tĩnh tuỳ chọn (Static Type Checker, v6.0 L10)
+# std/typecheck.t — Bộ kiểm tra kiểu tĩnh & Borrow/Exhaustiveness Checker chuẩn Rust (v6.0 L10 & v7.0 L12)
 import os
 import host
 
@@ -21,12 +21,16 @@ fn type_compatible(expected, actual):
         return true
     eb = base_type(expected)
     ab = base_type(actual)
-    if eb == ab and (eb == "list" or eb == "dict" or eb == "set" or eb == "tensor"):
+    if eb == "Result" and (ab == "Result" or ab == "Ok" or ab == "Err"):
+        return true
+    if eb == "Option" and (ab == "Option" or ab == "Some" or ab == "None" or ab == "nil"):
+        return true
+    if eb == ab and (eb == "list" or eb == "dict" or eb == "set" or eb == "tensor" or eb == "Result" or eb == "Option"):
         if expected == eb or actual == ab:
             return true
     return false
 
-fn infer_expr(e, env, anns, errs, cur_fn):
+fn infer_expr(e, env, moved, anns, errs, cur_fn):
     if e == nil or type(e) != "list" or e.len == 0:
         return "any"
     tag = e[0]
@@ -49,7 +53,7 @@ fn infer_expr(e, env, anns, errs, cur_fn):
     if tag == "list":
         mut elem_t = ""
         for item in e[1]:
-            it = infer_expr(item, env, anns, errs, cur_fn)
+            it = infer_expr(item, env, moved, anns, errs, cur_fn)
             if elem_t == "":
                 elem_t = it
             elif elem_t != it:
@@ -63,14 +67,21 @@ fn infer_expr(e, env, anns, errs, cur_fn):
         return "tensor"
     if tag == "var":
         nm = e[1]
+        if moved.has(nm):
+            errs.append("BorrowError: bien '" + nm + "' da bi " + moved[nm] + ", khong the su dung lai (use-after-" + moved[nm] + ")")
         if env.has(nm):
             return env[nm]
         if anns["vars"].has(nm):
             return anns["vars"][nm]
         return "any"
+    if tag == "cond":
+        infer_expr(e[1], env, moved, anns, errs, cur_fn)
+        t1 = infer_expr(e[2], env, moved, anns, errs, cur_fn)
+        t2 = infer_expr(e[3], env, moved, anns, errs, cur_fn)
+        return t1 if t1 == t2 else "any"
     if tag == "un":
         op = e[1]
-        t1 = infer_expr(e[2], env, anns, errs, cur_fn)
+        t1 = infer_expr(e[2], env, moved, anns, errs, cur_fn)
         if op == "not":
             return "bool"
         if op == "-":
@@ -78,8 +89,8 @@ fn infer_expr(e, env, anns, errs, cur_fn):
         return "int"
     if tag == "bin":
         op = e[1]
-        t1 = infer_expr(e[2], env, anns, errs, cur_fn)
-        t2 = infer_expr(e[3], env, anns, errs, cur_fn)
+        t1 = infer_expr(e[2], env, moved, anns, errs, cur_fn)
+        t2 = infer_expr(e[3], env, moved, anns, errs, cur_fn)
         if op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" or op == "and" or op == "or" or op == "in":
             return "bool"
         if op == "+":
@@ -101,10 +112,35 @@ fn infer_expr(e, env, anns, errs, cur_fn):
             fn_nm = e[1]
         elif e[1][0] == "var":
             fn_nm = e[1][1]
+        elif e[1][0] == "attr":
+            # Kiem tra obj.close() hoac obj.free() hoac truy cap receiver da move/close
+            recv = e[1][1]
+            mname = e[1][2]
+            if (mname == "close" or mname == "free") and recv[0] == "var":
+                rnm = recv[1]
+                if moved.has(rnm):
+                    errs.append("BorrowError: bien '" + rnm + "' da bi " + moved[rnm] + " hai lan (double-close/free)")
+                else:
+                    moved[rnm] = "close"
+                return "any"
+            infer_expr(recv, env, moved, anns, errs, cur_fn)
         args = e[2]
+        # Kiem tra move(x) hoac close(x)
+        if (fn_nm == "move" or (fn_nm == "close" and args.len == 1)) and args.len >= 1 and args[0][0] == "var":
+            vnm = args[0][1]
+            if moved.has(vnm):
+                errs.append("BorrowError: bien '" + vnm + "' da bi " + moved[vnm] + ", khong the " + fn_nm + " lan nua")
+            else:
+                vt = infer_expr(args[0], env, moved, anns, errs, cur_fn)
+                moved[vnm] = fn_nm
+                return vt
         mut arg_types = []
         for a in args:
-            arg_types.append(infer_expr(a, env, anns, errs, cur_fn))
+            arg_types.append(infer_expr(a, env, moved, anns, errs, cur_fn))
+        if fn_nm == "Ok" or fn_nm == "Err":
+            return "Result"
+        if fn_nm == "Some" or fn_nm == "None":
+            return "Option"
         if fn_nm == "int" or fn_nm == "len" or fn_nm == "ord" or fn_nm == "round":
             return "int"
         if fn_nm == "float" or fn_nm == "sqrt" or fn_nm == "sin" or fn_nm == "cos" or fn_nm == "exp" or fn_nm == "log":
@@ -127,11 +163,11 @@ fn infer_expr(e, env, anns, errs, cur_fn):
             return finfo["ret"] if finfo["ret"] != "" else "any"
         return "any"
     if tag == "attr":
-        obj_t = infer_expr(e[1], env, anns, errs, cur_fn)
+        obj_t = infer_expr(e[1], env, moved, anns, errs, cur_fn)
         fld = e[2]
         if anns["structs"].has(obj_t):
-            st_info = anns["structs"][obj_t]
-            for fp in st_info["fields"]:
+            st_fields = anns["structs"][obj_t]
+            for fp in st_fields:
                 if fp[0] == fld:
                     return fp[1]
         if fld == "len":
@@ -139,7 +175,58 @@ fn infer_expr(e, env, anns, errs, cur_fn):
         return "any"
     return "any"
 
-fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
+fn check_exhaustiveness(anns, errs):
+    if not anns.has("switches"):
+        return nil
+    for sw in anns["switches"]:
+        cases = sw[1]
+        has_dflt = sw[2]
+        if has_dflt:
+            continue
+        mut has_wild = false
+        mut has_ok = false
+        mut has_err = false
+        mut has_some = false
+        mut has_none = false
+        for c in cases:
+            vs = c[0]
+            guard = c[2]
+            if guard != nil:
+                continue
+            for pat in vs:
+                if pat[0] == "var" and pat[1] == "_":
+                    has_wild = true
+                elif pat[0] == "call" and pat[1][0] == "var":
+                    cn = pat[1][1]
+                    if cn == "Ok":
+                        has_ok = true
+                    elif cn == "Err":
+                        has_err = true
+                    elif cn == "Some":
+                        has_some = true
+                    elif cn == "None":
+                        has_none = true
+                elif pat[0] == "var" and pat[1] == "None":
+                    has_none = true
+                elif pat[0] == "lit" and pat[1] == "nil":
+                    has_none = true
+        if has_wild:
+            continue
+        if (has_ok and has_err) or (has_some and has_none):
+            continue
+        if has_ok and not has_err:
+            errs.append("ExhaustivenessError: switch tren Result thieu nhanh 'case Err(...):' hoac 'case _:'")
+        elif has_err and not has_ok:
+            errs.append("ExhaustivenessError: switch tren Result thieu nhanh 'case Ok(...):' hoac 'case _:'")
+        elif has_some and not has_none:
+            errs.append("ExhaustivenessError: switch tren Option thieu nhanh 'case None():' hoac 'case _:'")
+        elif has_none and not has_some:
+            errs.append("ExhaustivenessError: switch tren Option thieu nhanh 'case Some(...):' hoac 'case _:'")
+        else:
+            errs.append("ExhaustivenessError: switch khong vet can (thieu 'case _:' hoac 'default:')")
+    return nil
+
+fn check_stmts(stmts, env, moved, anns, errs, cur_fn, want_ret):
     for s in stmts:
         if s == nil or type(s) != "list" or s.len == 0:
             continue
@@ -148,7 +235,9 @@ fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
             continue
         if tag == "decl":
             nm = s[2]
-            val_t = infer_expr(s[3], env, anns, errs, cur_fn)
+            val_t = infer_expr(s[3], env, moved, anns, errs, cur_fn)
+            if moved.has(nm):
+                moved.remove(nm)
             mut want_t = ""
             if env.has(nm) and env[nm] != "any":
                 want_t = env[nm]
@@ -163,7 +252,9 @@ fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
         elif tag == "assign":
             if s[1][0] == "var":
                 nm = s[1][1]
-                val_t = infer_expr(s[2], env, anns, errs, cur_fn)
+                val_t = infer_expr(s[2], env, moved, anns, errs, cur_fn)
+                if moved.has(nm):
+                    moved.remove(nm)
                 mut want_t = ""
                 if env.has(nm) and env[nm] != "any":
                     want_t = env[nm]
@@ -171,27 +262,33 @@ fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
                     want_t = anns["vars"][nm]
                 if want_t != "" and not type_compatible(want_t, val_t):
                     errs.append("TypeError: bien '" + nm + "' co kieu '" + want_t + "', khong the gan gia tri kieu '" + val_t + "'")
+            else:
+                infer_expr(s[1], env, moved, anns, errs, cur_fn)
+                infer_expr(s[2], env, moved, anns, errs, cur_fn)
         elif tag == "ret" or tag == "return":
-            rt = infer_expr(s[1], env, anns, errs, cur_fn)
+            rt = infer_expr(s[1], env, moved, anns, errs, cur_fn)
             if want_ret != "" and want_ret != "any" and not type_compatible(want_ret, rt):
                 errs.append("TypeError: ham '" + cur_fn + "' khai bao tra ve '" + want_ret + "', nhung return '" + rt + "'")
         elif tag == "expr":
-            infer_expr(s[1], env, anns, errs, cur_fn)
+            infer_expr(s[1], env, moved, anns, errs, cur_fn)
+        elif tag == "print":
+            for pe in s[1]:
+                infer_expr(pe, env, moved, anns, errs, cur_fn)
         elif tag == "if":
-            infer_expr(s[1], env, anns, errs, cur_fn)
-            check_stmts(s[2], env, anns, errs, cur_fn, want_ret)
+            infer_expr(s[1], env, moved, anns, errs, cur_fn)
+            check_stmts(s[2], env, moved, anns, errs, cur_fn, want_ret)
             if s[3] != nil:
-                check_stmts(s[3], env, anns, errs, cur_fn, want_ret)
+                check_stmts(s[3], env, moved, anns, errs, cur_fn, want_ret)
         elif tag == "while":
-            infer_expr(s[1], env, anns, errs, cur_fn)
-            check_stmts(s[2], env, anns, errs, cur_fn, want_ret)
+            infer_expr(s[1], env, moved, anns, errs, cur_fn)
+            check_stmts(s[2], env, moved, anns, errs, cur_fn, want_ret)
         elif tag == "for":
-            infer_expr(s[2], env, anns, errs, cur_fn)
-            check_stmts(s[3], env, anns, errs, cur_fn, want_ret)
+            infer_expr(s[2], env, moved, anns, errs, cur_fn)
+            check_stmts(s[3], env, moved, anns, errs, cur_fn, want_ret)
         elif tag == "try":
-            check_stmts(s[1], env, anns, errs, cur_fn, want_ret)
+            check_stmts(s[1], env, moved, anns, errs, cur_fn, want_ret)
             for h in s[2]:
-                check_stmts(h[1], env, anns, errs, cur_fn, want_ret)
+                check_stmts(h[1], env, moved, anns, errs, cur_fn, want_ret)
         elif tag == "fn":
             fn_nm = s[1]
             params = s[2]
@@ -199,6 +296,7 @@ fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
             mut fn_env = {}
             for k in env.keys():
                 fn_env[k] = env[k]
+            mut fn_moved = {}
             mut fn_ret = ""
             if anns["fns"].has(fn_nm):
                 finfo = anns["fns"][fn_nm]
@@ -213,7 +311,7 @@ fn check_stmts(stmts, env, anns, errs, cur_fn, want_ret):
             else:
                 for p in params:
                     fn_env[p] = "any"
-            check_stmts(body, fn_env, anns, errs, fn_nm, fn_ret)
+            check_stmts(body, fn_env, fn_moved, anns, errs, fn_nm, fn_ret)
     return nil
 
 fn check_source(src):
@@ -224,9 +322,11 @@ fn check_source(src):
     anns = host.get_type_anns()
     mut errs = []
     mut env = {}
+    mut moved = {}
     for k in anns["vars"].keys():
         env[k] = anns["vars"][k]
-    check_stmts(prog[1], env, anns, errs, "", "")
+    check_stmts(prog[1], env, moved, anns, errs, "", "")
+    check_exhaustiveness(anns, errs)
     return {"ok": errs.len == 0, "errors": errs, "annotations": anns}
 
 fn check_file(path):

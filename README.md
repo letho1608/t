@@ -1,13 +1,14 @@
-# Ngôn ngữ lập trình T — README (v6.0: 100% tự thân thuần `.t`, VM C + JIT x86-64/ARM64, Multi-Dtype Tensor, GPU Vulkan/CUDA, Autograd, Async/Net & Type Checker)
+# Ngôn ngữ lập trình T — README (v7.0: 100% tự thân thuần `.t`, VM C + JIT x86-64/ARM64 + AOT Native, Multi-Dtype Tensor, GPU Vulkan/CUDA, Autograd & Rust-Grade Optimizations)
 
-Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều đa kiểu là kiểu nguyên thủy**, **AI-first**, hoàn toàn độc lập không phụ thuộc Python:
+Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều đa kiểu là kiểu nguyên thủy**, **AI-first**, tích hợp **3 cơ chế tối ưu chuẩn Rust (`J9/AOT`, `L12` `Result`/`?`/Borrow-Check, `S1` `#[repr(C)]`/Lock-Free Concurrency)**:
 
 | Thành phần | Lệnh | Ghi chú |
 |---|---|---|
 | Chạy trực tiếp file `.t` / `-c` | `trun prog.t` / `trun -c "print(1+2)"` | VM tự biên dịch ngầm qua `tcomp.tb` và thực thi với JIT |
 | Chạy bytecode `.tb` | `trun prog.tb` | Khởi động tức thời + JIT x86-64 / ARM64 + REPL (`trun`) |
 | Đóng gói file thực thi độc lập | `trun --build-exe prog.t app.exe` | Gộp VM + bytecode thành 1 file `.exe`/ELF chạy độc lập (`tpkg build --exe`) |
-| Kiểm tra kiểu tĩnh (Type Checker) | `trun tools/tcheck.t prog.t` | Kiểm tra tĩnh các chú thích kiểu tùy chọn (`std/typecheck.t`) |
+| Trình biên dịch AOT Native | `trun tools/taot.t --emit-c prog.t` | Dịch sang C99 / Rust hoặc thư viện mã máy gốc `.dll`/`.so` AVX2 (`std/aot.t`) |
+| Kiểm tra kiểu & Borrow tĩnh | `trun tools/tcheck.t prog.t` | Kiểm tra tĩnh kiểu, Use-After-Move/Close & Exhaustiveness (`std/typecheck.t`) |
 | Compiler tự thân thuần T | `trun tcomp.tb prog.t prog.tb` | `self/tcomp.t` tự biên dịch chính nó tới fixed point byte-identical |
 | Evaluator tự thân thuần T | `trun tools/tdriver.t prog.t` | `self/eval.t` chạy trên VM C khớp từng byte |
 
@@ -17,8 +18,9 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 51 bộ test (7 subsystem + 44 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 52 bộ test (7 subsystem + 45 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
+.\trun.exe bench\rust_vs_t.t    # Benchmark T (v7.0) đối đầu trực tiếp với Rust/Native (-O2)
 ```
 
 ## Giới hạn đã biết & cảnh báo an toàn
