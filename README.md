@@ -103,10 +103,15 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import cublas` / `import cudnn`: GEMM trên GPU NVIDIA qua cuBLAS (`gemm`/`matmul` double-precision `cublasDgemm_v2`, Tensor Cores `gemm_fp16`/`gemm_bf16`/`gemm_f32`/`gemm_ex` qua `cublasGemmEx` 19 đối số) và tích chập 2D NCHW `conv2d` qua cuDNN (`cudnnConvolutionForward`), không có GPU/lib thì tự fallback về nhân C native / `@` CPU.
 - `import vulkan`: Khởi tạo Vulkan Loader + liệt kê đầy đủ physical devices (`name`, `vendor_id`, `device_id`, `type`, `api_version`) + biên dịch và thực thi trực tiếp Compute Shader nhị phân SPIR-V 1.0 trên GPU (`gemm_f32` và `gemm`/`matmul` với thuật toán phân rã mantissa Ozaki 4-lớp đạt chuẩn float64 `< 1e-13`). Máy không có Vulkan tự fallback CPU êm.
 - `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
-- `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
+- `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ, nguyên hàm Lock-Free `AtomicInt`, `Mutex`, `SharedTensor` zero-copy, và **Rayon-Style Native Thread Pool** (`par_collatz`, `par_reduce_i64`, `par_map_f64`).
 - `import net`: TCP/UDP Sockets native (`tcp_listen`, `tcp_connect`, `udp_bind`, `TcpListener`, `TcpStream`, `UdpSocket`) và `HttpServer` nhúng.
 - `import async`: Lập lịch bất đồng bộ hợp tác (`EventLoop`, `Future`, `spawn`, `gather`, `sleep`, `run`) kết hợp cùng `async fn` / `await`.
-- `import typecheck`: Bộ kiểm tra kiểu tĩnh (`check_source`, `check_file`) cho các chú thích kiểu tùy chọn (`let x: int`, `fn f(a: int) -> str:`).
+- `import typecheck`: Bộ kiểm tra kiểu tĩnh, Borrow/Move/Use-After-Close Checker và Exhaustiveness Checker (`check_source`, `check_file`).
+- `import result`: Kiểu đại số `Result<T, E>` (`Ok`, `Err`), `Option<T>` (`Some`, `None`), `move(x)`, kết hợp toán tử hậu tố `?` zero-cost.
+- `import cstruct`: Mảng cấu trúc phẳng `#[repr(C)]` zero-copy (`define`, `alloc_array`, `sum_f64`, `axpy_f64` L1-cache-tiled SIMD).
+- `import aot`: Instant JIT (`aot.jit`) và trình biên dịch AOT Native (`transpile_to_c`, `transpile_to_rust`, `compile_module`) hỗ trợ số học và con trỏ mảng (`i64_ptr`, `f64_ptr`, `arr[i]`).
+- `import vec`: Vector đồng nhất unboxed 8-byte (`VecI64`, `VecF64`), Zero-Cost Iterator Fusion (`fused_map_filter_sum`, `dot`) và thuật toán sắp xếp **8-Pass $O(N)$ LSD Radix Sort** (`radix_sort`, nhanh gấp >6× so với `qsort -O2`).
+- `import fastmap`: Bảng băm mở unboxed `IntMap` dùng hàm băm nhân Fibonacci (`get`, `set`, `inc`, `batch_freq`) và các nhân quét chuỗi 8-way unrolled zero-copy (`str_count_byte`, `str_fnv1a_64`, `str_find_fast`).
 
 ## Các chương trình mẫu (`examples/`)
 

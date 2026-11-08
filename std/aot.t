@@ -13,6 +13,10 @@ fn jit(fn_val, sample_args = nil):
     return fn_val
 
 fn map_type_rust(ty):
+    if ty == "i64_ptr" or ty == "ptr":
+        return "*mut i64"
+    if ty == "f64_ptr":
+        return "*mut f64"
     if ty == "float" or ty == "f64" or ty == "float64":
         return "f64"
     if ty == "bool":
@@ -20,6 +24,10 @@ fn map_type_rust(ty):
     return "i64"
 
 fn map_type_c(ty):
+    if ty == "i64_ptr" or ty == "ptr":
+        return "long long*"
+    if ty == "f64_ptr":
+        return "double*"
     if ty == "float" or ty == "f64" or ty == "float64":
         return "double"
     return "long long"
@@ -36,6 +44,10 @@ fn emit_expr_rust(e, env):
         return "0"
     if tag == "var":
         return e[1]
+    if tag == "idx":
+        arr = emit_expr_rust(e[1], env)
+        idx = emit_expr_rust(e[2], env)
+        return "unsafe { *" + arr + ".add((" + idx + ") as usize) }"
     if tag == "un":
         op = e[1]
         v = emit_expr_rust(e[2], env)
@@ -105,6 +117,11 @@ fn emit_stmts_rust(stmts, indent, env):
                 nm = s[1][1]
                 val = emit_expr_rust(s[2], env)
                 out = out + pad + nm + " = " + val + ";\n"
+            elif s[1][0] == "idx":
+                arr = emit_expr_rust(s[1][1], env)
+                idx = emit_expr_rust(s[1][2], env)
+                val = emit_expr_rust(s[2], env)
+                out = out + pad + "unsafe { *" + arr + ".add((" + idx + ") as usize) = " + val + "; }\n"
         elif tag == "ret" or tag == "return":
             val = emit_expr_rust(s[1], env)
             out = out + pad + "return " + val + ";\n"
@@ -162,6 +179,10 @@ fn emit_expr_c(e, env):
         return "0"
     if tag == "var":
         return e[1]
+    if tag == "idx":
+        arr = emit_expr_c(e[1], env)
+        idx = emit_expr_c(e[2], env)
+        return arr + "[" + idx + "]"
     if tag == "un":
         op = e[1]
         v = emit_expr_c(e[2], env)
@@ -219,6 +240,11 @@ fn emit_stmts_c(stmts, indent, env):
                 nm = s[1][1]
                 val = emit_expr_c(s[2], env)
                 out = out + pad + nm + " = " + val + ";\n"
+            elif s[1][0] == "idx":
+                arr = emit_expr_c(s[1][1], env)
+                idx = emit_expr_c(s[1][2], env)
+                val = emit_expr_c(s[2], env)
+                out = out + pad + arr + "[" + idx + "] = " + val + ";\n"
         elif tag == "ret" or tag == "return":
             val = emit_expr_c(s[1], env)
             out = out + pad + "return " + val + ";\n"
@@ -242,6 +268,21 @@ fn emit_stmts_c(stmts, indent, env):
             out = out + pad + "while (" + c + ") {\n"
             out = out + emit_stmts_c(s[2], indent + 1, env)
             out = out + pad + "}\n"
+        elif tag == "for":
+            v = s[1]
+            it = s[2]
+            if it[0] == "bltin" and it[1] == "range":
+                rargs = it[2]
+                mut start_s = "0"
+                mut stop_s = "0"
+                if rargs.len == 1:
+                    stop_s = emit_expr_c(rargs[0], env)
+                elif rargs.len >= 2:
+                    start_s = emit_expr_c(rargs[0], env)
+                    stop_s = emit_expr_c(rargs[1], env)
+                out = out + pad + "for (long long " + v + " = " + start_s + ", _end_" + v + " = " + stop_s + "; " + v + " < _end_" + v + "; ++" + v + ") {\n"
+                out = out + emit_stmts_c(s[3], indent + 1, env)
+                out = out + pad + "}\n"
         elif tag == "expr":
             out = out + pad + emit_expr_c(s[1], env) + ";\n"
     return out

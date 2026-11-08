@@ -61,8 +61,8 @@ struct CStructArray:
     fn sum_f64(self, field: str) -> float:
         return _sys.cstruct_sum_f64(self.ptr, self.count, self.stride, self.offsets[field])
 
-    fn axpy_f64(self, dst_field: str, src_field: str, scale: float):
-        return _sys.cstruct_axpy_f64(self.ptr, self.count, self.stride, self.offsets[dst_field], self.offsets[src_field], scale)
+    fn axpy_f64(self, dst_field: str, src_field: str, scale: float, steps = 1):
+        return _sys.cstruct_axpy_f64(self.ptr, self.count, self.stride, self.offsets[dst_field], self.offsets[src_field], scale, steps)
 
     fn free(self):
         if self.owns and self.ptr != 0:

@@ -6,6 +6,8 @@ import typecheck as tc
 import cstruct
 import thread
 import aot
+import vec
+import fastmap
 
 print("--- 1. L12: Result<T, E> (Ok/Err), Option<T> (Some/None) & Toán tử '?' Zero-Cost ---")
 fn parse_positive(x: int):
@@ -155,5 +157,58 @@ with aot.compile_module(kernel_src, "tests/_tmp_v70_aot") as mod:
     assert mod.is_native == true, "AOT compiled native DLL successfully"
     res_aot = mod.call_i64("fast_collatz", "l", [10000])
     assert res_aot == fast_collatz_ref(10000), "AOT compiled native kernel matches T reference byte-for-byte"
+
+print("--- 6. U2 (v7.1): Unboxed VecI64 / VecF64, Fused Iterator & O(N) LSD Radix Sort ---")
+with vec.i64_range(1000) as vi:
+    assert vi.len() == 1000 and vi[500] == 500, "VecI64 range initialization and indexing"
+    assert vi.sum() == 499500, "VecI64 8-way unrolled sum"
+    # Fused map-filter-sum: sum_{x in 0..999} (x * 2 + 10) where (x * 2 + 10) >= 1000
+    # x * 2 + 10 >= 1000 <=> x >= 495 (505 elements: x = 495..999)
+    # sum = 505 * 10 + 2 * (495 + 999) * 505 / 2 = 5050 + 754470 = 759520
+    assert vi.fused_map_filter_sum(2, 10, 1000) == 759520, "VecI64 zero-cost fused_map_filter_sum"
+
+with vec.i64_rand(50000) as vr:
+    s_before = vr.sum()
+    vr.radix_sort()
+    s_after = vr.sum()
+    assert s_before == s_after, "LSD Radix Sort preserves exact sum of all 50,000 elements"
+    assert vr[0] <= vr[100] and vr[100] <= vr[25000] and vr[25000] <= vr[49999], "LSD Radix Sort orders elements monotonically"
+
+with vec.f64_fill(1000, 2.5) as vf1:
+    with vec.f64_fill(1000, 4.0) as vf2:
+        assert vf1.dot(vf2) == 10000.0, "VecF64 SIMD dot product"
+
+print("--- 7. U3 (v7.1): Unboxed Fibonacci HashMap (IntMap) & Zero-Copy String SIMD Kernels ---")
+with fastmap.int_map(128) as mp:
+    for i in range(500):
+        mp[i * 10] = i + 1
+    assert mp.len() == 500 and mp[2500] == 251 and mp.get(999999, -1) == -1, "IntMap Fibonacci open-addressing get/set"
+    mp.inc(2500, 49)
+    assert mp[2500] == 300, "IntMap atomic-style .inc()"
+
+s_sample = "abracadabra_rust_vs_t_abracadabra"
+assert fastmap.str_count_byte(s_sample, 97) == 10, "str_count_byte counts 'a' (97) 8-way unrolled"
+assert fastmap.str_find_fast(s_sample, "rust_vs_t") == 12, "str_find_fast zero-copy substring index"
+assert fastmap.str_fnv1a_64(s_sample) > 0, "str_fnv1a_64 64-bit hash"
+
+print("--- 8. P1 (v7.1): Rayon-Style Zero-Spawn Native C Thread Pool ---")
+c_par = thread.par_collatz(10001, 4)
+assert c_par == fast_collatz_ref(10000), "par_collatz 4-thread native pool matches sequential reference"
+
+with vec.i64_range(100000) as vp:
+    assert vp.par_sum(4) == 4999950000, "par_reduce_i64 4-thread native pool sum"
+
+with vec.f64_fill(10000, 3.0) as vfp:
+    vfp.par_scale_bias(2.0, 1.5, 4)
+    assert vfp[0] == 7.5 and vfp[9999] == 7.5, "par_map_f64 4-thread in-place scale+bias"
+
+print("--- 9. A2 (v7.1): AOT Native Compiler Array/Pointer Indexing & Mutation ---")
+ptr_kernel = "fn saxpy_sum(x: f64_ptr, y: f64_ptr, a: float, n: int) -> float:\n    mut total = 0.0\n    for i in range(n):\n        y[i] = y[i] + a * x[i]\n        total = total + y[i]\n    return total\n"
+with aot.compile_module(ptr_kernel, "tests/_tmp_v71_ptr_aot") as pmod:
+    assert pmod.is_native == true, "AOT compiled pointer kernel DLL"
+    with vec.f64_fill(1000, 2.0) as vx:
+        with vec.f64_fill(1000, 1.0) as vy:
+            tot = pmod.call_f64("saxpy_sum", "ppdl", [vx.ptr(), vy.ptr(), 3.5, 1000])
+            assert tot == 8000.0 and vy[0] == 8.0 and vy[999] == 8.0, "AOT pointer kernel mutates VecF64 in-place and returns exact sum"
 
 print("V70-RUST-OPT-ALL-GREEN")

@@ -1,18 +1,21 @@
-# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v7.0, 2026-11-08)
+# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v7.1, 2026-11-08)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`.\trun.exe tools\run_all.t` → ALL-GREEN** trên
 > Windows (MSVC 19.44): 52/52 bộ kiểm thử (7 subsystem + 45 `tests/*.t`), hoàn toàn tự thân
-> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G14 JIT x86-64 & J7–J9 JIT ARM64 (AArch64) + AOT Native Compiler (`std/aot.t`),
+> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G14 JIT x86-64 & J7–J9 JIT ARM64 (AArch64) + AOT Native Compiler hỗ trợ con trỏ/mảng (`std/aot.t` A2),
 > L9 (Generators `yield`, Context Manager `with`, Operator Overloading), L10–L12 (Optional Type Annotations, Static Type & Borrow/Exhaustiveness Checker `std/typecheck.t`, `Result`/`Option` & toán tử `?`),
 > L11 (Traits & Structural Pattern Matching), N4 (Native TCP/UDP Sockets `std/net.t` & `async`/`await` `std/async.t`),
-> S1 (`#[repr(C)]` Zero-Copy Struct Array `std/cstruct.t`, Lock-Free `AtomicInt`, `Mutex` & `SharedTensor` trong `std/thread.t`),
+> S1 (`#[repr(C)]` Zero-Copy Struct Array `std/cstruct.t` kèm L1 Cache Tiling, Lock-Free `AtomicInt`, `Mutex` & `SharedTensor` trong `std/thread.t`),
+> U2 (Unboxed Homogeneous Vectors `VecI64`/`VecF64`, Zero-Cost Iterator Fusion & 8-Pass $O(N)$ LSD Radix Sort trong `std/vec.t`),
+> U3 (Unboxed Fibonacci HashMap `IntMap` & Zero-Copy String SIMD Kernels trong `std/fastmap.t`),
+> P1 (Rayon-Style Zero-Spawn Native C Thread Pool `par_collatz`, `par_reduce_i64`, `par_map_f64` trong `std/thread.t`),
 > G14 (Multi-Dtype Native Tensor `f64`/`f32`/`f16`/`bf16`/`i32`/`i8`), T5 (Single-Binary Executable `--build-exe`),
 > M6 GPU cuBLAS (Tensor Cores FP16/BF16/FP32) & cuDNN Conv2D, M7 GPU Vulkan Compute Shader SPIR-V,
 > bảo mật bytecode/process/archive, tham số mặc định, thư viện chuẩn đầy đủ (`math`, `json`,
-> `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `net`, `async`, `typecheck`, `result`, `cstruct`, `aot`, `sqlite`, `ffi`, `mmap`, `gguf`,
+> `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `net`, `async`, `typecheck`, `result`, `cstruct`, `aot`, `vec`, `fastmap`, `sqlite`, `ffi`, `mmap`, `gguf`,
 > `safetensors`, `quant`, `transformer`, `cuda`, `cublas`, `cudnn`, `vulkan`, `base64`, `thread`, `autograd`, `ai`).
 >
-> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v7.0) và mục tiêu v4.0–v7.0 trong đó.
+> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v7.1) và mục tiêu v4.0–v7.1 trong đó.
 
 ## v3.0 — Tự thân hoàn toàn (`.t`), hoàn tất JIT G8/G9/G10/G12, chuẩn hóa bảo mật & stdlib
 

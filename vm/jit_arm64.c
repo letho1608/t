@@ -884,13 +884,15 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 if (!P->ic) { P->ic = (TAttrIC *)calloc(P->len ? P->len : 1, sizeof(TAttrIC)); }
                 if (P->ic[m->pc].kind != 4) {
                     uint32_t slen = (uint32_t)rd_i32_le(c + m->pc + 1);
+                    int32_t *blk = (int32_t *)calloc(1, 8 + slen + 1);
+                    blk[0] = 1000000; /* immortal cache ref */
+                    blk[1] = 0;       /* hash = 0 (uncomputed) */
                     TVal v;
                     v.t = T_STR; v.u.str.n = slen;
-                    v.u.str.s = (char *)malloc(slen + 1);
+                    v.u.str.refc = blk;
+                    v.u.str.s = (char *)(blk + 2);
                     if (slen) memcpy(v.u.str.s, c + m->pc + 5, slen);
                     v.u.str.s[slen] = '\0';
-                    v.u.str.refc = (int32_t *)malloc(sizeof(int32_t));
-                    *v.u.str.refc = 1;
                     TVal *keep = (TVal *)malloc(sizeof(TVal));
                     *keep = v;
                     P->ic[m->pc].kind = 4;
@@ -2092,14 +2094,16 @@ int t_arm64_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret) {
 /* ========================================================================= */
 
 static TVal a64_mk_bytes(const uint8_t *buf, size_t n) {
+    int32_t *blk = (int32_t *)calloc(1, 8 + n + 1);
+    blk[0] = 1000000;
+    blk[1] = 0;
     TVal v;
     v.t = T_STR;
     v.u.str.n = n;
-    v.u.str.s = (char *)malloc(n + 1);
+    v.u.str.refc = blk;
+    v.u.str.s = (char *)(blk + 2);
     if (n) memcpy(v.u.str.s, buf, n);
     v.u.str.s[n] = '\0';
-    v.u.str.refc = (int32_t *)malloc(sizeof(int32_t));
-    *v.u.str.refc = 1;
     return v;
 }
 

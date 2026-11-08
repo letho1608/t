@@ -93,3 +93,16 @@ fn spawn(script_path, args = []):
 
 fn join(handle):
     return _sys.thread_join(handle)
+
+# v7.1 P1: Rayon-Style Zero-Spawn Native C Thread Pool
+fn par_collatz(limit: int, nthreads = 4) -> int:
+    return _sys.par_collatz(limit, nthreads)
+
+fn par_reduce_i64(vec_or_handle, nthreads = 4) -> int:
+    h = vec_or_handle if type(vec_or_handle) == "int" else vec_or_handle.h
+    return _sys.par_reduce_i64(h, nthreads)
+
+fn par_map_f64(vec_or_handle, scale: float, bias: float, nthreads = 4):
+    h = vec_or_handle if type(vec_or_handle) == "int" else vec_or_handle.h
+    return _sys.par_map_f64(h, float(scale), float(bias), nthreads)
+
