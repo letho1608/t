@@ -365,11 +365,37 @@ fn cmd_release(av):
     else:
         cmd_pack(["dist"])
 
+fn cmd_build(av):
+    mut is_exe = false
+    mut args = []
+    for x in av:
+        if x == "--exe":
+            is_exe = true
+        else:
+            args.append(x)
+    mf = load_json(MANIFEST) if os.exists(MANIFEST) else {}
+    entry = args[0] if args.len > 0 else (mf["main"] if mf.has("main") else "main.t")
+    if not os.exists(entry):
+        die("khong tim thay entry " + entry)
+    mut out = args[1] if args.len > 1 else ""
+    if out == "":
+        base = mf["name"] if mf.has("name") else path.stem(entry)
+        out = base + (".exe" if is_exe else ".tb")
+    if is_exe:
+        _sys = load("__sys")
+        _sys.build_exe(entry, out)
+        print("built exe " + out)
+    else:
+        r = os.run([os.exepath(), "tcomp.tb", "-b", entry, out])
+        if r["rc"] != 0:
+            die(r["err"])
+        print("built " + out)
+
 fn main():
     raw = argv()
     a = raw[1:raw.len] if (raw.len > 0 and raw[0].endswith(".tb") or raw.len > 0 and raw[0].endswith(".t")) else raw
     if a.len == 0 or a[0] == "-h" or a[0] == "--help":
-        print("tpkg - Trinh quan ly goi cho Ngon ngu T (init|install|run|test|pack|publish|search|release)")
+        print("tpkg - Trinh quan ly goi cho Ngon ngu T (init|install|run|test|build|pack|publish|search|release)")
         return nil
     cmd = a[0]
     rest = a[1:a.len]
@@ -387,6 +413,8 @@ fn main():
         cmd_run(rest)
     elif cmd == "test":
         cmd_test(rest)
+    elif cmd == "build":
+        cmd_build(rest)
     elif cmd == "release":
         cmd_release(rest)
     else:

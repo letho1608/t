@@ -41,3 +41,10 @@ fn parse_prog(st):
         parse2.add_stmt(ss, parse2.parse_stmt(st))
     return ["prog", ss]
 
+fn reset_type_anns():
+    return parse2.reset_type_anns()
+
+fn get_type_anns():
+    return parse2.TYPE_ANNS[0]
+
+

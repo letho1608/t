@@ -45,11 +45,22 @@ struct TList {
     TVal *items;
 };
 
+enum {
+    TD_F64  = 0,
+    TD_F32  = 1,
+    TD_F16  = 2,
+    TD_BF16 = 3,
+    TD_I32  = 4,
+    TD_I8   = 5
+};
+
 struct TTensor {
     int32_t refc;
     size_t len;         /* tổng số phần tử */
     double *d;          /* row-major dày (view liền: trỏ vào bộ nhớ của base;
                            view theo bước: cache, xem ten_sync) */
+    void *raw;          /* G14: buffer nén theo dtype (float32/fp16/bf16/int32/int8); NULL nếu TD_F64 */
+    int dtype;          /* TD_F64 (mặc định = 0) .. TD_I8 */
     TTensor *base;      /* view: tensor sở hữu bộ nhớ (giữ ref); NULL = tự sở hữu */
     int ndim;           /* 1..8 */
     size_t shape[8];
@@ -329,6 +340,8 @@ typedef struct TProg {
 extern const char *tvm_exe_path;
 /* dịch file .t sang .tb bằng tcomp.tb (bundle=1 gộp import); 1 ok, -1 lỗi (msg) */
 int tvm_compile_src(const char *src, const char *out, int bundle, char *msg, size_t msgn);
+/* đóng gói file .t hoặc .tb thành file thực thi độc lập (kèm footer TBEXE001); 0 ok, -1 lỗi */
+int tvm_build_exe(const char *src_or_tb, const char *out_exe, char *msg, size_t msgn);
 /* đọc file .tb (TB01 + LN01/EX01 tuỳ chọn) vào p (memset trước); 0 ok, -1 lỗi (msg) */
 int tvm_read_tb(const char *path, TProg *p, char *msg, size_t msgn);
 /* giải phóng phần do tvm_read_tb cấp (code, bảng dòng, export, path) */

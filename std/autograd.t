@@ -12,6 +12,18 @@ NEXT_ID = [0]
 
 struct Node:
     val, grad, parents, backfn, op, id
+    fn __add__(self, b):
+        return add(self, b)
+    fn __sub__(self, b):
+        return sub(self, b)
+    fn __mul__(self, b):
+        return mul(self, b)
+    fn __div__(self, b):
+        return div(self, b)
+    fn __matmul__(self, b):
+        return matmul(self, b)
+    fn __neg__(self):
+        return mul(self, -1.0)
 
 fn mk(val, parents, backfn, op):
     NEXT_ID[0] += 1

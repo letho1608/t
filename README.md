@@ -1,11 +1,13 @@
-# Ngôn ngữ lập trình T — README (v5.2: 100% tự thân thuần `.t`, VM C + JIT x86-64/ARM64, Tensor n-D, GPU Vulkan/CUDA & Autograd)
+# Ngôn ngữ lập trình T — README (v6.0: 100% tự thân thuần `.t`, VM C + JIT x86-64/ARM64, Multi-Dtype Tensor, GPU Vulkan/CUDA, Autograd, Async/Net & Type Checker)
 
-Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều là kiểu nguyên thủy**, **AI-first**, hoàn toàn độc lập không phụ thuộc Python:
+Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều đa kiểu là kiểu nguyên thủy**, **AI-first**, hoàn toàn độc lập không phụ thuộc Python:
 
 | Thành phần | Lệnh | Ghi chú |
 |---|---|---|
 | Chạy trực tiếp file `.t` / `-c` | `trun prog.t` / `trun -c "print(1+2)"` | VM tự biên dịch ngầm qua `tcomp.tb` và thực thi với JIT |
 | Chạy bytecode `.tb` | `trun prog.tb` | Khởi động tức thời + JIT x86-64 / ARM64 + REPL (`trun`) |
+| Đóng gói file thực thi độc lập | `trun --build-exe prog.t app.exe` | Gộp VM + bytecode thành 1 file `.exe`/ELF chạy độc lập (`tpkg build --exe`) |
+| Kiểm tra kiểu tĩnh (Type Checker) | `trun tools/tcheck.t prog.t` | Kiểm tra tĩnh các chú thích kiểu tùy chọn (`std/typecheck.t`) |
 | Compiler tự thân thuần T | `trun tcomp.tb prog.t prog.tb` | `self/tcomp.t` tự biên dịch chính nó tới fixed point byte-identical |
 | Evaluator tự thân thuần T | `trun tools/tdriver.t prog.t` | `self/eval.t` chạy trên VM C khớp từng byte |
 
@@ -15,7 +17,7 @@ Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-l
 vm\build.bat                    # Windows (MSVC): build trun.exe + tự host tcomp.tb + trepl.tb
 sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tcomp.tb + trepl.tb
 
-.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 50 bộ test (7 subsystem + 43 tests/*.t) -> ALL-GREEN
+.\trun.exe tools\run_all.t      # Chạy TOÀN BỘ 51 bộ test (7 subsystem + 44 tests/*.t) -> ALL-GREEN
 .\trun.exe bench\bench.t        # Benchmark T (VM + JIT) đối chiếu trực tiếp với Python
 ```
 
@@ -100,6 +102,9 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import vulkan`: Khởi tạo Vulkan Loader + liệt kê đầy đủ physical devices (`name`, `vendor_id`, `device_id`, `type`, `api_version`) + biên dịch và thực thi trực tiếp Compute Shader nhị phân SPIR-V 1.0 trên GPU (`gemm_f32` và `gemm`/`matmul` với thuật toán phân rã mantissa Ozaki 4-lớp đạt chuẩn float64 `< 1e-13`). Máy không có Vulkan tự fallback CPU êm.
 - `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
 - `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
+- `import net`: TCP/UDP Sockets native (`tcp_listen`, `tcp_connect`, `udp_bind`, `TcpListener`, `TcpStream`, `UdpSocket`) và `HttpServer` nhúng.
+- `import async`: Lập lịch bất đồng bộ hợp tác (`EventLoop`, `Future`, `spawn`, `gather`, `sleep`, `run`) kết hợp cùng `async fn` / `await`.
+- `import typecheck`: Bộ kiểm tra kiểu tĩnh (`check_source`, `check_file`) cho các chú thích kiểu tùy chọn (`let x: int`, `fn f(a: int) -> str:`).
 
 ## Các chương trình mẫu (`examples/`)
 
@@ -115,11 +120,11 @@ print([x * x for x in range(5) if x % 2 == 0])
 - Tự động đóng ngoặc, thụt lề thông minh 4 spaces.
 - Tích hợp Language Server chuẩn (`tools/tlsp.t`).
 
-## JIT x86-64 (`vm/jit_x64.c`) & ARM64 (`vm/jit_arm64.c`) — Hoàn tất toàn bộ mục tiêu G1–G13 & J7
+## JIT x86-64 (`vm/jit_x64.c`) & ARM64 (`vm/jit_arm64.c`) — Hoàn tất toàn bộ mục tiêu G1–G14 & J7–J8
 
 - Biên dịch hàm sang mã máy x86-64 (Windows Win64 ABI & POSIX System V ABI) và ARM64 (AArch64 AAPCS64) + **OSR** cho vòng lặp trong hàm và vòng lặp top-level.
 - Hỗ trợ: `int`/`float`/`bool`/`nil`, biến cục bộ, `if/while/for range`, đệ quy & gọi hàm JIT chéo, đọc/ghi phần tử `list` có guard, tạo & đọc/ghi field `struct` (`SETATTR` cả ở OSR lẫn entry G8), hàm đệ quy trả `struct` (G9), cờ sở hữu động trên stack frame native cho biến nâng cấp `borrowed -> owned` (G10), `dict` (`{}`, literal `{"k": v}`, `d[k]`, `d[k] = v`, `d.get`, `d.has`, `d.remove`, `if d`) và chuỗi sở hữu được (`str()`, nối chuỗi, `s[i]`, truyền chuỗi mới vào hàm T, G7/G11/G12).
-- Trên ARM64 (`vm/jit_arm64.c`): Trình biên dịch Bytecode → AArch64 hoàn chỉnh với thông dịch trừu tượng suy diễn kiểu, 4 bản đặc hoá / hàm, số học `int64` kiểm tràn (`adds`/`subs` + `b.vs` deopt, floor-div/mod), số học `float64`, toán tử bitwise 64-bit, `list` (`OP_IDX`/`OP_SETIDX`/`OP_LEN`), đệ quy `bl`, OSR + Deopt, kèm bộ giả lập thực thi mã máy AArch64 (`a64_sim_exec`) kiểm chứng chéo ngay trên x86-64.
+- Trên ARM64 (`vm/jit_arm64.c`): Trình biên dịch Bytecode → AArch64 hoàn chỉnh với thông dịch trừu tượng suy diễn kiểu, 4 bản đặc hoá / hàm, số học `int64` kiểm tràn (`adds`/`subs` + `b.vs` deopt, floor-div/mod), số học `float64`, toán tử bitwise 64-bit, `list` (`OP_IDX`/`OP_SETIDX`/`OP_LEN`), `struct` (`OP_ATTR`/`OP_SETATTR`/`NAT___NEW`), `dict` (`OP_NEW_DICT`/`OP_IDX`/`OP_SETIDX`/`get`/`has`/`remove`), `str` (`OP_PUSH_STR`/`NAT_STR`/concat/eq/idx/len), đệ quy `bl`, OSR + Deopt, kèm bộ giả lập thực thi mã máy AArch64 (`a64_sim_exec`) kiểm chứng chéo ngay trên x86-64.
 - Bảo mật VM (`vm/tvm.c`): Bộ kiểm tra bytecode (`verify_bytecode`) kiểm tra tính hợp lệ của opcode, độ dài lệnh, chỉ số global, bảng `LN01`/`EX01` trước khi nạp; khởi tạo tiến trình con không qua shell; kiểm tra đường dẫn chống path traversal khi giải nén gói.
 
 ## Bộ công cụ thuần T (`tools/*.t`)
@@ -128,8 +133,9 @@ print([x * x for x in range(5) if x % 2 == 0])
 |---|---|
 | REPL | `trun` (nạp `trepl.tb` biên dịch từ `tools/repl.t`) |
 | Debugger | `trun -d prog.tb` (`s` step, `b pc`, `c`, `p` stack, `l` locals, `g`, `d` disasm) |
+| Type Checker | `trun tools/tcheck.t prog.t` |
 | Formatter | `trun tools/ffmt.t [--check] prog.t` |
 | LSP Server | `trun tools/tlsp.t` (hover, definition, references, rename, completion, symbols, diagnostics) |
-| Package Manager | `trun tools/tpkg.t init\|install\|run\|test\|pack\|publish\|search\|release` |
+| Package Manager | `trun tools/tpkg.t init\|install\|run\|test\|build [--exe]\|pack\|publish\|search\|release` |
 | Test Runner | `trun tools/run_all.t` |
 | Benchmark | `trun bench/bench.t` |

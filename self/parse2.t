@@ -59,7 +59,7 @@ fn gensym(kind):
 
 fn eat_name(st):
     t = st[0][st[1]]
-    if t[0] != "NAME":
+    if t[0] != "NAME" and not (t[0] == "KW" and t[1] == "async"):
         raise tok_line(t) + "want NAME"
     st[1] = st[1] + 1
     return t[1]
@@ -70,6 +70,136 @@ fn parse_names(st):
         st[1] = st[1] + 1
         ns.append(eat_name(st))
     return ns
+
+# --- Type Annotations (v6.0 L10) ---
+# Lưu thông tin kiểu của biến, hàm, struct để std/typecheck.t kiểm tra tĩnh
+TYPE_ANNS = [{"vars": {}, "fns": {}, "structs": {}, "traits": {}}]
+
+fn reset_type_anns():
+    TYPE_ANNS[0] = {"vars": {}, "fns": {}, "structs": {}, "traits": {}}
+    return nil
+
+fn parse_type_ann(st):
+    t = st[0][st[1]]
+    mut base = ""
+    if t[0] == "NAME" or t[0] == "KW":
+        base = t[1]
+        st[1] = st[1] + 1
+    else:
+        raise tok_line(t) + "want type name"
+    if is_op(st[0][st[1]], "["):
+        st[1] = st[1] + 1
+        mut subs = [parse_type_ann(st)]
+        while is_op(st[0][st[1]], ","):
+            st[1] = st[1] + 1
+            subs.append(parse_type_ann(st))
+        eat_op(st, "]")
+        base = base + "[" + ", ".join(subs) + "]"
+    while is_op(st[0][st[1]], "|"):
+        st[1] = st[1] + 1
+        base = base + " | " + parse_type_ann(st)
+    return base
+
+# --- Structural Pattern Matching (v6.0 L11) ---
+# Hỗ trợ:
+#   - Wildcard: case _:
+#   - Literal / biểu thức: case 1, 2:
+#   - List destructuring: case [a, b]: hoặc case [head, *tail]:
+#   - Dict destructuring: case {"k": v, "x": 10}:
+#   - Struct destructuring: case Point(0, y):
+#   - Guard: case pat if cond:
+fn is_pat_bind_name(nm):
+    if nm == "_":
+        return true
+    c = ord(nm[0:1])
+    # chữ thường a..z hoặc _ là biến bind mới trong pattern destructuring
+    return (c >= 97 and c <= 122) or nm[0:1] == "_"
+
+fn compile_subpat(val_expr, pat, conds, binds):
+    k = pat[0]
+    if k == "var":
+        nm = pat[1]
+        if nm == "_":
+            return nil
+        if is_pat_bind_name(nm):
+            binds.append(["decl", "mut", nm, val_expr])
+            return nil
+        conds.append(["bin", "==", val_expr, pat])
+        return nil
+    if k == "list":
+        items = pat[1]
+        mut star_idx = -1
+        mut i = 0
+        while i < items.len:
+            it = items[i]
+            if it[0] == "pat_star":
+                star_idx = i
+            i = i + 1
+        conds.append(["bin", "==", ["bltin", "type", [val_expr]], ["str", "list"]])
+        if star_idx < 0:
+            conds.append(["bin", "==", ["attr", val_expr, "len"], ["num", str(items.len)]])
+            mut j = 0
+            while j < items.len:
+                compile_subpat(["idx", val_expr, ["num", str(j)]], items[j], conds, binds)
+                j = j + 1
+        else:
+            conds.append(["bin", ">=", ["attr", val_expr, "len"], ["num", str(items.len - 1)]])
+            mut j = 0
+            while j < star_idx:
+                compile_subpat(["idx", val_expr, ["num", str(j)]], items[j], conds, binds)
+                j = j + 1
+            star_nm = items[star_idx][1]
+            if star_nm != "_":
+                binds.append(["decl", "mut", star_nm, ["slice", val_expr, ["num", str(star_idx)], nil, nil]])
+        return nil
+    if k == "dict":
+        ks = pat[1]
+        vs = pat[2]
+        conds.append(["bin", "==", ["bltin", "type", [val_expr]], ["str", "dict"]])
+        mut j = 0
+        while j < ks.len:
+            kj = ks[j]
+            vj = vs[j]
+            conds.append(["bin", "in", kj, val_expr])
+            compile_subpat(["idx", val_expr, kj], vj, conds, binds)
+            j = j + 1
+        return nil
+    if k == "call" and pat[1][0] == "var":
+        sname = pat[1][1]
+        pargs = pat[2]
+        conds.append(["bin", "==", ["bltin", "type", [val_expr]], ["str", sname]])
+        sfields = TYPE_ANNS[0]["structs"].get(sname, nil)
+        mut j = 0
+        while j < pargs.len:
+            if sfields != nil and j < sfields.len:
+                fname = sfields[j][0]
+                compile_subpat(["attr", val_expr, fname], pargs[j], conds, binds)
+            j = j + 1
+        return nil
+    conds.append(["bin", "==", val_expr, pat])
+    return nil
+
+fn parse_pat_atom(st):
+    t = st[0][st[1]]
+    if is_op(t, "["):
+        st[1] = st[1] + 1
+        mut items = []
+        if not is_op(st[0][st[1]], "]"):
+            if is_op(st[0][st[1]], "*"):
+                st[1] = st[1] + 1
+                items.append(["pat_star", eat_name(st)])
+            else:
+                items.append(parse_pat_atom(st))
+            while is_op(st[0][st[1]], ","):
+                st[1] = st[1] + 1
+                if is_op(st[0][st[1]], "*"):
+                    st[1] = st[1] + 1
+                    items.append(["pat_star", eat_name(st)])
+                else:
+                    items.append(parse_pat_atom(st))
+        eat_op(st, "]")
+        return ["list", items]
+    return parse_or(st)
 
 fn parse_switch(st):
     st[1] = st[1] + 1
@@ -82,12 +212,16 @@ fn parse_switch(st):
         t = st[0][st[1]]
         if is_kw(t, "case"):
             st[1] = st[1] + 1
-            mut vs = [parse_expr(st)]
+            mut vs = [parse_pat_atom(st)]
             while is_op(st[0][st[1]], ","):
                 st[1] = st[1] + 1
-                vs.append(parse_expr(st))
+                vs.append(parse_pat_atom(st))
+            mut guard = nil
+            if is_kw(st[0][st[1]], "if"):
+                st[1] = st[1] + 1
+                guard = parse_or(st)
             eat_op(st, ":")
-            cases.append([vs, parse_suite(st)])
+            cases.append([vs, parse_suite(st), guard])
         elif is_kw(t, "default"):
             st[1] = st[1] + 1
             eat_op(st, ":")
@@ -99,49 +233,207 @@ fn parse_switch(st):
     mut b = dflt
     mut i = cases.len - 1
     while i >= 0:
-        mut c = nil
-        for v in cases[i][0]:
-            eq = ["bin", "==", ["var", tmp], v]
-            if c == nil:
-                c = eq
+        vs = cases[i][0]
+        suite = cases[i][1]
+        guard = cases[i][2]
+        if vs.len == 1:
+            pat = vs[0]
+            mut conds = []
+            mut binds = []
+            if pat[0] == "var" and pat[1] == "_":
+                # wildcard _
+                conds = []
+            elif pat[0] == "list" or pat[0] == "dict" or (pat[0] == "call" and pat[1][0] == "var" and TYPE_ANNS[0]["structs"].has(pat[1][1])):
+                compile_subpat(["var", tmp], pat, conds, binds)
+            elif pat[0] == "var" and guard != nil and is_pat_bind_name(pat[1]):
+                binds.append(["decl", "mut", pat[1], ["var", tmp]])
             else:
-                c = ["bin", "or", c, eq]
-        b = [["if", c, cases[i][1], b]]
+                conds.append(["bin", "==", ["var", tmp], pat])
+            mut c = nil
+            for ce in conds:
+                if c == nil:
+                    c = ce
+                else:
+                    c = ["bin", "and", c, ce]
+            if c == nil:
+                c = ["lit", "true"]
+            mut body_i = []
+            for bd in binds:
+                body_i.append(bd)
+            if guard != nil:
+                # Nếu có guard và có binds, phải tính binds trước khi kiểm guard -> dùng cờ $m
+                if binds.len > 0:
+                    c = ["bin", "and", c, ["lit", "true"]]
+                    # Thay thế bằng nhánh lồng: nếu conds khớp -> gán binds -> nếu guard khớp -> chạy suite
+                else:
+                    c = ["bin", "and", c, guard]
+            for st_item in suite:
+                body_i.append(st_item)
+            if guard != nil and binds.len > 0:
+                # Dùng biến cờ $gm để nếu guard sai thì rơi xuống nhánh dưới (b)
+                gm = gensym("gm")
+                mut try_b = []
+                for bd in binds:
+                    try_b.append(bd)
+                mut guarded_suite = [["assign", ["var", gm], ["lit", "true"]]]
+                for st_item in suite:
+                    guarded_suite.append(st_item)
+                try_b.append(["if", guard, guarded_suite, nil])
+                mut seq_b = [["decl", "mut", gm, ["lit", "false"]], ["if", c, try_b, nil]]
+                if b != nil:
+                    seq_b.append(["if", ["un", "not", ["var", gm]], b, nil])
+                b = seq_b
+            else:
+                b = [["if", c, body_i, b]]
+        else:
+            mut c = nil
+            for v in vs:
+                eq = ["bin", "==", ["var", tmp], v]
+                if c == nil:
+                    c = eq
+                else:
+                    c = ["bin", "or", c, eq]
+            if guard != nil:
+                c = ["bin", "and", c, guard]
+            b = [["if", c, suite, b]]
         i = i - 1
     mut out = [["decl", "let", tmp, subj]]
     if b != nil:
-        if cases.len > 0:
-            out.append(b[0])
-        else:
-            out.append(["if", ["lit", "true"], b, nil])
+        for bi in b:
+            out.append(bi)
     return ["multi", out]
+
+# --- Traits / Interfaces (v6.0 L11) ---
+TRAITS = [{}]
+
+fn parse_trait(st):
+    st[1] = st[1] + 1
+    tname = eat_name(st)
+    eat_op(st, ":")
+    eat_ind(st)
+    mut reqs = []
+    mut dflts = []
+    while not is_ded(st):
+        t = st[0][st[1]]
+        if is_kw(t, "fn"):
+            st[1] = st[1] + 1
+            mname = eat_name(st)
+            eat_op(st, "(")
+            mut args = []
+            if not is_op(st[0][st[1]], ")"):
+                p0 = eat_name(st)
+                if is_op(st[0][st[1]], ":"):
+                    st[1] = st[1] + 1
+                    parse_type_ann(st)
+                args.append(p0)
+                while is_op(st[0][st[1]], ","):
+                    st[1] = st[1] + 1
+                    pn = eat_name(st)
+                    if is_op(st[0][st[1]], ":"):
+                        st[1] = st[1] + 1
+                        parse_type_ann(st)
+                    args.append(pn)
+            eat_op(st, ")")
+            if is_op(st[0][st[1]], "->"):
+                st[1] = st[1] + 1
+                parse_type_ann(st)
+            if is_op(st[0][st[1]], ":"):
+                st[1] = st[1] + 1
+                body = parse_suite(st)
+                dflts.append(["fn", mname, args, body])
+            else:
+                reqs.append([mname, args.len])
+        else:
+            raise tok_line(t) + "want fn in trait"
+    eat_ded(st)
+    TRAITS[0][tname] = {"reqs": reqs, "dflts": dflts}
+    TYPE_ANNS[0]["traits"][tname] = {"reqs": reqs, "dflts": dflts}
+    return ["multi", []]
 
 fn parse_struct(st):
     st[1] = st[1] + 1
     name = eat_name(st)
+    mut impl_traits = []
+    if is_op(st[0][st[1]], "("):
+        st[1] = st[1] + 1
+        if not is_op(st[0][st[1]], ")"):
+            impl_traits.append(eat_name(st))
+            while is_op(st[0][st[1]], ","):
+                st[1] = st[1] + 1
+                impl_traits.append(eat_name(st))
+        eat_op(st, ")")
     eat_op(st, ":")
     eat_ind(st)
     mut fields = []
+    mut field_anns = []
     mut meths = []
     while not is_ded(st):
         t = st[0][st[1]]
-        if is_kw(t, "fn"):
-            meths.append(parse_stmt(st))
+        if is_kw(t, "fn") or (is_kw(t, "async") and is_kw(st[0][st[1] + 1], "fn")):
+            ms = parse_stmt(st)
+            if ms[0] == "multi":
+                for mx in ms[1]:
+                    meths.append(mx)
+            else:
+                meths.append(ms)
         elif t[0] == "NAME":
-            for f in parse_names(st):
+            f0 = eat_name(st)
+            mut fty = "any"
+            if is_op(st[0][st[1]], ":"):
+                st[1] = st[1] + 1
+                fty = parse_type_ann(st)
                 for g in fields:
-                    if g == f:
-                        raise tok_line(t) + "trùng field " + f
-                fields.append(f)
+                    if g == f0:
+                        raise tok_line(t) + "trùng field " + f0
+                fields.append(f0)
+                field_anns.append([f0, fty])
+            else:
+                mut fs = [f0]
+                while is_op(st[0][st[1]], ","):
+                    st[1] = st[1] + 1
+                    fs.append(eat_name(st))
+                if is_op(st[0][st[1]], ":"):
+                    st[1] = st[1] + 1
+                    fty = parse_type_ann(st)
+                for f in fs:
+                    for g in fields:
+                        if g == f:
+                            raise tok_line(t) + "trùng field " + f
+                    fields.append(f)
+                    field_anns.append([f, fty])
         else:
             raise tok_line(t) + "want field/fn in struct"
     eat_ded(st)
+    TYPE_ANNS[0]["structs"][name] = field_anns
+    # Kiểm tra và kế thừa các method từ trait
+    for tr_name in impl_traits:
+        if not TRAITS[0].has(tr_name):
+            raise "struct " + name + " implements unknown trait " + tr_name
+        tr_info = TRAITS[0][tr_name]
+        for dm in tr_info["dflts"]:
+            mut has_m = false
+            for m in meths:
+                if m[0] == "fn" and m[1] == dm[1]:
+                    has_m = true
+            if not has_m:
+                meths.append(dm)
+        for req in tr_info["reqs"]:
+            rname = req[0]
+            mut has_req = false
+            for m in meths:
+                if m[0] == "fn" and m[1] == rname:
+                    has_req = true
+            if not has_req:
+                raise "struct " + name + " thiếu method '" + rname + "' của trait " + tr_name
     mut out = []
     for m in meths:
-        if m.len > 4:
-            out.append(["fn", name + "__" + m[1], m[2], m[3], m[4]])
+        if m[0] == "fn":
+            if m.len > 4:
+                out.append(["fn", name + "__" + m[1], m[2], m[3], m[4]])
+            else:
+                out.append(["fn", name + "__" + m[1], m[2], m[3]])
         else:
-            out.append(["fn", name + "__" + m[1], m[2], m[3]])
+            out.append(m)
     mut fstrs = []
     mut fvars = []
     for f in fields:
@@ -150,8 +442,9 @@ fn parse_struct(st):
     mut mks = []
     mut mvs = []
     for m in meths:
-        mks.append(["str", m[1]])
-        mvs.append(["var", name + "__" + m[1]])
+        if m[0] == "fn":
+            mks.append(["str", m[1]])
+            mvs.append(["var", name + "__" + m[1]])
     # let P__type = __struct("P", [fields], {methods}) ; fn P(x, y): return __new(P__type, x, y)
     tp = name + "__type"
     out.append(["decl", "let", tp, ["call", ["var", "__struct"], [["str", name], ["list", fstrs], ["dict", mks, mvs]]]])
@@ -238,9 +531,15 @@ fn parse_lambda(st):
         if is_op(st[0][st[1]], "*"):
             st[1] = st[1] + 1
             args.append(eat_name(st))
+            if is_op(st[0][st[1]], ":"):
+                st[1] = st[1] + 1
+                parse_type_ann(st)
             is_va = true
         else:
             args.append(eat_name(st))
+            if is_op(st[0][st[1]], ":"):
+                st[1] = st[1] + 1
+                parse_type_ann(st)
         while is_op(st[0][st[1]], ","):
             if is_va:
                 raise tok_line(st[0][st[1]]) + "*args phải ở cuối"
@@ -248,10 +547,19 @@ fn parse_lambda(st):
             if is_op(st[0][st[1]], "*"):
                 st[1] = st[1] + 1
                 args.append(eat_name(st))
+                if is_op(st[0][st[1]], ":"):
+                    st[1] = st[1] + 1
+                    parse_type_ann(st)
                 is_va = true
             else:
                 args.append(eat_name(st))
+                if is_op(st[0][st[1]], ":"):
+                    st[1] = st[1] + 1
+                    parse_type_ann(st)
     eat_op(st, ")")
+    if is_op(st[0][st[1]], "->"):
+        st[1] = st[1] + 1
+        parse_type_ann(st)
     eat_op(st, ":")
     PEND.append([])
     body = parse_expr(st)
@@ -263,6 +571,74 @@ fn parse_lambda(st):
     else:
         hoist(["fn", name, args, fb])
     return ["var", name]
+
+# --- Generator yield (v6.0 L9) ---
+fn has_yield_stmt(s):
+    k = s[0]
+    if k == "yield":
+        return true
+    if k == "fn":
+        return false
+    if k == "if":
+        if has_yield_list(s[2]):
+            return true
+        if s[3] != nil and has_yield_list(s[3]):
+            return true
+        return false
+    if k == "while":
+        return has_yield_list(s[2])
+    if k == "for":
+        return has_yield_list(s[3])
+    if k == "try":
+        if has_yield_list(s[1]):
+            return true
+        for h in s[2]:
+            if has_yield_list(h[1]):
+                return true
+        return false
+    if k == "multi":
+        return has_yield_list(s[1])
+    return false
+
+fn has_yield_list(ss):
+    for s in ss:
+        if has_yield_stmt(s):
+            return true
+    return false
+
+fn rw_yield_stmt(s, gv):
+    k = s[0]
+    if k == "yield":
+        return ["expr", ["call", ["attr", ["var", gv], "append"], [s[1]]]]
+    if k == "ret":
+        if s[1] != nil and not (s[1][0] == "lit" and s[1][1] == "nil"):
+            return ["multi", [["expr", ["call", ["attr", ["var", gv], "append"], [s[1]]]], ["ret", ["var", gv]]]]
+        return ["ret", ["var", gv]]
+    if k == "fn":
+        return s
+    if k == "if":
+        mut b2 = nil
+        if s[3] != nil:
+            b2 = rw_yield_list(s[3], gv)
+        return ["if", s[1], rw_yield_list(s[2], gv), b2]
+    if k == "while":
+        return ["while", s[1], rw_yield_list(s[2], gv)]
+    if k == "for":
+        return ["for", s[1], s[2], rw_yield_list(s[3], gv)]
+    if k == "try":
+        mut hs2 = []
+        for h in s[2]:
+            hs2.append([h[0], rw_yield_list(h[1], gv)])
+        return ["try", rw_yield_list(s[1], gv), hs2]
+    if k == "multi":
+        return ["multi", rw_yield_list(s[1], gv)]
+    return s
+
+fn rw_yield_list(ss, gv):
+    mut out = []
+    for s in ss:
+        add_stmt(out, rw_yield_stmt(s, gv))
+    return out
 
 # Khử đường cú pháp try ... [except ...] finally: fin
 fn rw_fin_stmt(s, fd, fin, ldepth):
@@ -386,29 +762,75 @@ fn parse_stmt0(st):
             return parse_switch(st)
         if t[1] == "struct":
             return parse_struct(st)
+        if t[1] == "trait":
+            return parse_trait(st)
+        if t[1] == "with":
+            st[1] = st[1] + 1
+            res_expr = parse_expr(st)
+            mut as_var = nil
+            if is_kw(st[0][st[1]], "as"):
+                st[1] = st[1] + 1
+                as_var = eat_name(st)
+            eat_op(st, ":")
+            wbody = parse_suite(st)
+            wv = gensym("w")
+            mut ibody = []
+            if as_var != nil:
+                ibody.append(["decl", "mut", as_var, ["bltin", "close", [["var", wv], ["num", "1"]]]])
+            else:
+                ibody.append(["expr", ["bltin", "close", [["var", wv], ["num", "1"]]]])
+            for ws in wbody:
+                ibody.append(ws)
+            fin = [["expr", ["bltin", "close", [["var", wv]]]]]
+            tf = make_try_fin(ibody, [], fin)
+            mut out = [["decl", "let", wv, res_expr]]
+            for ts in tf[1]:
+                out.append(ts)
+            return ["multi", out]
+        if t[1] == "yield":
+            st[1] = st[1] + 1
+            return ["yield", parse_expr(st)]
         if t[1] == "let" or t[1] == "mut":
             st[1] = st[1] + 1
             nm = st[0][st[1]][1]
             st[1] = st[1] + 1
+            if is_op(st[0][st[1]], ":"):
+                st[1] = st[1] + 1
+                vty = parse_type_ann(st)
+                TYPE_ANNS[0]["vars"][nm] = vty
             eat_op(st, "=")
             return ["decl", t[1], nm, parse_expr(st)]
-        if t[1] == "fn":
+        if t[1] == "fn" or (t[1] == "async" and is_kw(st[0][st[1] + 1], "fn")):
+            if t[1] == "async":
+                st[1] = st[1] + 1
             st[1] = st[1] + 1
             nm = st[0][st[1]][1]
             st[1] = st[1] + 1
             eat_op(st, "(")
             mut args = []
+            mut param_anns = []
             mut defs = []
             mut is_va = false
             if not is_op(st[0][st[1]], ")"):
                 if is_op(st[0][st[1]], "*"):
                     st[1] = st[1] + 1
-                    args.append(eat_name(st))
+                    p0 = eat_name(st)
+                    args.append(p0)
+                    mut pty = "any"
+                    if is_op(st[0][st[1]], ":"):
+                        st[1] = st[1] + 1
+                        pty = parse_type_ann(st)
+                    param_anns.append([p0, pty])
                     is_va = true
                 else:
                     p0 = st[0][st[1]][1]
                     args.append(p0)
                     st[1] = st[1] + 1
+                    mut pty = "any"
+                    if is_op(st[0][st[1]], ":"):
+                        st[1] = st[1] + 1
+                        pty = parse_type_ann(st)
+                    param_anns.append([p0, pty])
                     if is_op(st[0][st[1]], "="):
                         st[1] = st[1] + 1
                         defs.append([p0, parse_expr(st)])
@@ -420,20 +842,43 @@ fn parse_stmt0(st):
                         if defs.len > 0:
                             raise tok_line(st[0][st[1]]) + "không kết hợp tham số mặc định và *args"
                         st[1] = st[1] + 1
-                        args.append(eat_name(st))
+                        pn = eat_name(st)
+                        args.append(pn)
+                        mut pty = "any"
+                        if is_op(st[0][st[1]], ":"):
+                            st[1] = st[1] + 1
+                            pty = parse_type_ann(st)
+                        param_anns.append([pn, pty])
                         is_va = true
                     else:
                         pn = st[0][st[1]][1]
                         args.append(pn)
                         st[1] = st[1] + 1
+                        mut pty = "any"
+                        if is_op(st[0][st[1]], ":"):
+                            st[1] = st[1] + 1
+                            pty = parse_type_ann(st)
+                        param_anns.append([pn, pty])
                         if is_op(st[0][st[1]], "="):
                             st[1] = st[1] + 1
                             defs.append([pn, parse_expr(st)])
                         elif defs.len > 0:
                             raise tok_line(st[0][st[1]]) + "tham số không mặc định sau tham số mặc định"
             eat_op(st, ")")
+            mut ret_ty = "any"
+            if is_op(st[0][st[1]], "->"):
+                st[1] = st[1] + 1
+                ret_ty = parse_type_ann(st)
+            TYPE_ANNS[0]["fns"][nm] = {"params": param_anns, "ret": ret_ty}
             eat_op(st, ":")
-            body = parse_suite(st)
+            mut body = parse_suite(st)
+            if has_yield_list(body):
+                gv = gensym("g")
+                mut gbody = [["decl", "mut", gv, ["list", []]]]
+                for gs in rw_yield_list(body, gv):
+                    gbody.append(gs)
+                gbody.append(["ret", ["var", gv]])
+                body = gbody
             if is_va:
                 return ["fn", nm, args, body, -1]
             if defs.len == 0:
@@ -681,6 +1126,9 @@ fn parse_mul(st):
     return e
 
 fn parse_un(st):
+    if is_kw(st[0][st[1]], "await"):
+        st[1] = st[1] + 1
+        return parse_un(st)
     if is_op(st[0][st[1]], "-") or is_op(st[0][st[1]], "~"):
         op = st[0][st[1]][1]
         st[1] = st[1] + 1
@@ -830,6 +1278,11 @@ fn parse_atom(st):
         st[1] = st[1] + 1
         eat_op(st, "(")
         e = parse_expr(st)
+        if is_op(st[0][st[1]], ","):
+            st[1] = st[1] + 1
+            dt = parse_expr(st)
+            eat_op(st, ")")
+            return ["bltin", "tensor", [e, dt]]
         eat_op(st, ")")
         return ["tensor", e]
     if t[0] == "KW" and is_bltin_name(t[1]):
@@ -843,7 +1296,7 @@ fn parse_atom(st):
                 a.append(parse_expr(st))
         eat_op(st, ")")
         return ["bltin", t[1], a]
-    if t[0] == "NAME":
+    if t[0] == "NAME" or (t[0] == "KW" and t[1] == "async"):
         st[1] = st[1] + 1
         return ["var", t[1]]
     if t[0] == "KW" and t[1] == "print":

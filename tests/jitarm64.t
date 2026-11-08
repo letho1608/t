@@ -48,6 +48,38 @@ fn list_sieve_sum(xs):
 fn div_maybe_deopt(a, b):
     return a % b
 
+struct Vec2:
+    x
+    y
+
+fn vec_step(p, n):
+    mut i = 0
+    while i < n:
+        p.x = p.x + p.y + i
+        p.y = p.y + 1
+        i = i + 1
+    return Vec2(p.x, p.y)
+
+fn dict_counter(d, n):
+    mut i = 0
+    while i < n:
+        d["cnt"] = d.get("cnt", 0) + i
+        d[i] = i * 2
+        i = i + 1
+    if d.has(2):
+        d.remove(2)
+    return d["cnt"] + len(d)
+
+fn str_builder(prefix, n):
+    mut s = prefix
+    mut i = 1
+    while i <= n:
+        s = s + "-" + str(i)
+        i = i + 1
+    if s == "k-1-2-3" and s[0] == "k":
+        return len(s)
+    return 0
+
 fn main():
     assert sys.arm64_selftest() == true, "arm64 emitter lech oracle byte"
     print("arm64 selftest OK")
@@ -108,6 +140,31 @@ fn main():
     # 7. Kiểm tra Deopt an toàn khi chia dư và tràn
     assert sys.arm64_run(div_maybe_deopt, -17, 5) == (-17 % 5)
     print("arm64_run floor mod & deopt guard OK")
+
+    # 8. J8: Struct (OP_ATTR, OP_SETATTR, NAT___NEW) trên AArch64
+    let p_in = Vec2(10, 3)
+    assert sys.arm64_compile(vec_step, p_in, 5).len > 0
+    let p_out = sys.arm64_run(vec_step, Vec2(10, 3), 20)
+    let p_ref = vec_step(Vec2(10, 3), 20)
+    assert p_out.x == p_ref.x and p_out.y == p_ref.y
+    print("arm64_run J8 struct (ATTR/SETATTR/__new) =", p_out.x, p_out.y, "OK")
+
+    # 9. J8: Dict (OP_IDX, OP_SETIDX, get, has, remove, len) trên AArch64
+    let d_in = {"cnt": 5}
+    assert sys.arm64_compile(dict_counter, d_in, 6).len > 0
+    let d1 = {"cnt": 5}
+    let d2 = {"cnt": 5}
+    let dc_got = sys.arm64_run(dict_counter, d1, 10)
+    let dc_ref = dict_counter(d2, 10)
+    assert dc_got == dc_ref and d1["cnt"] == d2["cnt"] and not d1.has(2)
+    print("arm64_run J8 dict (get/set/has/remove/len) =", dc_got, "OK")
+
+    # 10. J8: Str (OP_PUSH_STR, NAT_STR, OP_ADD concat, OP_EQ, OP_IDX, OP_LEN) trên AArch64
+    assert sys.arm64_compile(str_builder, "k", 3).len > 0
+    let sb_got = sys.arm64_run(str_builder, "k", 3)
+    let sb_ref = str_builder("k", 3)
+    assert sb_got == sb_ref and sb_got == 7
+    print("arm64_run J8 str (concat/str/eq/idx/len) =", sb_got, "OK")
 
 main()
 print("All jit-arm64 tests passed successfully!")

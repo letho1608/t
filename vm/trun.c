@@ -144,12 +144,61 @@ static int find_repl(const char *argv0, char *out, size_t n) {
 static void usage(void) {
     fprintf(stderr,
         "T %s — usage:\n"
-        "  trun prog.t [args...]    biên dịch & chạy trực tiếp file nguồn .t\n"
-        "  trun prog.tb [args...]   chạy bytecode .tb\n"
-        "  trun -c \"code\" [args...] chạy đoạn mã T trực tiếp\n"
-        "  trun -d prog.t|.tb       debugger từng lệnh\n"
-        "  trun                     REPL (cần trepl.tb)\n"
+        "  trun prog.t [args...]                biên dịch & chạy trực tiếp file nguồn .t\n"
+        "  trun prog.tb [args...]               chạy bytecode .tb\n"
+        "  trun -c \"code\" [args...]             chạy đoạn mã T trực tiếp\n"
+        "  trun --build-exe <src.t|.tb> <out>   đóng gói thành file thực thi độc lập\n"
+        "  trun -d prog.t|.tb                   debugger từng lệnh\n"
+        "  trun                                 REPL (cần trepl.tb)\n"
         "  trun --version\n", TRUN_VERSION);
+}
+
+/* Kiểm tra xem chính file thực thi hiện tại có nhúng bytecode ở cuối (footer TBEXE001) không.
+   Nếu có, trích xuất ra file tạm .tb và chạy với toàn bộ đối số dòng lệnh. */
+static int check_embedded_exe(int argc, char **argv, int *out_rc) {
+    if (!tvm_exe_path) return 0;
+    FILE *f = fopen(tvm_exe_path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long fsz = ftell(f);
+    if (fsz <= 24) { fclose(f); return 0; }
+    if (fseek(f, fsz - 16, SEEK_SET) != 0) { fclose(f); return 0; }
+    unsigned char tail[16];
+    if (fread(tail, 1, 16, f) != 16 || memcmp(tail + 8, "TBEXE001", 8) != 0) {
+        fclose(f);
+        return 0;
+    }
+    uint64_t tb_sz = 0;
+    memcpy(&tb_sz, tail, 8);
+    if (tb_sz == 0 || (long)(tb_sz + 16) >= fsz) {
+        fclose(f);
+        return 0;
+    }
+    if (fseek(f, fsz - 16 - (long)tb_sz, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    unsigned char *buf = (unsigned char*)malloc((size_t)tb_sz);
+    if (!buf || fread(buf, 1, (size_t)tb_sz, f) != (size_t)tb_sz) {
+        free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    if (tb_sz < 4 || memcmp(buf, "TB01", 4) != 0) {
+        free(buf);
+        return 0;
+    }
+    char tmp_tb[1024];
+    make_tmp_path(tmp_tb, sizeof(tmp_tb), ".tb");
+    FILE *fo = fopen(tmp_tb, "wb");
+    if (!fo) { free(buf); return 0; }
+    fwrite(buf, 1, (size_t)tb_sz, fo);
+    fclose(fo);
+    free(buf);
+    *out_rc = run_tb(tmp_tb, argv + 1, argc - 1, 0);
+    remove(tmp_tb);
+    return 1;
 }
 
 int main(int argc, char **argv) {
@@ -173,6 +222,10 @@ int main(int argc, char **argv) {
     _setmode(_fileno(stderr), _O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
 #endif
+    {
+        int emb_rc = 0;
+        if (check_embedded_exe(argc, argv, &emb_rc)) return emb_rc;
+    }
     if (argc < 2) {
         char rp[1024];
         if (!find_repl(argv[0], rp, sizeof(rp))) { usage(); return 2; }
@@ -183,6 +236,15 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) { usage(); return 0; }
+    if (!strcmp(argv[1], "--build-exe")) {
+        char msg[256];
+        if (argc < 4) { usage(); return 2; }
+        if (tvm_build_exe(argv[2], argv[3], msg, sizeof(msg)) != 0) {
+            fprintf(stderr, "T error: %s\n", msg[0] ? msg : "build-exe failed");
+            return 1;
+        }
+        return 0;
+    }
     if (!strcmp(argv[1], "-d")) { dbg = 1; ai++; }
     if (ai >= argc) { usage(); return 2; }
     if (!strcmp(argv[ai], "-c")) {

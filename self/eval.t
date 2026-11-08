@@ -318,6 +318,8 @@ fn attr_get(o, f):
             return o.append
         if f == "pop":
             return o.pop
+        if f == "next":
+            return o.next
         if f == "clear":
             return o.clear
         if f == "insert":
@@ -412,6 +414,18 @@ fn tensor_attr(o, f):
         return o.ne
     if f == "data_ptr":
         return o.data_ptr
+    if f == "raw_ptr":
+        return o.raw_ptr
+    if f == "dtype":
+        return o.dtype
+    if f == "itemsize":
+        return o.itemsize
+    if f == "nbytes":
+        return o.nbytes
+    if f == "to":
+        return o.to
+    if f == "astype":
+        return o.astype
     if f == "exp":
         return o.exp
     if f == "log":
@@ -463,6 +477,8 @@ fn bltin_type(v):
 
 fn bltin_str(v):
     if is_rec(v):
+        if dict_has(v["m"], "__str__"):
+            return do_call(v["m"]["__str__"], [v], {})
         mut parts = []
         rf = rec_f(v)
         for k in rf.keys():
@@ -780,9 +796,15 @@ fn do_filter(args, mods):
 fn eval_bltin(name, args, mods):
     if name == "len":
         v = args[0]
+        if is_rec(v) and dict_has(v["m"], "__len__"):
+            return do_call(v["m"]["__len__"], [v], mods)
         if is_userfn(v) or is_bltin(v) or is_module(v):
             raise "len() on fn"
         return len(v)
+    if name == "tensor":
+        if args.len == 1:
+            return tensor(args[0])
+        return tensor(args[0], args[1])
     if name == "str":
         return bltin_str(args[0])
     if name == "int":
@@ -804,6 +826,20 @@ fn eval_bltin(name, args, mods):
     if name == "write":
         return write(args[0], args[1])
     if name == "close":
+        if args.len == 2:
+            if is_rec(args[0]) and dict_has(args[0]["m"], "__enter__"):
+                return do_call(args[0]["m"]["__enter__"], [args[0]], mods)
+            return args[0]
+        if args[0] == nil:
+            return nil
+        if is_rec(args[0]):
+            if dict_has(args[0]["m"], "__exit__"):
+                do_call(args[0]["m"]["__exit__"], [args[0]], mods)
+                return nil
+            if dict_has(args[0]["m"], "close"):
+                do_call(args[0]["m"]["close"], [args[0]], mods)
+                return nil
+            return nil
         return close(args[0])
     if name == "ord":
         return ord(args[0])
@@ -904,6 +940,8 @@ fn eval_expr(e, env, mods):
     if k == "un":
         v = eval_expr(e[2], env, mods)
         if e[1] == "-":
+            if is_rec(v) and dict_has(v["m"], "__neg__"):
+                return do_call(v["m"]["__neg__"], [v], mods)
             return 0 - v
         if e[1] == "~":
             return ~v
@@ -922,6 +960,38 @@ fn eval_expr(e, env, mods):
             return eval_expr(e[3], env, mods)
         a = eval_expr(e[2], env, mods)
         b = eval_expr(e[3], env, mods)
+        if is_rec(a):
+            mut dn = nil
+            if op == "+":
+                dn = "__add__"
+            elif op == "-":
+                dn = "__sub__"
+            elif op == "*":
+                dn = "__mul__"
+            elif op == "/":
+                dn = "__div__"
+            elif op == "%":
+                dn = "__mod__"
+            elif op == "**":
+                dn = "__pow__"
+            elif op == "@":
+                dn = "__matmul__"
+            elif op == "==":
+                dn = "__eq__"
+            elif op == "!=":
+                dn = "__ne__"
+            elif op == "<":
+                dn = "__lt__"
+            elif op == ">":
+                dn = "__gt__"
+            elif op == "<=":
+                dn = "__le__"
+            elif op == ">=":
+                dn = "__ge__"
+            if dn != nil and dict_has(a["m"], dn):
+                return do_call(a["m"][dn], [a, b], mods)
+            if op == "!=" and dict_has(a["m"], "__eq__"):
+                return not do_call(a["m"]["__eq__"], [a, b], mods)
         if op == "+":
             return a + b
         if op == "-":
@@ -969,9 +1039,11 @@ fn eval_expr(e, env, mods):
         c = eval_expr(e[1], env, mods)
         ix = eval_expr(e[2], env, mods)
         if is_rec(c):
-            if not dict_has(c["f"], ix):
-                raise c["name"] + " has no field " + str(ix)
-            return rec_f(c)[ix]
+            if dict_has(c["f"], ix):
+                return rec_f(c)[ix]
+            if dict_has(c["m"], "__getitem__"):
+                return do_call(c["m"]["__getitem__"], [c, ix], mods)
+            raise c["name"] + " has no field " + str(ix)
         return c[ix]
     if k == "slice":
         c = eval_expr(e[1], env, mods)
@@ -1173,7 +1245,10 @@ fn exec_stmt(s, env, mods):
         else:
             ix = eval_expr(t[2], env, mods)
         if is_rec(c):
-            rec_set(c, ix, v)
+            if t[0] == "idx" and not dict_has(c["f"], ix) and dict_has(c["m"], "__setitem__"):
+                do_call(c["m"]["__setitem__"], [c, ix, v], mods)
+            else:
+                rec_set(c, ix, v)
         elif t[0] == "attr" and type(c) != "dict":
             raise "assign here"
         else:
@@ -1203,7 +1278,9 @@ fn exec_stmt(s, env, mods):
             return exec_block(s[3], env_new(env), mods)
         return ["ok"]
     if k == "for":
-        it = eval_expr(s[2], env, mods)
+        mut it = eval_expr(s[2], env, mods)
+        if is_rec(it) and dict_has(it["m"], "__iter__"):
+            it = do_call(it["m"]["__iter__"], [it], mods)
         if type(it) == "dict":
             it = it.keys()
         for v in it:

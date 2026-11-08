@@ -238,6 +238,8 @@ static int a64_cond_pass(int cond, int N, int Z, int C, int V) {
 
 #define A64_SIM_STACK_SZ (256 * 1024)
 
+static TDict *a64_rec_new(TDict *tp, int shape, int64_t *slots);
+
 static int64_t a64_sim_exec(const uint8_t *code, size_t code_len, int64_t *in, A64Ctx *ctx) {
     uint64_t x[32];
     double d[32];
@@ -493,12 +495,38 @@ static int64_t a64_sim_exec(const uint8_t *code, size_t code_len, int64_t *in, A
             else pc += 4;
             continue;
         }
-        if ((w & 0xFFFFFC1Fu) == 0xD63F0000u) { /* blr rn (gọi helper C: imod / fmod_floor) */
+        if ((w & 0xFFFFFC1Fu) == 0xD63F0000u) { /* blr rn (gọi helper C: imod / fmod_floor / struct / dict / str) */
             uintptr_t fn_ptr = (uintptr_t)XR(rn);
             if (fn_ptr == (uintptr_t)imod) {
                 x[0] = (uint64_t)imod((int64_t)x[0], (int64_t)x[1]);
             } else if (fn_ptr == (uintptr_t)fmod_floor) {
                 d[0] = fmod_floor(d[0], d[1]);
+            } else if (fn_ptr == (uintptr_t)tjit_str_of) {
+                x[0] = (uint64_t)(uintptr_t)tjit_str_of((int64_t)x[0], (int)x[1]);
+            } else if (fn_ptr == (uintptr_t)tjit_str_cat) {
+                x[0] = (uint64_t)(uintptr_t)tjit_str_cat((const TVal *)(uintptr_t)x[0], (const TVal *)(uintptr_t)x[1], (int)x[2]);
+            } else if (fn_ptr == (uintptr_t)tjit_str_eq) {
+                x[0] = (uint64_t)tjit_str_eq((const TVal *)(uintptr_t)x[0], (const TVal *)(uintptr_t)x[1], (int)x[2]);
+            } else if (fn_ptr == (uintptr_t)tjit_str_idx) {
+                x[0] = (uint64_t)(uintptr_t)tjit_str_idx((const TVal *)(uintptr_t)x[0], (int64_t)x[1]);
+            } else if (fn_ptr == (uintptr_t)tjit_dict_new0) {
+                x[0] = (uint64_t)(uintptr_t)tjit_dict_new0();
+            } else if (fn_ptr == (uintptr_t)tjit_dict_set) {
+                x[0] = (uint64_t)tjit_dict_set((TDict *)(uintptr_t)x[0], (int64_t)x[1], (int64_t)x[2], (int)x[3]);
+            } else if (fn_ptr == (uintptr_t)tjit_dict_getD) {
+                x[0] = (uint64_t)tjit_dict_getD((TDict *)(uintptr_t)x[0], (int64_t)x[1], (int)x[2], (int64_t *)(uintptr_t)x[3]);
+            } else if (fn_ptr == (uintptr_t)tjit_dict_has) {
+                x[0] = (uint64_t)tjit_dict_has((TDict *)(uintptr_t)x[0], (int64_t)x[1], (int)x[2]);
+            } else if (fn_ptr == (uintptr_t)tjit_dict_remove) {
+                x[0] = (uint64_t)tjit_dict_remove((TDict *)(uintptr_t)x[0], (int64_t)x[1], (int)x[2]);
+            } else if (fn_ptr == (uintptr_t)tjit_rec_new) {
+                x[0] = (uint64_t)(uintptr_t)tjit_rec_new((TDict *)(uintptr_t)x[0], (int)x[1], (int64_t *)(uintptr_t)x[2]);
+            } else if (fn_ptr == (uintptr_t)a64_rec_new) {
+                x[0] = (uint64_t)(uintptr_t)a64_rec_new((TDict *)(uintptr_t)x[0], (int)x[1], (int64_t *)(uintptr_t)x[2]);
+            } else if (fn_ptr == (uintptr_t)tjit_dec_dict) {
+                tjit_dec_dict((TDict *)(uintptr_t)x[0]);
+            } else if (fn_ptr == (uintptr_t)tjit_dec_sval) {
+                tjit_dec_sval((TVal *)(uintptr_t)x[0]);
             } else {
                 if (ctx) ctx->abort = 1;
                 break;
@@ -519,15 +547,89 @@ static int64_t a64_sim_exec(const uint8_t *code, size_t code_len, int64_t *in, A
 }
 
 /* ========================================================================= */
-/* Trình biên dịch Bytecode T -> AArch64 (Entry Mode + OSR + Deopt)           */
+/* Trình biên dịch Bytecode T -> AArch64 (Entry Mode + OSR + Deopt + J8)      */
 /* ========================================================================= */
 
 enum {
     A64_TY_UNK = 0, A64_TY_I = 1, A64_TY_F = 2, A64_TY_B = 3,
-    A64_TY_FN  = 4, A64_TY_NAT = 5, A64_TY_LI = 6, A64_TY_LF = 7, A64_TY_LB = 8
+    A64_TY_FN  = 4, A64_TY_NAT = 5, A64_TY_LI = 6, A64_TY_LF = 7, A64_TY_LB = 8,
+    A64_TY_S   = 10, A64_TY_TYP = 11, A64_TY_D = 12, A64_TY_DN = 13, A64_TY_SN = 14, A64_TY_NIL = 15
 };
+#define A64_TY_R0  32
+#define A64_TY_RN0 96
+#define A64_MAX_SHAPES 64
+#define A64_SHAPE_MAXF 32
+
+typedef struct {
+    TDict *tp;
+    int nf;
+    uint8_t fty[A64_SHAPE_MAXF];
+    const TVal *keys;
+} A64Shape;
+
+static A64Shape a64_shapes[A64_MAX_SHAPES];
+static int na64_shapes = 0;
 
 static int a64_is_list(uint8_t t) { return t >= A64_TY_LI && t <= A64_TY_LB; }
+static int a64_is_dict(uint8_t t) { return t == A64_TY_D || t == A64_TY_DN; }
+static int a64_is_str(uint8_t t)  { return t == A64_TY_S || t == A64_TY_SN; }
+static int a64_is_rec(uint8_t t)  { return t >= A64_TY_R0 && t < A64_TY_R0 + na64_shapes; }
+static int a64_is_own_rec(uint8_t t) { return t >= A64_TY_RN0 && t < A64_TY_RN0 + na64_shapes; }
+static int a64_is_any_rec(uint8_t t) { return a64_is_rec(t) || a64_is_own_rec(t); }
+static int a64_rec_shape(uint8_t t)  { return a64_is_own_rec(t) ? (t - A64_TY_RN0) : (t - A64_TY_R0); }
+static A64Shape *a64_shape_of(uint8_t t) {
+    int s = a64_rec_shape(t);
+    return (s < 0 || s >= A64_MAX_SHAPES) ? NULL : &a64_shapes[s];
+}
+static uint8_t a64_bor_shape(int s) { return (uint8_t)(A64_TY_R0 + s); }
+static uint8_t a64_own_shape(int s) { return (uint8_t)(A64_TY_RN0 + s); }
+static uint8_t a64_norm_ty(uint8_t t) {
+    if (a64_is_own_rec(t)) return a64_bor_shape(a64_rec_shape(t));
+    if (t == A64_TY_DN) return A64_TY_D;
+    if (t == A64_TY_SN) return A64_TY_S;
+    return t;
+}
+static int a64_shape_reg(TDict *tp, int nf, const uint8_t *fty) {
+    for (int q = 0; q < na64_shapes; q++) {
+        A64Shape *sh = &a64_shapes[q];
+        if (sh->tp == tp && sh->nf == nf && memcmp(sh->fty, fty, (size_t)nf) == 0)
+            return q;
+    }
+    if (na64_shapes >= A64_MAX_SHAPES) return -1;
+    A64Shape *sh = &a64_shapes[na64_shapes];
+    sh->tp = tp;
+    tp->refc++;
+    sh->nf = nf;
+    memcpy(sh->fty, fty, (size_t)nf);
+    sh->keys = tp->fields->items;
+    return na64_shapes++;
+}
+static int a64_shape_field(const A64Shape *sh, const uint8_t *name, uint32_t len) {
+    for (int i = 0; i < sh->nf; i++) {
+        const TVal *k = &sh->keys[i];
+        if (k->t == T_STR && k->u.str.n == len && memcmp(k->u.str.s, name, len) == 0) return i;
+    }
+    return -1;
+}
+static TDict *a64_rec_new(TDict *tp, int shape, int64_t *slots) {
+    if (shape < 0 || shape >= na64_shapes) return NULL;
+    const uint8_t *fty = a64_shapes[shape].fty;
+    size_t n = tp->fields->len;
+    TDict *d = tjit_dict_new0();
+    free(d->keys); free(d->vals);
+    d->len = n; d->cap = n;
+    d->keys = tp->fields->items;
+    d->vals = (TVal *)malloc((n ? n : 1) * sizeof(TVal));
+    for (size_t i = 0; i < n; i++) {
+        if (fty[i] == A64_TY_F) { d->vals[i].t = T_FLOAT; memcpy(&d->vals[i].u.f, &slots[i], 8); }
+        else if (fty[i] == A64_TY_B) { d->vals[i].t = T_BOOL; d->vals[i].u.b = (int)(slots[i] & 1); }
+        else { d->vals[i].t = T_INT; d->vals[i].u.i = slots[i]; }
+    }
+    d->kind = DK_REC;
+    d->meths = tp;
+    tp->refc++;
+    return d;
+}
 static uint8_t a64_list_elem(uint8_t t) {
     return t == A64_TY_LI ? A64_TY_I : t == A64_TY_LF ? A64_TY_F : A64_TY_B;
 }
@@ -535,6 +637,7 @@ static uint8_t a64_val_ty(const TVal *v) {
     if (v->t == T_INT)   return A64_TY_I;
     if (v->t == T_FLOAT) return A64_TY_F;
     if (v->t == T_BOOL)  return A64_TY_B;
+    if (v->t == T_STR)   return A64_TY_S;
     if (v->t == T_LIST) {
         TList *l = v->u.list;
         if (!l || l->len == 0) return A64_TY_LI;
@@ -542,10 +645,33 @@ static uint8_t a64_val_ty(const TVal *v) {
         for (size_t i = 1; i < l->len; i++) if (l->items[i].t != et) return A64_TY_UNK;
         return et == T_INT ? A64_TY_LI : et == T_FLOAT ? A64_TY_LF : et == T_BOOL ? A64_TY_LB : A64_TY_UNK;
     }
+    if (v->t == T_DICT) {
+        TDict *d = v->u.dict;
+        if (d->kind == DK_DICT) return A64_TY_D;
+        if (d->kind == DK_REC && d->meths && !d->meths->mod && d->len <= A64_SHAPE_MAXF) {
+            uint8_t ft[A64_SHAPE_MAXF];
+            for (size_t i = 0; i < d->len; i++) {
+                TType vt = d->vals[i].t;
+                if (vt == T_INT) ft[i] = A64_TY_I;
+                else if (vt == T_FLOAT) ft[i] = A64_TY_F;
+                else if (vt == T_BOOL) ft[i] = A64_TY_B;
+                else return A64_TY_UNK;
+            }
+            int s = a64_shape_reg(d->meths, (int)d->len, ft);
+            return s < 0 ? A64_TY_UNK : a64_bor_shape(s);
+        }
+    }
     return A64_TY_UNK;
 }
 static int a64_ty_ok(const TVal *v, uint8_t want) {
     if (a64_is_list(want)) return v->t == T_LIST;
+    if (want == A64_TY_S) return v->t == T_STR;
+    if (want == A64_TY_D) return v->t == T_DICT && v->u.dict->kind == DK_DICT;
+    if (a64_is_rec(want)) {
+        A64Shape *sh = a64_shape_of(want);
+        return sh && v->t == T_DICT && v->u.dict->kind == DK_REC &&
+               v->u.dict->meths == sh->tp && v->u.dict->len == (size_t)sh->nf;
+    }
     return a64_val_ty(v) == want;
 }
 static int64_t a64_val_bits(const TVal *v) {
@@ -554,6 +680,8 @@ static int64_t a64_val_bits(const TVal *v) {
     else if (v->t == T_FLOAT) memcpy(&x, &v->u.f, 8);
     else if (v->t == T_BOOL) x = v->u.b ? 1 : 0;
     else if (v->t == T_LIST) x = (int64_t)(uintptr_t)v->u.list;
+    else if (v->t == T_DICT) x = (int64_t)(uintptr_t)v->u.dict;
+    else if (v->t == T_STR)  x = (int64_t)(uintptr_t)v;
     return x;
 }
 static TVal a64_bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
@@ -562,7 +690,11 @@ static TVal a64_bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
     else if (ty == A64_TY_F) { v.t = T_FLOAT; memcpy(&v.u.f, &x, 8); }
     else if (ty == A64_TY_B) { v.t = T_BOOL; v.u.b = (int)(x & 1); }
     else if (a64_is_list(ty)) { v.t = T_LIST; v.u.list = (TList *)(uintptr_t)x; tval_retain(&v); }
-    else if (ty == A64_TY_FN || ty == A64_TY_NAT) { v = vm->prog->globals[sv]; tval_retain(&v); }
+    else if (ty == A64_TY_D || a64_is_rec(ty)) { v.t = T_DICT; v.u.dict = (TDict *)(uintptr_t)x; tval_retain(&v); }
+    else if (ty == A64_TY_DN || a64_is_own_rec(ty)) { v.t = T_DICT; v.u.dict = (TDict *)(uintptr_t)x; }
+    else if (ty == A64_TY_S) { v = *(const TVal *)(uintptr_t)x; tval_retain(&v); }
+    else if (ty == A64_TY_SN) { TVal *w = (TVal *)(uintptr_t)x; v = *w; tjit_wrap_free(w); }
+    else if (ty == A64_TY_FN || ty == A64_TY_NAT || ty == A64_TY_TYP) { v = vm->prog->globals[sv]; tval_retain(&v); }
     return v;
 }
 
@@ -653,12 +785,17 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
         m->deopt_id = -1;
         const uint8_t *a = c + pc + 1;
         switch (op) {
-        case OP_PUSH_BOOL: case OP_CALL: case OP_RANGE: case OP_PRINT:
+        case OP_PUSH_BOOL: case OP_CALL: case OP_CALLM: case OP_RANGE: case OP_PRINT:
             m->k = a[0]; break;
         case OP_PUSH_INT:
             m->imm = rd_i64_le(a); break;
         case OP_PUSH_FLOAT:
             memcpy(&m->fimm, a, 8); break;
+        case OP_NEW_DICT:
+            m->k = rd_u16_le(a); break;
+        case OP_ATTR:
+            if (rd_i32_le(a) == 3 && memcmp(a + 4, "len", 3) == 0) m->op = OP_LEN;
+            break;
         case OP_LOAD: case OP_STORE: case OP_DECL: case OP_BIND:
         case OP_LOADG: case OP_INC_L: case OP_DEC_L: case OP_INCB_L:
             m->k = rd_u16_le(a); break;
@@ -726,10 +863,11 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 if (!d->reach) { *d = cur; d->reach = 1; changed = 1; } \
                 else { \
                     if (d->depth != cur.depth) { ok = 0; break; } \
-                    for (int q = 0; q < cur.depth; q++) if (d->st[q] != cur.st[q]) { ok = 0; break; } \
+                    for (int q = 0; q < cur.depth; q++) if (a64_norm_ty(d->st[q]) != a64_norm_ty(cur.st[q])) { ok = 0; break; } \
                     for (int q = 0; q < nl; q++) { \
+                        uint8_t dl = a64_norm_ty(d->lt[q]), cl = a64_norm_ty(cur.lt[q]); \
                         if (d->lt[q] == A64_TY_UNK && cur.lt[q] != A64_TY_UNK) { d->lt[q] = cur.lt[q]; changed = 1; } \
-                        else if (d->lt[q] != cur.lt[q] && cur.lt[q] != A64_TY_UNK) { ok = 0; break; } \
+                        else if (dl != cl && cl != A64_TY_UNK) { ok = 0; break; } \
                     } \
                 } \
             } while (0)
@@ -741,6 +879,25 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             case OP_PUSH_INT:   PUSH(A64_TY_I, 0); break;
             case OP_PUSH_FLOAT: PUSH(A64_TY_F, 0); break;
             case OP_PUSH_BOOL:  PUSH(A64_TY_B, 0); break;
+            case OP_PUSH_NIL:   PUSH(A64_TY_NIL, 0); break;
+            case OP_PUSH_STR:
+                if (!P->ic) { P->ic = (TAttrIC *)calloc(P->len ? P->len : 1, sizeof(TAttrIC)); }
+                if (P->ic[m->pc].kind != 4) {
+                    uint32_t slen = (uint32_t)rd_i32_le(c + m->pc + 1);
+                    TVal v;
+                    v.t = T_STR; v.u.str.n = slen;
+                    v.u.str.s = (char *)malloc(slen + 1);
+                    if (slen) memcpy(v.u.str.s, c + m->pc + 5, slen);
+                    v.u.str.s[slen] = '\0';
+                    v.u.str.refc = (int32_t *)malloc(sizeof(int32_t));
+                    *v.u.str.refc = 1;
+                    TVal *keep = (TVal *)malloc(sizeof(TVal));
+                    *keep = v;
+                    P->ic[m->pc].kind = 4;
+                    P->ic[m->pc].key = keep;
+                }
+                PUSH(A64_TY_S, 0);
+                break;
             case OP_POP:        POP(t1); break;
             case OP_DUP:
                 if (cur.depth <= 0) { ok = 0; break; }
@@ -748,18 +905,19 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 break;
             case OP_LOAD:
                 if (m->k < 0 || m->k >= nl || cur.lt[m->k] == A64_TY_UNK) { ok = 0; break; }
-                PUSH(cur.lt[m->k], 0);
+                PUSH(a64_norm_ty(cur.lt[m->k]), 0);
                 break;
             case OP_STORE: case OP_DECL: case OP_BIND:
                 POP(t1);
                 if (m->k < 0 || m->k >= nl) { ok = 0; break; }
-                if (cur.lt[m->k] != A64_TY_UNK && cur.lt[m->k] != t1) { ok = 0; break; }
+                if (cur.lt[m->k] != A64_TY_UNK && a64_norm_ty(cur.lt[m->k]) != a64_norm_ty(t1)) { ok = 0; break; }
                 cur.lt[m->k] = t1;
                 break;
             case OP_LOADG:
                 if (m->k < NAT_NFIXED) {
                     if (m->k == NAT_INT || m->k == NAT_FLOAT || m->k == NAT_ABS ||
-                        m->k == NAT_MIN || m->k == NAT_MAX || m->k == NAT_LEN) {
+                        m->k == NAT_MIN || m->k == NAT_MAX || m->k == NAT_LEN ||
+                        m->k == NAT_STR || m->k == NAT___NEW) {
                         PUSH(A64_TY_NAT, m->k);
                     } else { ok = 0; }
                 } else if ((size_t)m->k < P->nglobals) {
@@ -767,12 +925,17 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                     if (gv->t == T_FN && gv->u.fn == fn) PUSH(A64_TY_FN, m->k);
                     else if (gv->t == T_INT) PUSH(A64_TY_I, m->k);
                     else if (gv->t == T_FLOAT) PUSH(A64_TY_F, m->k);
+                    else if (gv->t == T_BOOL) PUSH(A64_TY_B, m->k);
+                    else if (gv->t == T_STR) PUSH(A64_TY_S, m->k);
+                    else if (gv->t == T_DICT && gv->u.dict->kind == DK_TYPE && !gv->u.dict->mod) PUSH(A64_TY_TYP, m->k);
+                    else if (gv->t == T_DICT && gv->u.dict->kind == DK_DICT) PUSH(A64_TY_D, m->k);
                     else ok = 0;
                 } else ok = 0;
                 break;
             case OP_ADD: case OP_SUB: case OP_MUL: case OP_MOD:
                 POP(t2); POP(t1);
-                if (t1 == A64_TY_I && t2 == A64_TY_I) PUSH(A64_TY_I, 0);
+                if (m->op == OP_ADD && a64_is_str(t1) && a64_is_str(t2)) PUSH(A64_TY_SN, 0);
+                else if (t1 == A64_TY_I && t2 == A64_TY_I) PUSH(A64_TY_I, 0);
                 else if ((t1 == A64_TY_I || t1 == A64_TY_F) && (t2 == A64_TY_I || t2 == A64_TY_F)) PUSH(A64_TY_F, 0);
                 else ok = 0;
                 break;
@@ -803,8 +966,9 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 break;
             case OP_EQ: case OP_NE: case OP_LT: case OP_GT: case OP_LE: case OP_GE:
                 POP(t2); POP(t1);
-                if ((t1 == A64_TY_I || t1 == A64_TY_F || t1 == A64_TY_B) &&
-                    (t2 == A64_TY_I || t2 == A64_TY_F || t2 == A64_TY_B)) PUSH(A64_TY_B, 0);
+                if (a64_is_str(t1) && a64_is_str(t2) && (m->op == OP_EQ || m->op == OP_NE)) PUSH(A64_TY_B, 0);
+                else if ((t1 == A64_TY_I || t1 == A64_TY_F || t1 == A64_TY_B) &&
+                         (t2 == A64_TY_I || t2 == A64_TY_F || t2 == A64_TY_B)) PUSH(A64_TY_B, 0);
                 else ok = 0;
                 break;
             case OP_INC_L: case OP_DEC_L: case OP_INCB_L: case OP_ADDI_L:
@@ -819,18 +983,78 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 break;
             case OP_LEN:
                 POP(t1);
-                if (a64_is_list(t1)) PUSH(A64_TY_I, 0);
+                if (a64_is_list(t1) || a64_is_str(t1) || a64_is_dict(t1)) PUSH(A64_TY_I, 0);
                 else ok = 0;
                 break;
             case OP_IDX:
                 POP(t2); POP(t1);
                 if (a64_is_list(t1) && t2 == A64_TY_I) PUSH(a64_list_elem(t1), 0);
+                else if (a64_is_str(t1) && t2 == A64_TY_I) PUSH(A64_TY_S, 0);
+                else if (a64_is_dict(t1) && (t2 == A64_TY_I || a64_is_str(t2))) PUSH(A64_TY_I, 0);
                 else ok = 0;
                 break;
             case OP_SETIDX:
                 POP(t3); POP(t2); POP(t1);
-                if (!a64_is_list(t1) || t2 != A64_TY_I || t3 != a64_list_elem(t1)) ok = 0;
+                if (a64_is_list(t1) && t2 == A64_TY_I && t3 == a64_list_elem(t1)) { /* ok */ }
+                else if (a64_is_dict(t1) && (t2 == A64_TY_I || a64_is_str(t2)) &&
+                         (t3 == A64_TY_I || t3 == A64_TY_F || t3 == A64_TY_B ||
+                          a64_is_str(t3) || a64_is_dict(t3) || a64_is_any_rec(t3))) { /* ok */ }
+                else ok = 0;
                 break;
+            case OP_ATTR: {
+                POP(t1);
+                if (!a64_is_any_rec(t1)) { ok = 0; break; }
+                A64Shape *sh = a64_shape_of(t1);
+                uint32_t flen = (uint32_t)rd_i32_le(c + m->pc + 1);
+                int fi = sh ? a64_shape_field(sh, c + m->pc + 5, flen) : -1;
+                if (fi < 0 || sh->fty[fi] == A64_TY_UNK) { ok = 0; break; }
+                PUSH(sh->fty[fi], 0);
+                break;
+            }
+            case OP_SETATTR: {
+                POP(t2); POP(t1);
+                if (!a64_is_any_rec(t1)) { ok = 0; break; }
+                A64Shape *sh = a64_shape_of(t1);
+                uint32_t flen = (uint32_t)rd_i32_le(c + m->pc + 1);
+                int fi = sh ? a64_shape_field(sh, c + m->pc + 5, flen) : -1;
+                if (fi < 0 || sh->fty[fi] != t2) { ok = 0; break; }
+                break;
+            }
+            case OP_NEW_DICT: {
+                int k = m->k;
+                if (cur.depth < 2 * k) { ok = 0; break; }
+                for (int q = 0; q < k; q++) {
+                    POP(t2); POP(t1);
+                    if (!(t1 == A64_TY_I || a64_is_str(t1))) { ok = 0; break; }
+                    if (!(t2 == A64_TY_I || t2 == A64_TY_F || t2 == A64_TY_B ||
+                          a64_is_str(t2) || a64_is_dict(t2) || a64_is_any_rec(t2))) { ok = 0; break; }
+                }
+                if (ok) PUSH(A64_TY_DN, 0);
+                break;
+            }
+            case OP_CALLM: {
+                int argc = m->k;
+                if (cur.depth < argc + 1) { ok = 0; break; }
+                uint32_t mlen = (uint32_t)rd_i32_le(c + m->pc + 2);
+                const uint8_t *mnm = c + m->pc + 6;
+                uint8_t rty = cur.st[cur.depth - argc - 1];
+                if (a64_is_dict(rty)) {
+                    if (argc == 2 && mlen == 3 && memcmp(mnm, "get", 3) == 0) {
+                        POP(t3); POP(t2); POP(t1);
+                        if ((t2 == A64_TY_I || a64_is_str(t2)) && t3 == A64_TY_I) PUSH(A64_TY_I, 0);
+                        else ok = 0;
+                    } else if (argc == 1 && mlen == 3 && memcmp(mnm, "has", 3) == 0) {
+                        POP(t2); POP(t1);
+                        if (t2 == A64_TY_I || a64_is_str(t2)) PUSH(A64_TY_B, 0);
+                        else ok = 0;
+                    } else if (argc == 1 && mlen == 6 && memcmp(mnm, "remove", 6) == 0) {
+                        POP(t2); POP(t1);
+                        if (t2 == A64_TY_I || a64_is_str(t2)) PUSH(A64_TY_NIL, 0);
+                        else ok = 0;
+                    } else ok = 0;
+                } else ok = 0;
+                break;
+            }
             case OP_CALL: {
                 int argc = m->k;
                 if (cur.depth < argc + 1) { ok = 0; break; }
@@ -856,13 +1080,36 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                         else ok = 0;
                     } else if (fsv == NAT_LEN && argc == 1) {
                         POP(t1); POP(t2);
-                        if (a64_is_list(t1)) PUSH(A64_TY_I, 0);
+                        if (a64_is_list(t1) || a64_is_str(t1) || a64_is_dict(t1)) PUSH(A64_TY_I, 0);
                         else ok = 0;
+                    } else if (fsv == NAT_STR && argc == 1) {
+                        POP(t1); POP(t2);
+                        if (t1 == A64_TY_I || t1 == A64_TY_F || t1 == A64_TY_B || a64_is_str(t1)) PUSH(A64_TY_SN, 0);
+                        else ok = 0;
+                    } else if (fsv == NAT___NEW && argc >= 1) {
+                        uint8_t tp_ty = cur.st[cur.depth - argc];
+                        int32_t tp_sv = cur.sv[cur.depth - argc];
+                        if (tp_ty != A64_TY_TYP) { ok = 0; break; }
+                        TDict *tp = P->globals[tp_sv].u.dict;
+                        int nf = (int)tp->fields->len;
+                        if (argc - 1 != nf || nf > A64_SHAPE_MAXF) { ok = 0; break; }
+                        uint8_t fts[A64_SHAPE_MAXF];
+                        for (int q = nf - 1; q >= 0; q--) {
+                            POP(t1);
+                            if (t1 != A64_TY_I && t1 != A64_TY_F && t1 != A64_TY_B) { ok = 0; break; }
+                            fts[q] = t1;
+                        }
+                        if (!ok) break;
+                        POP(t2); /* type */
+                        POP(t3); /* __new */
+                        int sh = a64_shape_reg(tp, nf, fts);
+                        if (sh < 0) { ok = 0; break; }
+                        PUSH(a64_own_shape(sh), 0);
                     } else ok = 0;
                 } else if (fty == A64_TY_FN && !is_osr && argc == fn->nargs) {
                     for (int a = argc - 1; a >= 0; a--) {
                         POP(t1);
-                        if (t1 != in_ty[a]) { ok = 0; break; }
+                        if (a64_norm_ty(t1) != a64_norm_ty(in_ty[a])) { ok = 0; break; }
                     }
                     POP(t2);
                     if (retty == A64_TY_UNK) retty = A64_TY_I;
@@ -876,14 +1123,16 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                 break;
             case OP_JMPF: case OP_JMPT:
                 POP(t1);
-                if (t1 != A64_TY_B && t1 != A64_TY_I) { ok = 0; break; }
+                if (t1 != A64_TY_B && t1 != A64_TY_I && !a64_is_str(t1) && !a64_is_dict(t1)) { ok = 0; break; }
                 MERGE(m->tgt);
                 break;
             case OP_RET:
                 POP(t1);
-                if (cur.depth != 0 || (t1 != A64_TY_I && t1 != A64_TY_F && t1 != A64_TY_B)) { ok = 0; break; }
+                if (cur.depth != 0 || (t1 != A64_TY_I && t1 != A64_TY_F && t1 != A64_TY_B &&
+                    !a64_is_str(t1) && !a64_is_dict(t1) && !a64_is_any_rec(t1))) { ok = 0; break; }
                 if (retty == A64_TY_UNK) retty = t1;
-                else if (retty != t1) ok = 0;
+                else if (a64_norm_ty(retty) != a64_norm_ty(t1)) ok = 0;
+                else if (t1 == A64_TY_SN || t1 == A64_TY_DN || a64_is_own_rec(t1)) retty = t1;
                 step_next = 0;
                 break;
             default:
@@ -988,7 +1237,24 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             a64_movz(&b, 9, m->k ? 1 : 0, 0);
             a64_str(&b, 9, 29, S_OFF(d));
             break;
+        case OP_PUSH_NIL:
+            a64_movz(&b, 9, 0, 0);
+            a64_str(&b, 9, 29, S_OFF(d));
+            break;
+        case OP_PUSH_STR:
+            a64_mov_imm64(&b, 9, (uint64_t)(uintptr_t)P->ic[m->pc].key);
+            a64_str(&b, 9, 29, S_OFF(d));
+            break;
         case OP_POP:
+            if (cur.st[d - 1] == A64_TY_SN) {
+                a64_ldr(&b, 0, 29, S_OFF(d - 1));
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dec_sval);
+                a64_blr(&b, 11);
+            } else if (cur.st[d - 1] == A64_TY_DN || a64_is_own_rec(cur.st[d - 1])) {
+                a64_ldr(&b, 0, 29, S_OFF(d - 1));
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dec_dict);
+                a64_blr(&b, 11);
+            }
             break;
         case OP_DUP:
             a64_ldr(&b, 9, 29, S_OFF(d - 1));
@@ -1005,11 +1271,28 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
         case OP_LOADG:
             if (m->k >= NAT_NFIXED && (size_t)m->k < P->nglobals) {
                 TVal *gv = &P->globals[m->k];
-                if (gv->t == T_INT || gv->t == T_FLOAT) {
+                if (gv->t == T_INT || gv->t == T_FLOAT || gv->t == T_BOOL) {
                     /* guard tag của global số rồi đọc giá trị */
                     a64_mov_imm64(&b, 9, (uint64_t)(uintptr_t)gv);
                     a64_ldrw(&b, 10, 9, 0);
                     a64_movz(&b, 11, (int)gv->t, 0);
+                    a64_cmp(&b, 10, 11);
+                    ADD_FIX(b.len, fail_tgt, 1, A64_NE);
+                    a64_bcond(&b, A64_NE, 0);
+                    a64_ldr(&b, 10, 9, 8);
+                    a64_str(&b, 10, 29, S_OFF(d));
+                } else if (gv->t == T_STR) {
+                    a64_mov_imm64(&b, 9, (uint64_t)(uintptr_t)gv);
+                    a64_ldrw(&b, 10, 9, 0);
+                    a64_movz(&b, 11, (int)T_STR, 0);
+                    a64_cmp(&b, 10, 11);
+                    ADD_FIX(b.len, fail_tgt, 1, A64_NE);
+                    a64_bcond(&b, A64_NE, 0);
+                    a64_str(&b, 9, 29, S_OFF(d));
+                } else if (gv->t == T_DICT && gv->u.dict->kind == DK_DICT) {
+                    a64_mov_imm64(&b, 9, (uint64_t)(uintptr_t)gv);
+                    a64_ldrw(&b, 10, 9, 0);
+                    a64_movz(&b, 11, (int)T_DICT, 0);
                     a64_cmp(&b, 10, 11);
                     ADD_FIX(b.len, fail_tgt, 1, A64_NE);
                     a64_bcond(&b, A64_NE, 0);
@@ -1026,7 +1309,15 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             break;
         case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD: {
             uint8_t t1 = cur.st[d - 2], t2 = cur.st[d - 1];
-            if (t1 == A64_TY_I && t2 == A64_TY_I && m->op != OP_DIV) {
+            if (m->op == OP_ADD && a64_is_str(t1) && a64_is_str(t2)) {
+                int ms = (t1 == A64_TY_SN ? 1 : 0) | (t2 == A64_TY_SN ? 2 : 0);
+                a64_ldr(&b, 0, 29, S_OFF(d - 2));
+                a64_ldr(&b, 1, 29, S_OFF(d - 1));
+                a64_movz(&b, 2, ms, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_str_cat);
+                a64_blr(&b, 11);
+                a64_str(&b, 0, 29, S_OFF(d - 2));
+            } else if (t1 == A64_TY_I && t2 == A64_TY_I && m->op != OP_DIV) {
                 a64_ldr(&b, 9, 29, S_OFF(d - 2));
                 a64_ldr(&b, 10, 29, S_OFF(d - 1));
                 if (m->op == OP_ADD) {
@@ -1135,6 +1426,20 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             int cond = m->op == OP_EQ ? A64_EQ : m->op == OP_NE ? A64_NE :
                        m->op == OP_LT ? A64_LT : m->op == OP_GT ? A64_GT :
                        m->op == OP_LE ? A64_LE : A64_GE;
+            if (a64_is_str(t1) && a64_is_str(t2)) {
+                int ms = (t1 == A64_TY_SN ? 1 : 0) | (t2 == A64_TY_SN ? 2 : 0);
+                a64_ldr(&b, 0, 29, S_OFF(d - 2));
+                a64_ldr(&b, 1, 29, S_OFF(d - 1));
+                a64_movz(&b, 2, ms, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_str_eq);
+                a64_blr(&b, 11);
+                if (m->op == OP_NE) {
+                    a64_movz(&b, 10, 1, 0);
+                    a64_eor(&b, 0, 0, 10);
+                }
+                a64_str(&b, 0, 29, S_OFF(d - 2));
+                break;
+            }
             if (t1 == A64_TY_F || t2 == A64_TY_F) {
                 if (t1 == A64_TY_I) { a64_ldr(&b, 9, 29, S_OFF(d - 2)); a64_scvtf_d(&b, 0, 9); }
                 else                { a64_ldr_d(&b, 0, 29, S_OFF(d - 2)); }
@@ -1198,12 +1503,41 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             }
             break;
         case OP_LEN:
-            a64_ldr(&b, 9, 29, S_OFF(d - 1));
-            a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
-            a64_str(&b, 9, 29, S_OFF(d - 1));
+            if (a64_is_dict(cur.st[d - 1])) {
+                a64_ldr(&b, 9, 29, S_OFF(d - 1));
+                a64_ldr(&b, 9, 9, (int)offsetof(TDict, len));
+                a64_str(&b, 9, 29, S_OFF(d - 1));
+            } else {
+                a64_ldr(&b, 9, 29, S_OFF(d - 1));
+                a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
+                a64_str(&b, 9, 29, S_OFF(d - 1));
+            }
             break;
         case OP_IDX: {
-            uint8_t ety = a64_list_elem(cur.st[d - 2]);
+            uint8_t ct = cur.st[d - 2], kt = cur.st[d - 1];
+            if (a64_is_dict(ct)) {
+                int kstr = a64_is_str(kt) ? 1 : 0;
+                a64_ldr(&b, 0, 29, S_OFF(d - 2));
+                a64_ldr(&b, 1, 29, S_OFF(d - 1));
+                a64_movz(&b, 2, kstr, 0);
+                a64_add_imm(&b, 3, 29, S_OFF(d - 2));
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_getD);
+                a64_blr(&b, 11);
+                ADD_FIX(b.len, fail_tgt, 3, 0);
+                a64_cbnz(&b, 0, 0);
+                break;
+            }
+            if (a64_is_str(ct)) {
+                a64_ldr(&b, 0, 29, S_OFF(d - 2));
+                a64_ldr(&b, 1, 29, S_OFF(d - 1));
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_str_idx);
+                a64_blr(&b, 11);
+                ADD_FIX(b.len, fail_tgt, 2, 0);
+                a64_cbz(&b, 0, 0);
+                a64_str(&b, 0, 29, S_OFF(d - 2));
+                break;
+            }
+            uint8_t ety = a64_list_elem(ct);
             int want_tag = ety == A64_TY_I ? T_INT : ety == A64_TY_F ? T_FLOAT : T_BOOL;
             a64_ldr(&b, 9, 29, S_OFF(d - 2));                 /* TList* */
             a64_ldr(&b, 10, 29, S_OFF(d - 1));                /* idx    */
@@ -1229,7 +1563,22 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             break;
         }
         case OP_SETIDX: {
-            uint8_t ety = a64_list_elem(cur.st[d - 3]);
+            uint8_t ct = cur.st[d - 3], kt = cur.st[d - 2], vt = cur.st[d - 1];
+            if (a64_is_dict(ct)) {
+                int kstr = a64_is_str(kt) ? 1 : 0;
+                int vty = vt == A64_TY_F ? 1 : vt == A64_TY_B ? 2 : vt == A64_TY_S ? 3 :
+                          vt == A64_TY_SN ? 4 : vt == A64_TY_D ? 5 : vt == A64_TY_DN ? 6 :
+                          a64_is_rec(vt) ? 7 : a64_is_own_rec(vt) ? 8 : 0;
+                int kv = (kstr ? 1 : 0) | (vty << 1) | 32;
+                a64_ldr(&b, 0, 29, S_OFF(d - 3));
+                a64_ldr(&b, 1, 29, S_OFF(d - 2));
+                a64_ldr(&b, 2, 29, S_OFF(d - 1));
+                a64_movz(&b, 3, kv, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_set);
+                a64_blr(&b, 11);
+                break;
+            }
+            uint8_t ety = a64_list_elem(ct);
             int want_tag = ety == A64_TY_I ? T_INT : ety == A64_TY_F ? T_FLOAT : T_BOOL;
             a64_ldr(&b, 9, 29, S_OFF(d - 3));                 /* TList* */
             a64_ldr(&b, 10, 29, S_OFF(d - 2));                /* idx    */
@@ -1253,10 +1602,113 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             a64_str(&b, 14, 11, 8);
             break;
         }
+        case OP_ATTR: {
+            A64Shape *sh = a64_shape_of(cur.st[d - 1]);
+            uint32_t flen = (uint32_t)rd_i32_le(c + m->pc + 1);
+            int fi = a64_shape_field(sh, c + m->pc + 5, flen);
+            uint8_t ft = sh->fty[fi];
+            int want_tag = ft == A64_TY_I ? T_INT : ft == A64_TY_F ? T_FLOAT : T_BOOL;
+            a64_ldr(&b, 9, 29, S_OFF(d - 1));                 /* TDict* */
+            a64_ldr(&b, 11, 9, (int)offsetof(TDict, vals));   /* vals   */
+            a64_add_imm(&b, 11, 11, fi * 32);                 /* &vals[fi] */
+            a64_ldrw(&b, 12, 11, 0);
+            a64_movz(&b, 13, want_tag, 0);
+            a64_cmp(&b, 12, 13);
+            ADD_FIX(b.len, fail_tgt, 1, A64_NE);
+            a64_bcond(&b, A64_NE, 0);
+            a64_ldr(&b, 9, 11, 8);
+            a64_str(&b, 9, 29, S_OFF(d - 1));
+            break;
+        }
+        case OP_SETATTR: {
+            A64Shape *sh = a64_shape_of(cur.st[d - 2]);
+            uint32_t flen = (uint32_t)rd_i32_le(c + m->pc + 1);
+            int fi = a64_shape_field(sh, c + m->pc + 5, flen);
+            uint8_t ft = sh->fty[fi];
+            int want_tag = ft == A64_TY_I ? T_INT : ft == A64_TY_F ? T_FLOAT : T_BOOL;
+            a64_ldr(&b, 9, 29, S_OFF(d - 2));                 /* TDict* */
+            a64_ldr(&b, 14, 29, S_OFF(d - 1));                /* val    */
+            a64_ldr(&b, 11, 9, (int)offsetof(TDict, vals));   /* vals   */
+            a64_add_imm(&b, 11, 11, fi * 32);                 /* &vals[fi] */
+            a64_ldrw(&b, 12, 11, 0);
+            a64_movz(&b, 13, want_tag, 0);
+            a64_cmp(&b, 12, 13);
+            ADD_FIX(b.len, fail_tgt, 1, A64_NE);
+            a64_bcond(&b, A64_NE, 0);
+            a64_str(&b, 14, 11, 8);
+            break;
+        }
+        case OP_NEW_DICT: {
+            int k = m->k;
+            a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_new0);
+            a64_blr(&b, 11);
+            a64_str(&b, 0, 29, S_OFF(d));
+            for (int q = 0; q < k; q++) {
+                int kd = d - 2 * k + 2 * q;
+                uint8_t kt = cur.st[kd], vt = cur.st[kd + 1];
+                int kstr = a64_is_str(kt) ? 1 : 0;
+                int vty = vt == A64_TY_F ? 1 : vt == A64_TY_B ? 2 : vt == A64_TY_S ? 3 :
+                          vt == A64_TY_SN ? 4 : vt == A64_TY_D ? 5 : vt == A64_TY_DN ? 6 :
+                          a64_is_rec(vt) ? 7 : a64_is_own_rec(vt) ? 8 : 0;
+                int kv = (kstr ? 1 : 0) | (vty << 1);
+                a64_ldr(&b, 0, 29, S_OFF(d));
+                a64_ldr(&b, 1, 29, S_OFF(kd));
+                a64_ldr(&b, 2, 29, S_OFF(kd + 1));
+                a64_movz(&b, 3, kv, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_set);
+                a64_blr(&b, 11);
+            }
+            if (k > 0) {
+                a64_ldr(&b, 0, 29, S_OFF(d));
+                a64_str(&b, 0, 29, S_OFF(d - 2 * k));
+            }
+            break;
+        }
+        case OP_CALLM: {
+            int argc = m->k;
+            int fd = d - argc - 1;
+            uint32_t mlen = (uint32_t)rd_i32_le(c + m->pc + 2);
+            const uint8_t *mnm = c + m->pc + 6;
+            uint8_t kt = cur.st[fd + 1];
+            int kstr = a64_is_str(kt) ? 1 : 0;
+            if (argc == 2 && mlen == 3 && memcmp(mnm, "get", 3) == 0) {
+                a64_ldr(&b, 9, 29, S_OFF(fd + 2));            /* default */
+                a64_ldr(&b, 0, 29, S_OFF(fd));                /* dict    */
+                a64_ldr(&b, 1, 29, S_OFF(fd + 1));            /* key     */
+                a64_str(&b, 9, 29, S_OFF(fd));                /* prefill *out = default */
+                a64_movz(&b, 2, kstr, 0);
+                a64_add_imm(&b, 3, 29, S_OFF(fd));
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_getD);
+                a64_blr(&b, 11);
+                a64_movz(&b, 10, 1, 0);
+                a64_cmp(&b, 0, 10);
+                ADD_FIX(b.len, fail_tgt, 1, A64_EQ);
+                a64_bcond(&b, A64_EQ, 0);
+            } else if (argc == 1 && mlen == 3 && memcmp(mnm, "has", 3) == 0) {
+                a64_ldr(&b, 0, 29, S_OFF(fd));
+                a64_ldr(&b, 1, 29, S_OFF(fd + 1));
+                a64_movz(&b, 2, kstr, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_has);
+                a64_blr(&b, 11);
+                a64_str(&b, 0, 29, S_OFF(fd));
+            } else if (argc == 1 && mlen == 6 && memcmp(mnm, "remove", 6) == 0) {
+                a64_ldr(&b, 0, 29, S_OFF(fd));
+                a64_ldr(&b, 1, 29, S_OFF(fd + 1));
+                a64_movz(&b, 2, kstr, 0);
+                a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_dict_remove);
+                a64_blr(&b, 11);
+                ADD_FIX(b.len, fail_tgt, 3, 0);
+                a64_cbnz(&b, 0, 0);
+                a64_movz(&b, 0, 0, 0);
+                a64_str(&b, 0, 29, S_OFF(fd));
+            }
+            break;
+        }
         case OP_CALL: {
             int argc = m->k;
-            uint8_t fty = cur.st[d - argc - 1];
-            int32_t fsv = cur.sv[d - argc - 1];
+            int fd = d - argc - 1;
+            uint8_t fty = cur.st[fd];
+            int32_t fsv = cur.sv[fd];
             if (fty == A64_TY_NAT) {
                 uint8_t aty = cur.st[d - 1];
                 if (fsv == NAT_INT) {
@@ -1305,9 +1757,36 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
                         a64_str_d(&b, 0, 29, S_OFF(d - 3));
                     }
                 } else if (fsv == NAT_LEN) {
-                    a64_ldr(&b, 9, 29, S_OFF(d - 1));
-                    a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
-                    a64_str(&b, 9, 29, S_OFF(d - 2));
+                    if (a64_is_dict(aty)) {
+                        a64_ldr(&b, 9, 29, S_OFF(d - 1));
+                        a64_ldr(&b, 9, 9, (int)offsetof(TDict, len));
+                        a64_str(&b, 9, 29, S_OFF(d - 2));
+                    } else {
+                        a64_ldr(&b, 9, 29, S_OFF(d - 1));
+                        a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
+                        a64_str(&b, 9, 29, S_OFF(d - 2));
+                    }
+                } else if (fsv == NAT_STR) {
+                    int ty = aty == A64_TY_I ? 0 : aty == A64_TY_F ? 1 : aty == A64_TY_B ? 2 :
+                             aty == A64_TY_S ? 3 : 4;
+                    a64_ldr(&b, 0, 29, S_OFF(d - 1));
+                    a64_movz(&b, 1, ty, 0);
+                    a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)tjit_str_of);
+                    a64_blr(&b, 11);
+                    a64_str(&b, 0, 29, S_OFF(d - 2));
+                } else if (fsv == NAT___NEW) {
+                    int32_t tp_sv = cur.sv[fd + 1];
+                    TDict *tp = P->globals[tp_sv].u.dict;
+                    int nf = (int)tp->fields->len;
+                    uint8_t fts[A64_SHAPE_MAXF];
+                    for (int q = 0; q < nf; q++) fts[q] = cur.st[fd + 2 + q];
+                    int sh = a64_shape_reg(tp, nf, fts);
+                    a64_mov_imm64(&b, 0, (uint64_t)(uintptr_t)tp);
+                    a64_movz(&b, 1, sh, 0);
+                    a64_add_imm(&b, 2, 29, S_OFF(fd + 2));
+                    a64_mov_imm64(&b, 11, (uint64_t)(uintptr_t)a64_rec_new);
+                    a64_blr(&b, 11);
+                    a64_str(&b, 0, 29, S_OFF(fd));
                 }
             } else {
                 /* đệ quy trực tiếp: chép đối số vào vùng ARG_OFF, gọi bl 0 */
@@ -1332,11 +1811,15 @@ static int a64_compile_core(TVM *vm, TFn *fn, const uint8_t *in_ty, int is_osr, 
             break;
         case OP_JMPF:
             a64_ldr(&b, 9, 29, S_OFF(d - 1));
+            if (a64_is_str(cur.st[d - 1])) a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
+            else if (a64_is_dict(cur.st[d - 1])) a64_ldr(&b, 9, 9, (int)offsetof(TDict, len));
             ADD_FIX(b.len, m->tgt, 2, 9);
             a64_cbz(&b, 9, 0);
             break;
         case OP_JMPT:
             a64_ldr(&b, 9, 29, S_OFF(d - 1));
+            if (a64_is_str(cur.st[d - 1])) a64_ldr(&b, 9, 9, (int)offsetof(TList, len));
+            else if (a64_is_dict(cur.st[d - 1])) a64_ldr(&b, 9, 9, (int)offsetof(TDict, len));
             ADD_FIX(b.len, m->tgt, 3, 9);
             a64_cbnz(&b, 9, 0);
             break;
@@ -1482,7 +1965,12 @@ static int64_t a64_unit_invoke(const A64Unit *u, int64_t *in, A64Ctx *ctx) {
 static int a64_to_ret(uint8_t ty, int64_t r, TVal *ret) {
     if (ty == A64_TY_I) { ret->t = T_INT; ret->u.i = r; }
     else if (ty == A64_TY_F) { ret->t = T_FLOAT; memcpy(&ret->u.f, &r, 8); }
-    else { ret->t = T_BOOL; ret->u.b = (int)(r & 1); }
+    else if (ty == A64_TY_B) { ret->t = T_BOOL; ret->u.b = (int)(r & 1); }
+    else if (ty == A64_TY_S) { *ret = *(const TVal *)(uintptr_t)r; tval_retain(ret); }
+    else if (ty == A64_TY_SN) { TVal *w = (TVal *)(uintptr_t)r; *ret = *w; tjit_wrap_free(w); }
+    else if (ty == A64_TY_D || a64_is_rec(ty)) { ret->t = T_DICT; ret->u.dict = (TDict *)(uintptr_t)r; tval_retain(ret); }
+    else if (ty == A64_TY_DN || a64_is_own_rec(ty)) { ret->t = T_DICT; ret->u.dict = (TDict *)(uintptr_t)r; }
+    else { ret->t = T_NIL; ret->u.i = 0; }
     return 1;
 }
 

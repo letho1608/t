@@ -21,7 +21,8 @@ fn keywords():
         "chr", "argv", "assert", "mem", "f64bits", "import", "from", "as", "try", "except", "finally",
         "raise", "abs", "round", "min", "max", "sum", "any", "all",
         "sort", "reversed", "enumerate", "zip", "map", "filter",
-        "switch", "case", "default", "struct"]
+        "switch", "case", "default", "struct",
+        "with", "yield", "trait", "async", "await"]
 
 # tập keyword dựng một lần (tra dict thay vì quét list mỗi định danh)
 KWSET = {}

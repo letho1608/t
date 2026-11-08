@@ -12,10 +12,13 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <direct.h>
 #include <io.h>
 #include <process.h>
+#pragma comment(lib, "ws2_32.lib")
 #else
 #include <unistd.h>
 #include <dirent.h>
@@ -25,6 +28,10 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #endif
 
 #ifdef _WIN32
@@ -617,6 +624,7 @@ void tval_free(TVal *v) {
                 free(v->u.ten);
                 tval_free(&bv);
             } else {
+                free(v->u.ten->raw);
                 tbuf_put(v->u.ten->d, v->u.ten->len); free(v->u.ten);
             }
         }
@@ -852,6 +860,7 @@ static void buf_put(Buf *b, const char *s, size_t n) {
 }
 static void buf_c(Buf *b, char c) { buf_put(b, &c, 1); }
 static void ten_fmt(Buf *b, const TTensor *t);
+static int dict_find(TDict *d, const TVal *k);
 static void fmt_into(Buf *b, const TVal *v) {
     char tmp[64];
     size_t i;
@@ -880,7 +889,25 @@ static void fmt_into(Buf *b, const TVal *v) {
             buf_put(b, "<struct ", 8); buf_put(b, rec_name(d), strlen(rec_name(d))); buf_c(b, '>');
             break;
         }
-        if (d->kind == DK_REC) buf_put(b, rec_name(d), strlen(rec_name(d)));
+        if (d->kind == DK_REC) {
+            if (cur_vm && d->meths) {
+                TVal sk = mk_str("__str__");
+                int mi = dict_find(d->meths, &sk);
+                tval_free(&sk);
+                if (mi >= 0) {
+                    TVal fn = d->meths->vals[mi], self = *v, out = mk_nil();
+                    tval_retain(&self);
+                    if (tvm_call_value(cur_vm, fn, &self, 1, &out)) {
+                        if (out.t == T_STR) buf_put(b, out.u.str.s, out.u.str.n);
+                        else fmt_into(b, &out);
+                        tval_free(&out);
+                        break;
+                    }
+                    tval_free(&self);
+                }
+            }
+            buf_put(b, rec_name(d), strlen(rec_name(d)));
+        }
         mod_pull_all(d);
         buf_c(b, '{');
         for (i = 0; i < d->len; i++) {
@@ -1124,6 +1151,20 @@ static void n_range(TVM *vm, TVal *a, int argc, TVal *r) {
     for (int64_t i = lo; i < hi; i++) list_push(l, mk_int(i));
     r->t = T_LIST; r->u.list = l;
 }
+static int rec_call_dunder(TVM *vm, const TVal *self, const char *mname, const TVal *arg1, const TVal *arg2, int nargs, TVal *out) {
+    if (self->t != T_DICT || self->u.dict->kind != DK_REC || !self->u.dict->meths) return 0;
+    TVal key = mk_str(mname);
+    int mi = dict_find(self->u.dict->meths, &key);
+    tval_free(&key);
+    if (mi < 0) return 0;
+    TVal fn = self->u.dict->meths->vals[mi];
+    TVal args[3];
+    args[0] = *self; tval_retain(&args[0]);
+    if (nargs >= 1 && arg1) { args[1] = *arg1; tval_retain(&args[1]); }
+    if (nargs >= 2 && arg2) { args[2] = *arg2; tval_retain(&args[2]); }
+    return tvm_call_value(vm, fn, args, nargs + 1, out);
+}
+
 static void n_len(TVM *vm, TVal *a, int argc, TVal *r) {
     NARG(1);
     size_t n;
@@ -1131,6 +1172,7 @@ static void n_len(TVM *vm, TVal *a, int argc, TVal *r) {
     else if (a[0].t == T_LIST) n = a[0].u.list->len;
     else if (a[0].t == T_TENSOR) n = a[0].u.ten->ndim ? a[0].u.ten->shape[0] : a[0].u.ten->len;
     else if (a[0].t == T_DICT && a[0].u.dict->kind <= DK_SET) n = a[0].u.dict->len;
+    else if (a[0].t == T_DICT && a[0].u.dict->kind == DK_REC && rec_call_dunder(vm, &a[0], "__len__", NULL, NULL, 0, r)) return;
     else die(vm, "len() here");
     *r = mk_int((int64_t)n);
 }
@@ -1168,10 +1210,18 @@ static void n_type(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_str(tname_of(&a[0]));
 }
 static TTensor *ten_from(TVM *vm, const TVal *v);
+static int ten_parse_dtype(TVM *vm, const char *s);
+static void ten_pack_dtype(TTensor *t, int dt);
 static void n_tensor(TVM *vm, TVal *a, int argc, TVal *r) {
-    NARG(1);
+    NMIN(1); NMAX(2);
     if (a[0].t == T_BOOL) die(vm, "tensor() numbers");
+    int dt = TD_F64;
+    if (argc == 2) {
+        if (a[1].t != T_STR) die(vm, "tensor() dtype str");
+        dt = ten_parse_dtype(vm, a[1].u.str.s);
+    }
     r->t = T_TENSOR; r->u.ten = ten_from(vm, &a[0]);
+    if (dt != TD_F64) ten_pack_dtype(r->u.ten, dt);
 }
 static void n_open(TVM *vm, TVal *a, int argc, TVal *r) {
     const char *mode = "r";
@@ -1233,7 +1283,22 @@ static void n_write(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_int((int64_t)w);
 }
 static void n_close(TVM *vm, TVal *a, int argc, TVal *r) {
-    NARG(1);
+    NMIN(1); NMAX(2);
+    if (argc == 2) {
+        /* close(obj, 1): with-enter hook -> gọi __enter__() nếu có, ngược lại trả chính obj */
+        if (a[0].t == T_DICT && a[0].u.dict->kind == DK_REC) {
+            if (rec_call_dunder(vm, &a[0], "__enter__", NULL, NULL, 0, r)) return;
+        }
+        *r = a[0]; tval_retain(r);
+        return;
+    }
+    if (a[0].t == T_NIL) { r->t = T_NIL; return; }
+    if (a[0].t == T_DICT && a[0].u.dict->kind == DK_REC) {
+        TVal out = mk_nil();
+        if (rec_call_dunder(vm, &a[0], "__exit__", NULL, NULL, 0, &out)) { tval_free(&out); r->t = T_NIL; return; }
+        if (rec_call_dunder(vm, &a[0], "close", NULL, NULL, 0, &out)) { tval_free(&out); r->t = T_NIL; return; }
+        r->t = T_NIL; return;
+    }
     if (a[0].t != T_FILE) die(vm, "close(f)");
     TFile *f = a[0].u.file;
     if (f->h && !f->closed) { fclose(f->h); f->closed = 1; f->h = NULL; }
@@ -1771,6 +1836,15 @@ static void m_list_append(TVM *vm, TVal *a, int argc, TVal *r) {
     list_push(a[0].u.list, v);
     r->t = T_NIL;
 }
+static void m_list_next(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(1);
+    if (a[0].t != T_LIST) die(vm, "next()");
+    TList *l = a[0].u.list;
+    if (l->len == 0) { r->t = T_NIL; return; }
+    *r = l->items[0];
+    for (size_t i = 0; i + 1 < l->len; i++) l->items[i] = l->items[i + 1];
+    l->len--;
+}
 static void m_list_pop(TVM *vm, TVal *a, int argc, TVal *r) {
     int64_t ix = -1;
     if (argc < 1 || argc > 2) die(vm, "arity");
@@ -2279,6 +2353,7 @@ static TNativeFn builtin_method(const TVal *o, const char *nb) {
     } else if (o->t == T_LIST) {
         if (!strcmp(nb, "append")) return m_list_append;
         if (!strcmp(nb, "pop")) return m_list_pop;
+        if (!strcmp(nb, "next")) return m_list_next;
         if (!strcmp(nb, "clear")) return m_list_clear;
         if (!strcmp(nb, "insert")) return m_list_insert;
         if (!strcmp(nb, "extend")) return m_list_extend;
@@ -2415,6 +2490,16 @@ double fmod_floor(double a, double b) {
 static void arith(TVM *vm, int op) {
     TVal b = pop(vm), a = pop(vm);
     TVal r; r.t = T_NIL;
+    if (a.t == T_DICT && a.u.dict->kind == DK_REC) {
+        const char *dn = op == OP_ADD ? "__add__" : op == OP_SUB ? "__sub__" :
+                         op == OP_MUL ? "__mul__" : op == OP_DIV ? "__div__" :
+                         op == OP_MOD ? "__mod__" : op == OP_POW ? "__pow__" :
+                         op == OP_TDOT ? "__matmul__" : NULL;
+        if (dn && rec_call_dunder(vm, &a, dn, &b, NULL, 1, &r)) {
+            tval_free(&a); tval_free(&b);
+            push(vm, r); return;
+        }
+    }
     /* tensor paths */
     if (a.t == T_TENSOR || b.t == T_TENSOR) {
         if (op != OP_ADD && op != OP_SUB && op != OP_MUL && op != OP_DIV &&
@@ -2516,6 +2601,21 @@ static TTensor *ten_binop(TVM *vm, int op, const TVal *a, const TVal *b);
 static void cmpop(TVM *vm, int op) {
     TVal b = pop(vm), a = pop(vm);
     int res = 0;
+    if (a.t == T_DICT && a.u.dict->kind == DK_REC) {
+        const char *dn = op == OP_EQ ? "__eq__" : op == OP_NE ? "__ne__" :
+                         op == OP_LT ? "__lt__" : op == OP_GT ? "__gt__" :
+                         op == OP_LE ? "__le__" : op == OP_GE ? "__ge__" : NULL;
+        TVal r = mk_nil();
+        if (dn && rec_call_dunder(vm, &a, dn, &b, NULL, 1, &r)) {
+            tval_free(&a); tval_free(&b);
+            push(vm, r); return;
+        }
+        if (op == OP_NE && rec_call_dunder(vm, &a, "__eq__", &b, NULL, 1, &r)) {
+            int eq = tval_truthy(&r);
+            tval_free(&r); tval_free(&a); tval_free(&b);
+            push(vm, mk_bool(!eq)); return;
+        }
+    }
     /* < > <= >= với tensor: từng phần tử -> tensor 0/1 (== != so cả tensor) */
     if ((a.t == T_TENSOR || b.t == T_TENSOR) && op != OP_EQ && op != OP_NE) {
         if ((a.t != T_TENSOR && a.t != T_INT && a.t != T_FLOAT) ||
@@ -4778,6 +4878,332 @@ static void sys_arm64_dump(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_bool(t_arm64_dump(a[0].u.str.s));
 }
 
+/* ========================================================================= */
+/* Native TCP/UDP Sockets & Single-Binary Bundler (v6.0 N4 & T5)             */
+/* ========================================================================= */
+
+#ifdef _WIN32
+typedef SOCKET t_sock_t;
+#define T_BAD_SOCK INVALID_SOCKET
+static void sock_init_once(void) {
+    static int inited = 0;
+    if (!inited) {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        inited = 1;
+    }
+}
+static void sock_close_raw(t_sock_t s) { closesocket(s); }
+#else
+typedef int t_sock_t;
+#define T_BAD_SOCK (-1)
+static void sock_init_once(void) {}
+static void sock_close_raw(t_sock_t s) { close(s); }
+#endif
+
+static int sock_parse_addr(const char *host, int port, struct sockaddr_in *sa) {
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    sa->sin_port = htons((uint16_t)port);
+    if (!host || !*host || !strcmp(host, "0.0.0.0") || !strcmp(host, "*")) {
+        sa->sin_addr.s_addr = htonl(INADDR_ANY);
+        return 1;
+    }
+    if (!strcmp(host, "localhost")) host = "127.0.0.1";
+    if (inet_pton(AF_INET, host, &sa->sin_addr) == 1) return 1;
+    struct hostent *he = gethostbyname(host);
+    if (he && he->h_addr_list && he->h_addr_list[0]) {
+        memcpy(&sa->sin_addr, he->h_addr_list[0], sizeof(struct in_addr));
+        return 1;
+    }
+    return 0;
+}
+
+static void sys_sock_listen(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 2 || a[0].t != T_STR || a[1].t != T_INT) die(vm, "sock_listen(host: str, port: int[, backlog: int])");
+    sock_init_once();
+    int backlog = (argc >= 3 && a[2].t == T_INT) ? (int)a[2].u.i : 16;
+    t_sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == T_BAD_SOCK) die(vm, "sock_listen: socket() failed");
+    int opt = 1;
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+    struct sockaddr_in sa;
+    if (!sock_parse_addr(a[0].u.str.s, (int)a[1].u.i, &sa)) {
+        sock_close_raw(s);
+        die(vm, "sock_listen: invalid address");
+    }
+    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
+        sock_close_raw(s);
+        die(vm, "sock_listen: bind() failed");
+    }
+    if (listen(s, backlog) != 0) {
+        sock_close_raw(s);
+        die(vm, "sock_listen: listen() failed");
+    }
+    *r = mk_int((int64_t)s);
+}
+
+static void sys_sock_port(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "sock_port(fd: int)");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    struct sockaddr_in sa;
+#ifdef _WIN32
+    int len = sizeof(sa);
+#else
+    socklen_t len = sizeof(sa);
+#endif
+    if (getsockname(s, (struct sockaddr*)&sa, &len) != 0) die(vm, "sock_port: getsockname() failed");
+    *r = mk_int((int64_t)ntohs(sa.sin_port));
+}
+
+static void sys_sock_accept(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "sock_accept(server_fd: int)");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    struct sockaddr_in client_sa;
+#ifdef _WIN32
+    int len = sizeof(client_sa);
+#else
+    socklen_t len = sizeof(client_sa);
+#endif
+    t_sock_t c = accept(s, (struct sockaddr*)&client_sa, &len);
+    if (c == T_BAD_SOCK) die(vm, "sock_accept: accept() failed");
+    *r = mk_int((int64_t)c);
+}
+
+static void sys_sock_connect(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR || a[1].t != T_INT) die(vm, "sock_connect(host: str, port: int)");
+    sock_init_once();
+    t_sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == T_BAD_SOCK) die(vm, "sock_connect: socket() failed");
+    struct sockaddr_in sa;
+    if (!sock_parse_addr(a[0].u.str.s, (int)a[1].u.i, &sa)) {
+        sock_close_raw(s);
+        die(vm, "sock_connect: invalid address");
+    }
+    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
+        sock_close_raw(s);
+        die(vm, "sock_connect: connect() failed");
+    }
+    *r = mk_int((int64_t)s);
+}
+
+static void sys_sock_send(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_STR) die(vm, "sock_send(fd: int, data: str)");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    const char *p = a[1].u.str.s;
+    size_t rem = a[1].u.str.n, sent_tot = 0;
+    while (rem > 0) {
+        int n = send(s, p + sent_tot, (int)rem, 0);
+        if (n <= 0) break;
+        sent_tot += (size_t)n;
+        rem -= (size_t)n;
+    }
+    *r = mk_int((int64_t)sent_tot);
+}
+
+static void sys_sock_recv(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || a[0].t != T_INT) die(vm, "sock_recv(fd: int[, max_bytes: int])");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    size_t max_b = (argc >= 2 && a[1].t == T_INT && a[1].u.i > 0) ? (size_t)a[1].u.i : 4096;
+    char *buf = (char*)malloc(max_b + 1);
+    if (!buf) die(vm, "sock_recv: out of memory");
+    int n = recv(s, buf, (int)max_b, 0);
+    if (n <= 0) {
+        free(buf);
+        *r = mk_str_n("", 0);
+        return;
+    }
+    *r = mk_str_n(buf, (size_t)n);
+    free(buf);
+}
+
+static void sys_sock_close(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "sock_close(fd: int)");
+    sock_close_raw((t_sock_t)a[0].u.i);
+    *r = mk_bool(1);
+}
+
+static void sys_sock_udp_open(TVM *vm, TVal *a, int argc, TVal *r) {
+    sock_init_once();
+    t_sock_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == T_BAD_SOCK) die(vm, "sock_udp_open: socket() failed");
+    if (argc >= 2 && a[0].t == T_STR && a[1].t == T_INT) {
+        int opt = 1;
+#ifdef _WIN32
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+        struct sockaddr_in sa;
+        if (!sock_parse_addr(a[0].u.str.s, (int)a[1].u.i, &sa) ||
+            bind(s, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
+            sock_close_raw(s);
+            die(vm, "sock_udp_open: bind() failed");
+        }
+    }
+    *r = mk_int((int64_t)s);
+}
+
+static void sys_sock_udp_sendto(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 4 || a[0].t != T_INT || a[1].t != T_STR || a[2].t != T_STR || a[3].t != T_INT)
+        die(vm, "sock_udp_sendto(fd: int, data: str, host: str, port: int)");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    struct sockaddr_in sa;
+    if (!sock_parse_addr(a[2].u.str.s, (int)a[3].u.i, &sa))
+        die(vm, "sock_udp_sendto: invalid address");
+    int n = sendto(s, a[1].u.str.s, (int)a[1].u.str.n, 0, (struct sockaddr*)&sa, sizeof(sa));
+    *r = mk_int(n >= 0 ? n : 0);
+}
+
+static void sys_sock_udp_recvfrom(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 1 || a[0].t != T_INT) die(vm, "sock_udp_recvfrom(fd: int[, max_bytes: int])");
+    t_sock_t s = (t_sock_t)a[0].u.i;
+    size_t max_b = (argc >= 2 && a[1].t == T_INT && a[1].u.i > 0) ? (size_t)a[1].u.i : 4096;
+    char *buf = (char*)malloc(max_b + 1);
+    struct sockaddr_in sa;
+#ifdef _WIN32
+    int salen = sizeof(sa);
+#else
+    socklen_t salen = sizeof(sa);
+#endif
+    int n = recvfrom(s, buf, (int)max_b, 0, (struct sockaddr*)&sa, &salen);
+    TDict *d = dict_new();
+    if (n > 0) {
+        char ip[64];
+        const char *ips = inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof(ip));
+        dict_set(d, mk_str("data"), mk_str_n(buf, (size_t)n));
+        dict_set(d, mk_str("host"), mk_str(ips ? ips : "127.0.0.1"));
+        dict_set(d, mk_str("port"), mk_int((int64_t)ntohs(sa.sin_port)));
+    } else {
+        dict_set(d, mk_str("data"), mk_str_n("", 0));
+        dict_set(d, mk_str("host"), mk_str(""));
+        dict_set(d, mk_str("port"), mk_int(0));
+    }
+    free(buf);
+    r->t = T_DICT; r->u.dict = d;
+}
+
+int tvm_build_exe(const char *src_or_tb, const char *out_exe, char *msg, size_t msgn) {
+    char tmp_tb[1024];
+    const char *tb_path = src_or_tb;
+    int used_tmp = 0;
+    if (msgn) msg[0] = 0;
+    if (!tvm_exe_path) {
+        if (msgn) snprintf(msg, msgn, "không xác định được đường dẫn trun");
+        return -1;
+    }
+    FILE *chk = fopen(src_or_tb, "rb");
+    if (!chk) {
+        if (msgn) snprintf(msg, msgn, "không mở được %s", src_or_tb);
+        return -1;
+    }
+    unsigned char hdr[4];
+    size_t hn = fread(hdr, 1, 4, chk);
+    fclose(chk);
+    if (hn != 4 || memcmp(hdr, "TB01", 4) != 0) {
+        static int bseq = 0;
+#ifdef _WIN32
+        char dir[512];
+        DWORD dlen = GetTempPathA((DWORD)sizeof(dir), dir);
+        if (dlen == 0 || dlen >= sizeof(dir)) snprintf(dir, sizeof(dir), ".");
+        snprintf(tmp_tb, sizeof(tmp_tb), "%strun_bexe_%lu_%d.tb", dir, (unsigned long)GetCurrentProcessId(), ++bseq);
+#else
+        snprintf(tmp_tb, sizeof(tmp_tb), "/tmp/trun_bexe_%lu_%d.tb", (unsigned long)getpid(), ++bseq);
+#endif
+        if (tvm_compile_src(src_or_tb, tmp_tb, 1, msg, msgn) < 0) {
+            remove(tmp_tb);
+            return -1;
+        }
+        tb_path = tmp_tb;
+        used_tmp = 1;
+    }
+    FILE *frun = fopen(tvm_exe_path, "rb");
+    if (!frun) {
+        if (used_tmp) remove(tmp_tb);
+        if (msgn) snprintf(msg, msgn, "không đọc được runner %s", tvm_exe_path);
+        return -1;
+    }
+    fseek(frun, 0, SEEK_END);
+    long run_sz = ftell(frun);
+    /* Nếu bản thân tvm_exe_path đã là bundled exe, chỉ lấy phần runner gốc */
+    if (run_sz > 16) {
+        char tail[16];
+        fseek(frun, run_sz - 16, SEEK_SET);
+        if (fread(tail, 1, 16, frun) == 16 && memcmp(tail + 8, "TBEXE001", 8) == 0) {
+            uint64_t emb_sz = 0;
+            memcpy(&emb_sz, tail, 8);
+            if (emb_sz > 0 && (long)(emb_sz + 16) < run_sz) {
+                run_sz -= (long)(emb_sz + 16);
+            }
+        }
+    }
+    fseek(frun, 0, SEEK_SET);
+    uint8_t *run_buf = (uint8_t*)malloc((size_t)run_sz);
+    if (!run_buf || fread(run_buf, 1, (size_t)run_sz, frun) != (size_t)run_sz) {
+        fclose(frun); free(run_buf);
+        if (used_tmp) remove(tmp_tb);
+        if (msgn) snprintf(msg, msgn, "lỗi đọc runner");
+        return -1;
+    }
+    fclose(frun);
+
+    FILE *ftb = fopen(tb_path, "rb");
+    if (!ftb) {
+        free(run_buf);
+        if (used_tmp) remove(tmp_tb);
+        if (msgn) snprintf(msg, msgn, "không đọc được %s", tb_path);
+        return -1;
+    }
+    fseek(ftb, 0, SEEK_END);
+    long tb_sz = ftell(ftb);
+    fseek(ftb, 0, SEEK_SET);
+    uint8_t *tb_buf = (uint8_t*)malloc((size_t)(tb_sz > 0 ? tb_sz : 1));
+    if (!tb_buf || (tb_sz > 0 && fread(tb_buf, 1, (size_t)tb_sz, ftb) != (size_t)tb_sz)) {
+        fclose(ftb); free(run_buf); free(tb_buf);
+        if (used_tmp) remove(tmp_tb);
+        if (msgn) snprintf(msg, msgn, "lỗi đọc bytecode");
+        return -1;
+    }
+    fclose(ftb);
+    if (used_tmp) remove(tmp_tb);
+
+    FILE *fout = fopen(out_exe, "wb");
+    if (!fout) {
+        free(run_buf); free(tb_buf);
+        if (msgn) snprintf(msg, msgn, "không tạo được %s", out_exe);
+        return -1;
+    }
+    uint64_t sz64 = (uint64_t)tb_sz;
+    int ok = (fwrite(run_buf, 1, (size_t)run_sz, fout) == (size_t)run_sz) &&
+             (fwrite(tb_buf, 1, (size_t)tb_sz, fout) == (size_t)tb_sz) &&
+             (fwrite(&sz64, 1, 8, fout) == 8) &&
+             (fwrite("TBEXE001", 1, 8, fout) == 8);
+    fclose(fout);
+    free(run_buf);
+    free(tb_buf);
+#ifndef _WIN32
+    chmod(out_exe, 0755);
+#endif
+    if (!ok) {
+        if (msgn) snprintf(msg, msgn, "lỗi ghi %s", out_exe);
+        return -1;
+    }
+    return 0;
+}
+
+static void sys_build_exe(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR || a[1].t != T_STR)
+        die(vm, "build_exe(src_or_tb: str, out_exe: str)");
+    char msg[256];
+    if (tvm_build_exe(a[0].u.str.s, a[1].u.str.s, msg, sizeof(msg)) != 0)
+        die(vm, msg[0] ? msg : "build_exe failed");
+    *r = mk_bool(1);
+}
+
 static TVal mk_native(TNativeFn fn, const char *name);
 static void make_sys_mod(TVM *vm, TVal *r) {
     static const struct { const char *name; TNativeFn fn; } S[] = {
@@ -4829,7 +5255,15 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},
         {"channel_recv", sys_channel_recv}, {"channel_close", sys_channel_close},
         {"channel_len", sys_channel_len},
-        {"thread_spawn", sys_thread_spawn}, {"thread_join", sys_thread_join}
+        {"thread_spawn", sys_thread_spawn}, {"thread_join", sys_thread_join},
+
+        /* sockets & standalone executable bundler (v6.0) */
+        {"sock_listen", sys_sock_listen}, {"sock_port", sys_sock_port},
+        {"sock_accept", sys_sock_accept}, {"sock_connect", sys_sock_connect},
+        {"sock_send", sys_sock_send}, {"sock_recv", sys_sock_recv},
+        {"sock_close", sys_sock_close}, {"sock_udp_open", sys_sock_udp_open},
+        {"sock_udp_sendto", sys_sock_udp_sendto}, {"sock_udp_recvfrom", sys_sock_udp_recvfrom},
+        {"build_exe", sys_build_exe}
     };
     size_t ne = sizeof(S) / sizeof(S[0]);
     TList *fl = list_new(ne);
@@ -5592,7 +6026,7 @@ int tvm_run(TVM *vm) {
                 a->u.i = (int64_t)((uint64_t)a->u.i + (uint64_t)b->u.i); vm->sp--; break;
             }
             if (a->t == T_FLOAT && b->t == T_FLOAT) { a->u.f += b->u.f; vm->sp--; break; }
-            arith(vm, op); break;
+            arith(vm, op); RELOAD_CODE(); LOAD_PC(); break;
         }
         case OP_SUB: {
             TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
@@ -5600,7 +6034,7 @@ int tvm_run(TVM *vm) {
                 a->u.i = (int64_t)((uint64_t)a->u.i - (uint64_t)b->u.i); vm->sp--; break;
             }
             if (a->t == T_FLOAT && b->t == T_FLOAT) { a->u.f -= b->u.f; vm->sp--; break; }
-            arith(vm, op); break;
+            arith(vm, op); RELOAD_CODE(); LOAD_PC(); break;
         }
         case OP_MUL: {
             TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
@@ -5608,17 +6042,17 @@ int tvm_run(TVM *vm) {
                 a->u.i = (int64_t)((uint64_t)a->u.i * (uint64_t)b->u.i); vm->sp--; break;
             }
             if (a->t == T_FLOAT && b->t == T_FLOAT) { a->u.f *= b->u.f; vm->sp--; break; }
-            arith(vm, op); break;
+            arith(vm, op); RELOAD_CODE(); LOAD_PC(); break;
         }
         case OP_MOD: {
             TVal *b = &vm->stack[vm->sp - 1], *a = b - 1;
             if (a->t == T_INT && b->t == T_INT && b->u.i != 0) {
                 a->u.i = imod(a->u.i, b->u.i); vm->sp--; break;
             }
-            arith(vm, op); break;
+            arith(vm, op); RELOAD_CODE(); LOAD_PC(); break;
         }
         case OP_DIV: case OP_POW: case OP_TDOT:
-            arith(vm, op); break;
+            arith(vm, op); RELOAD_CODE(); LOAD_PC(); break;
         case OP_NEG: {
             TVal a = pop(vm);
             if (a.t == T_INT) { int64_t i = a.u.i; tval_free(&a); push(vm, mk_int(-i)); }
@@ -5629,6 +6063,14 @@ int tvm_run(TVM *vm) {
                 for (size_t i = 0; i < t->len; i++) t->d[i] = -a.u.ten->d[i];
                 tval_free(&a);
                 push(vm, ten_val(t));
+            }
+            else if (a.t == T_DICT && a.u.dict->kind == DK_REC) {
+                TVal r = mk_nil();
+                if (rec_call_dunder(vm, &a, "__neg__", NULL, NULL, 0, &r)) {
+                    tval_free(&a);
+                    push(vm, r);
+                    RELOAD_CODE(); LOAD_PC();
+                } else { tval_free(&a); die(vm, "neg here"); }
             }
             else { tval_free(&a); die(vm, "neg here"); }
             break;
@@ -5655,7 +6097,7 @@ int tvm_run(TVM *vm) {
                          (a->u.str.n == b->u.str.n && memcmp(a->u.str.s, b->u.str.s, a->u.str.n) == 0);
                 r = op == OP_EQ ? eq : !eq;
                 tval_free(a); tval_free(b);
-            } else { cmpop(vm, op); break; }
+            } else { cmpop(vm, op); RELOAD_CODE(); LOAD_PC(); break; }
             a->t = T_BOOL; a->u.b = r; vm->sp--;
             break;
         }
@@ -5712,7 +6154,12 @@ int tvm_run(TVM *vm) {
             }
             if (cv.t == T_DICT && cv.u.dict->kind == DK_REC) {
                 int i = dict_find(cv.u.dict, &ix);
-                if (i < 0) {
+                if (i >= 0) {
+                    mod_pull(cv.u.dict, (size_t)i);
+                    r = cv.u.dict->vals[i]; tval_retain(&r);
+                } else if (rec_call_dunder(vm, &cv, "__getitem__", &ix, NULL, 1, &r)) {
+                    RELOAD_CODE(); LOAD_PC();
+                } else {
                     char eb[128]; Buf b = {0,0,0};
                     fmt_into(&b, &ix);
                     snprintf(eb, sizeof(eb), "%.40s has no field %.40s",
@@ -5720,8 +6167,6 @@ int tvm_run(TVM *vm) {
                     free(b.s);
                     tval_free(&ix); tval_free(&cv); die(vm, eb);
                 }
-                mod_pull(cv.u.dict, (size_t)i);
-                r = cv.u.dict->vals[i]; tval_retain(&r);
             } else if (cv.t == T_DICT) {
                 if (!hashable(&ix)) {
                     char eb[96];
@@ -5816,23 +6261,28 @@ int tvm_run(TVM *vm) {
                 tval_free(&v);
             } else if (cv.t == T_DICT && cv.u.dict->kind == DK_REC) {
                 int i = dict_find(cv.u.dict, &ix);
-                if (i < 0) {
-                    char eb[128]; Buf b = {0,0,0};
-                    fmt_into(&b, &ix);
-                    snprintf(eb, sizeof(eb), "%.40s has no field %.40s",
-                             rec_name(cv.u.dict), b.s ? b.s : "?");
-                    free(b.s);
-                    tval_free(&v); tval_free(&ix); tval_free(&cv); die(vm, eb);
-                }
-                {
+                if (i >= 0) {
                     char eb[128];
                     if (mod_ro(cv.u.dict, (size_t)i, eb, sizeof(eb))) {
                         tval_free(&v); tval_free(&ix); tval_free(&cv); die(vm, eb);
                     }
+                    tval_free(&cv.u.dict->vals[i]);
+                    cv.u.dict->vals[i] = v;
+                    mod_push(cv.u.dict, (size_t)i);
+                } else {
+                    TVal out = mk_nil();
+                    if (rec_call_dunder(vm, &cv, "__setitem__", &ix, &v, 2, &out)) {
+                        tval_free(&out); tval_free(&v);
+                        RELOAD_CODE(); LOAD_PC();
+                    } else {
+                        char eb[128]; Buf b = {0,0,0};
+                        fmt_into(&b, &ix);
+                        snprintf(eb, sizeof(eb), "%.40s has no field %.40s",
+                                 rec_name(cv.u.dict), b.s ? b.s : "?");
+                        free(b.s);
+                        tval_free(&v); tval_free(&ix); tval_free(&cv); die(vm, eb);
+                    }
                 }
-                tval_free(&cv.u.dict->vals[i]);
-                cv.u.dict->vals[i] = v;
-                mod_push(cv.u.dict, (size_t)i);
             } else if (cv.t == T_DICT && cv.u.dict->kind == DK_DICT) {
                 if (!hashable(&ix)) {
                     char eb[96];
@@ -5930,6 +6380,16 @@ int tvm_run(TVM *vm) {
             else if (a.t == T_LIST) k = a.u.list->len;
             else if (a.t == T_TENSOR) k = ten_len0(a.u.ten);
             else if (a.t == T_DICT && a.u.dict->kind <= DK_SET) k = a.u.dict->len;
+            else if (a.t == T_DICT && a.u.dict->kind == DK_REC) {
+                TVal r = mk_nil();
+                if (rec_call_dunder(vm, &a, "__len__", NULL, NULL, 0, &r)) {
+                    tval_free(&a);
+                    push(vm, r);
+                    RELOAD_CODE(); LOAD_PC();
+                    break;
+                }
+                tval_free(&a); die(vm, "len() here");
+            }
             else { tval_free(&a); die(vm, "len() here"); }
             tval_free(&a);
             push(vm, mk_int((int64_t)k)); break;
@@ -6286,6 +6746,15 @@ int tvm_run(TVM *vm) {
             break;
         case OP_FOR_PREP: {
             TVal v = pop(vm);
+            if (v.t == T_DICT && v.u.dict->kind == DK_REC) {
+                TVal r = mk_nil();
+                if (rec_call_dunder(vm, &v, "__iter__", NULL, NULL, 0, &r)) {
+                    tval_free(&v);
+                    RELOAD_CODE(); LOAD_PC();
+                    push(vm, r);
+                    break;
+                }
+            }
             if ((v.t == T_DICT && v.u.dict->kind >= DK_REC) ||
                 (v.t != T_DICT && v.t != T_LIST && v.t != T_STR && v.t != T_TENSOR)) {
                 char eb[96];

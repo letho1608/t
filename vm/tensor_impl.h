@@ -30,6 +30,8 @@ static TTensor *ten_alloc(int nd, const size_t *sh) {
     t->len = sh_prod(sh, nd);
     t->d = tbuf_get(t->len);
     if (!t->d) exit(1);
+    t->raw = NULL;
+    t->dtype = TD_F64;
     t->base = NULL;
     t->sv = 0;
     t->off = 0;
@@ -110,6 +112,8 @@ static TTensor *ten_mkview(const TTensor *t, size_t off, int nd, const size_t *s
     v->ndim = nd;
     for (int i = 0; i < nd; i++) { v->shape[i] = sh[i]; v->st[i] = st[i]; }
     v->len = n;
+    v->raw = NULL;
+    v->dtype = own->dtype;
     v->base = own;
     v->off = off;
     v->sv = !cont;
@@ -1274,6 +1278,159 @@ static void m_ten_conv2d_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
     r->u.list = l;
 }
 
+/* ---------- G14: Multi-Dtype Native Tensor (f64, f32, f16, bf16, i32, i8) ---------- */
+static uint16_t ten_f64_to_f16(double val) {
+    float f = (float)val;
+    uint32_t x;
+    memcpy(&x, &f, 4);
+    uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t exp = (int32_t)((x >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mant = x & 0x007FFFFFu;
+    if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        mant = (mant | 0x00800000u) >> (1 - exp);
+        return (uint16_t)(sign | (mant >> 13));
+    } else if (exp == 0xFF - 127 + 15) {
+        return (uint16_t)(sign | 0x7C00u | (mant ? 0x0200u : 0u));
+    } else if (exp > 30) {
+        return (uint16_t)(sign | 0x7C00u);
+    }
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
+}
+static double ten_f16_to_f64(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t mant = h & 0x03FFu;
+    uint32_t x;
+    if (exp == 0) {
+        if (mant == 0) x = sign;
+        else {
+            exp = 1;
+            while ((mant & 0x0400u) == 0) { mant <<= 1; exp--; }
+            mant &= 0x03FFu;
+            x = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        x = sign | 0x7F800000u | (mant << 13);
+    } else {
+        x = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float f;
+    memcpy(&f, &x, 4);
+    return (double)f;
+}
+static uint16_t ten_f64_to_bf16(double val) {
+    float f = (float)val;
+    uint32_t x;
+    memcpy(&x, &f, 4);
+    if ((x & 0x7FFFFFFFu) <= 0x7F800000u) {
+        uint32_t lsb = (x >> 16) & 1u;
+        x += 0x7FFFu + lsb;
+    }
+    return (uint16_t)(x >> 16);
+}
+static double ten_bf16_to_f64(uint16_t h) {
+    uint32_t x = ((uint32_t)h) << 16;
+    float f;
+    memcpy(&f, &x, 4);
+    return (double)f;
+}
+static int ten_parse_dtype(TVM *vm, const char *s) {
+    if (!strcmp(s, "float64") || !strcmp(s, "f64")) return TD_F64;
+    if (!strcmp(s, "float32") || !strcmp(s, "f32")) return TD_F32;
+    if (!strcmp(s, "float16") || !strcmp(s, "f16")) return TD_F16;
+    if (!strcmp(s, "bfloat16") || !strcmp(s, "bf16")) return TD_BF16;
+    if (!strcmp(s, "int32") || !strcmp(s, "i32")) return TD_I32;
+    if (!strcmp(s, "int8") || !strcmp(s, "i8")) return TD_I8;
+    die(vm, "unknown tensor dtype");
+    return TD_F64;
+}
+static const char *ten_dtype_name(int dt) {
+    switch (dt) {
+    case TD_F32:  return "float32";
+    case TD_F16:  return "float16";
+    case TD_BF16: return "bfloat16";
+    case TD_I32:  return "int32";
+    case TD_I8:   return "int8";
+    default:      return "float64";
+    }
+}
+static size_t ten_dtype_itemsize(int dt) {
+    switch (dt) {
+    case TD_F32:  return 4;
+    case TD_F16:  return 2;
+    case TD_BF16: return 2;
+    case TD_I32:  return 4;
+    case TD_I8:   return 1;
+    default:      return 8;
+    }
+}
+static void ten_pack_dtype(TTensor *t, int dt) {
+    size_t n = t->len;
+    free(t->raw);
+    t->raw = NULL;
+    t->dtype = dt;
+    if (dt == TD_F64) return;
+    size_t isz = ten_dtype_itemsize(dt);
+    t->raw = malloc((n ? n : 1) * isz);
+    if (!t->raw) exit(1);
+    if (dt == TD_F32) {
+        float *p = (float*)t->raw;
+        for (size_t i = 0; i < n; i++) {
+            float v = (float)t->d[i];
+            p[i] = v;
+            t->d[i] = (double)v;
+        }
+    } else if (dt == TD_F16) {
+        uint16_t *p = (uint16_t*)t->raw;
+        for (size_t i = 0; i < n; i++) {
+            uint16_t h = ten_f64_to_f16(t->d[i]);
+            p[i] = h;
+            t->d[i] = ten_f16_to_f64(h);
+        }
+    } else if (dt == TD_BF16) {
+        uint16_t *p = (uint16_t*)t->raw;
+        for (size_t i = 0; i < n; i++) {
+            uint16_t h = ten_f64_to_bf16(t->d[i]);
+            p[i] = h;
+            t->d[i] = ten_bf16_to_f64(h);
+        }
+    } else if (dt == TD_I32) {
+        int32_t *p = (int32_t*)t->raw;
+        for (size_t i = 0; i < n; i++) {
+            int32_t v = (int32_t)t->d[i];
+            p[i] = v;
+            t->d[i] = (double)v;
+        }
+    } else if (dt == TD_I8) {
+        int8_t *p = (int8_t*)t->raw;
+        for (size_t i = 0; i < n; i++) {
+            double x = t->d[i];
+            int32_t iv = (int32_t)(x < 0 ? x - 0.5 : x + 0.5);
+            if (iv < -128) iv = -128;
+            if (iv > 127) iv = 127;
+            p[i] = (int8_t)iv;
+            t->d[i] = (double)p[i];
+        }
+    }
+}
+static void m_ten_to(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(2);
+    if (a[1].t != T_STR) die(vm, "to(dtype str)");
+    int dt = ten_parse_dtype(vm, a[1].u.str.s);
+    TTensor *t = ten_copy(a[0].u.ten);
+    ten_pack_dtype(t, dt);
+    *r = ten_val(t);
+}
+static void m_ten_raw_ptr(TVM *vm, TVal *a, int argc, TVal *r) {
+    NARG(1); (void)vm;
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    TTensor *own = ten_owner(t);
+    void *ptr = own->raw ? (void*)((char*)own->raw + t->off * ten_dtype_itemsize(own->dtype)) : (void*)t->d;
+    *r = mk_int((int64_t)(intptr_t)ptr);
+}
+
 static void ten_cmp_m(TVM *vm, TVal *a, int argc, TVal *r, int op) {
     NARG(2);
     if (a[1].t != T_TENSOR && a[1].t != T_INT && a[1].t != T_FLOAT) die(vm, "bad tensor op");
@@ -1298,7 +1455,8 @@ static TNativeFn tensor_method(const char *nb) {
         {"reshape", m_ten_reshape}, {"transpose", m_ten_transpose}, {"flatten", m_ten_flatten},
         {"tolist", m_ten_tolist}, {"copy", m_ten_copy}, {"dot", m_ten_dot}, {"clip", m_ten_clip},
         {"softmax", m_ten_softmax}, {"item", m_ten_item}, {"eq", m_ten_eq}, {"ne", m_ten_ne},
-        {"data_ptr", m_ten_data_ptr},
+        {"data_ptr", m_ten_data_ptr}, {"raw_ptr", m_ten_raw_ptr},
+        {"to", m_ten_to}, {"astype", m_ten_to},
         {"gelu", m_ten_gelu}, {"gelu_bwd", m_ten_gelu_bwd},
         {"rmsnorm", m_ten_rmsnorm}, {"rmsnorm_bwd", m_ten_rmsnorm_bwd},
         {"layernorm", m_ten_layernorm}, {"layernorm_bwd", m_ten_layernorm_bwd},
@@ -1309,7 +1467,7 @@ static TNativeFn tensor_method(const char *nb) {
     return NULL;
 }
 static size_t tensor_len0(const TTensor *t) { return ten_len0(t); }
-/* thuộc tính không phải method: shape, ndim, size, T */
+/* thuộc tính không phải method: shape, ndim, size, T, dtype, itemsize, nbytes */
 static TVal tensor_prop(TVM *vm, TTensor *t, const char *nb, int *ok) {
     TVal r; r.t = T_NIL;
     (void)vm;
@@ -1323,6 +1481,9 @@ static TVal tensor_prop(TVM *vm, TTensor *t, const char *nb, int *ok) {
     if (!strcmp(nb, "ndim")) return mk_int(t->ndim);
     if (!strcmp(nb, "size")) return mk_int((int64_t)t->len);
     if (!strcmp(nb, "T")) return ten_val(ten_transpose(t));
+    if (!strcmp(nb, "dtype")) return mk_str(ten_dtype_name(t->dtype));
+    if (!strcmp(nb, "itemsize")) return mk_int((int64_t)ten_dtype_itemsize(t->dtype));
+    if (!strcmp(nb, "nbytes")) return mk_int((int64_t)(t->len * ten_dtype_itemsize(t->dtype)));
     *ok = 0;
     return r;
 }
@@ -1330,29 +1491,32 @@ static TVal tensor_prop(TVM *vm, TTensor *t, const char *nb, int *ok) {
 /* ---------- builtin mềm: tạo tensor + toán học ---------- */
 static void n_zeros(TVM *vm, TVal *a, int argc, TVal *r) {
     size_t sh[TMAXDIM];
-    NARG(1);
+    NMIN(1); NMAX(2);
     int nd = ten_shape_arg(vm, &a[0], sh, "zeros");
     TTensor *t = ten_alloc(nd, sh);
     for (size_t i = 0; i < t->len; i++) t->d[i] = 0.0;
+    if (argc == 2 && a[1].t == T_STR) ten_pack_dtype(t, ten_parse_dtype(vm, a[1].u.str.s));
     *r = ten_val(t);
 }
 static void n_ones(TVM *vm, TVal *a, int argc, TVal *r) {
     size_t sh[TMAXDIM];
-    NARG(1);
+    NMIN(1); NMAX(2);
     int nd = ten_shape_arg(vm, &a[0], sh, "ones");
     TTensor *t = ten_alloc(nd, sh);
     for (size_t i = 0; i < t->len; i++) t->d[i] = 1.0;
+    if (argc == 2 && a[1].t == T_STR) ten_pack_dtype(t, ten_parse_dtype(vm, a[1].u.str.s));
     *r = ten_val(t);
 }
 static void n_full(TVM *vm, TVal *a, int argc, TVal *r) {
     size_t sh[TMAXDIM];
     int ok = 1;
-    NARG(2);
+    NMIN(2); NMAX(3);
     int nd = ten_shape_arg(vm, &a[0], sh, "full");
     double v = to_num(&a[1], &ok);
     if (!ok || a[1].t == T_BOOL) die(vm, "tensor() numbers");
     TTensor *t = ten_alloc(nd, sh);
     for (size_t i = 0; i < t->len; i++) t->d[i] = v;
+    if (argc == 3 && a[2].t == T_STR) ten_pack_dtype(t, ten_parse_dtype(vm, a[2].u.str.s));
     *r = ten_val(t);
 }
 static void n_arange(TVM *vm, TVal *a, int argc, TVal *r) {
