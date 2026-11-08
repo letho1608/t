@@ -44,3 +44,10 @@ fn softmax(x):
 fn gelu(x):
     t = x if type(x) == "tensor" else tensor(x)
     return t.gelu()
+
+# Tích chập 2D NCHW (hoặc 2D [H, W]): forward gộp trong kernel C
+fn conv2d(x, w, bias = nil, stride = 1, pad = 0):
+    tx = x if type(x) == "tensor" else tensor(x)
+    tw = w if type(w) == "tensor" else tensor(w)
+    tb = (bias if type(bias) == "tensor" else tensor(bias)) if bias != nil else nil
+    return tx.conv2d(tw, tb, stride, pad)

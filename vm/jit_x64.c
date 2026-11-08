@@ -2289,9 +2289,14 @@ static int ty_ok(const TVal *v, uint8_t want) {
 void t_jit_maybe(TVM *vm, TFn *fn, TVal *args) {
     uint8_t at[256];
 #if !defined(_M_X64) && !defined(__x86_64__)
-    (void)vm; (void)args;
-    fn->jit_off |= 1;    /* JIT x64 chỉ có trên x86-64; kiến trúc khác: interpreter */
+#if defined(_M_ARM64) || defined(__aarch64__)
+    t_arm64_jit_maybe(vm, fn, args);
     return;
+#else
+    (void)vm; (void)args;
+    fn->jit_off |= 1;    /* JIT x64/arm64 không có trên kiến trúc này -> interpreter */
+    return;
+#endif
 #endif
     if (fn->jit_off & 1) return;
     if (++fn->ncalls < JIT_THRESHOLD) return;
@@ -2351,6 +2356,9 @@ static TVal bits_val(TVM *vm, uint8_t ty, int64_t x, int32_t sv) {
 }
 
 int t_jit_call(TVM *vm, TFn *fn, TVal *args, int argc, TVal *ret) {
+#if defined(_M_ARM64) || defined(__aarch64__)
+    return t_arm64_jit_call(vm, fn, args, argc, ret);
+#endif
     TJitFn *jf = (TJitFn *)fn->jit;
     int64_t in[256];
     JitSpec *sp = NULL;
@@ -2384,9 +2392,13 @@ int t_jit_call(TVM *vm, TFn *fn, TVal *args, int argc, TVal *ret) {
 
 int t_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret) {
 #if !defined(_M_X64) && !defined(__x86_64__)
+#if defined(_M_ARM64) || defined(__aarch64__)
+    return t_arm64_jit_osr(vm, fn, locals, pc, ret);
+#else
     (void)vm; (void)locals; (void)pc; (void)ret;
-    fn->jit_off |= 2;    /* không có JIT x64 trên kiến trúc này -> interpreter */
+    fn->jit_off |= 2;    /* không có JIT x64/arm64 trên kiến trúc này -> interpreter */
     return 0;
+#endif
 #endif
     TJitFn *jf = jit_of(fn);
     JitOsr *o = NULL;

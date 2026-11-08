@@ -1,11 +1,11 @@
-﻿# Ngôn ngữ lập trình T — README (v5.1: 100% tự thân thuần `.t`, VM C + x86-64 JIT, Tensor n-D & Autograd)
+# Ngôn ngữ lập trình T — README (v5.2: 100% tự thân thuần `.t`, VM C + JIT x86-64/ARM64, Tensor n-D, GPU Vulkan/CUDA & Autograd)
 
 Ngôn ngữ lập trình **T**: cú pháp thụt lề hiện đại (Python/Go-like), **Tensor n-chiều là kiểu nguyên thủy**, **AI-first**, hoàn toàn độc lập không phụ thuộc Python:
 
 | Thành phần | Lệnh | Ghi chú |
 |---|---|---|
 | Chạy trực tiếp file `.t` / `-c` | `trun prog.t` / `trun -c "print(1+2)"` | VM tự biên dịch ngầm qua `tcomp.tb` và thực thi với JIT |
-| Chạy bytecode `.tb` | `trun prog.tb` | Khởi động tức thời + x86-64 JIT + REPL (`trun`) |
+| Chạy bytecode `.tb` | `trun prog.tb` | Khởi động tức thời + JIT x86-64 / ARM64 + REPL (`trun`) |
 | Compiler tự thân thuần T | `trun tcomp.tb prog.t prog.tb` | `self/tcomp.t` tự biên dịch chính nó tới fixed point byte-identical |
 | Evaluator tự thân thuần T | `trun tools/tdriver.t prog.t` | `self/eval.t` chạy trên VM C khớp từng byte |
 
@@ -21,14 +21,14 @@ sh vm/build.sh                  # Linux/macOS (cc): build ./trun + tự host tco
 
 ## Giới hạn đã biết & cảnh báo an toàn
 
-- **Đơn luồng cho interpreter**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Ngoại lệ: phép nhân ma trận lớn (`@`) đã **đa luồng + chặn cache** ở native (`TVM_GEMM_THREADS`, xem TODO mục T2). Đa luồng đầy đủ nằm trong lộ trình (TODO J7... xem §6).
-- **JIT chỉ x86-64**: `vm/jit_x64.c` sinh mã cho Win64 + System V; JIT ARM64 chỉ ở mức skeleton (`vm/jit_arm64.c` emitter + kiểm chứng byte qua `__sys.arm64_selftest`, chưa nối vào đường nóng — xem J7 trong TODO). Nguồn không được JIT vẫn chạy qua interpreter (deopt); trên ARM64 VM tự vô hiệu hoá JIT x64 để không phát nhầm mã.
+- **Đơn luồng cho interpreter**: chính VM thực thi đơn luồng tại một thời điểm. `std/thread.t` là worker/channel riêng biệt, **không chia sẻ trạng thái VM**. Ngoại lệ: phép nhân ma trận lớn (`@`) đã **đa luồng + chặn cache** ở native (`TVM_GEMM_THREADS`, xem TODO mục T2).
+- **JIT đa kiến trúc (x86-64 & ARM64)**: `vm/jit_x64.c` sinh mã cho Win64 + System V x86-64; `vm/jit_arm64.c` biên dịch Bytecode → AArch64 (Method JIT + OSR + Deopt + bộ giả lập thực thi mã máy AArch64 để kiểm chứng chéo trên x86-64). Nguồn không được JIT vẫn chạy qua interpreter (deopt).
 - **`for` khai báo sau hàm**: closure không capture biến `for` khai báo sau điểm định nghĩa hàm (`tests/hoist.t` ghi nhận hành vi này).
 - **`==`/`!=` trên tensor** so sánh cả tensor và trả `bool`; dùng `.eq()`/`.ne()` để so sánh từng phần tử (`<`, `>`, `<=`, `>=` là so sánh từng phần tử).
 - **`std/ffi.t` + primitive `mem_*` là unsafe**: đọc/ghi bộ nhớ thô theo con trỏ — ghi sai địa chỉ có thể làm hỏng dữ liệu hoặc crash tiến trình. Chỉ dùng khi đã tối ưu phần còn lại.
 - Một số thông điệp lỗi hiếm (vd. unhashable dict key) có thể khác văn bản giữa các runtime, dù output chính vẫn giống nhau.
 
-## Tính năng ngôn ngữ (v5.1)
+## Tính năng ngôn ngữ (v5.2)
 
 ```python
 let x = 10                      # bất biến (gán lại -> lỗi "x immutable (use mut)")
@@ -87,17 +87,17 @@ print([x * x for x in range(5) if x % 2 == 0])
 - `import re`: Bộ phân tích và khớp biểu thức chính quy (`compile`, `match`, `search`, `test`, `fullmatch`, `findall`, `sub`, `split`, nhóm bắt `(...)`, tập ký tự `[...]`, định lượng `{m,n}`, escape `\d`, `\w`, `\s`, `\b`).
 - `import csv`: Xử lý CSV chuẩn RFC 4180 (`parse_row`, `format_row`, `loads`, `dumps`, `loads_dicts`, `dumps_dicts`, `read_csv`, `write_csv`).
 - `import http`: Tiện ích URL & HTTP client (`urlencode`, `urldecode`, `parse_query`, `build_query`, `parse_url`, `request`, `get`, `post`).
-- `import autograd as ag`: Reverse-mode automatic differentiation trên Tensor n-chiều (`param`, `const`, `add`, `sub`, `mul`, `div`, `matmul`, `relu`, `tanh`, `sigmoid`, `exp`, `log`, `sumall`, `mean`, `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu` — backward của 5 phép cuối dùng kernel C gộp `softmax_bwd`/`gelu_bwd`/`rmsnorm_bwd`/`layernorm_bwd`/`swiglu_bwd`, `backward`, `sgd`).
-- `import ai`: Tiện ích học máy (`mse`, `grad`, `linear`, `relu`, `gelu`, `softmax`, `dot`, `zeros`, `ones`).
+- `import autograd as ag`: Reverse-mode automatic differentiation trên Tensor n-chiều (`param`, `const`, `add`, `sub`, `mul`, `div`, `matmul`, `relu`, `tanh`, `sigmoid`, `exp`, `log`, `sumall`, `mean`, `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu`, `conv2d` — backward của 6 phép cuối dùng kernel C gộp `softmax_bwd`/`gelu_bwd`/`rmsnorm_bwd`/`layernorm_bwd`/`swiglu_bwd`/`conv2d_bwd`, `backward`, `sgd`).
+- `import ai`: Tiện ích học máy (`mse`, `grad`, `linear`, `conv2d`, `relu`, `gelu`, `softmax`, `dot`, `zeros`, `ones`).
 - `import sqlite`: Client SQLite thuần T nối thẳng driver OS sẵn có (`winsqlite3.dll` / `libsqlite3.so`, 0 phụ thuộc cài đặt), transaction, prepared statement, bind tham số `?`.
-- `import ffi`: Nạp `.dll`/`.so`, gọi hàm C (tới 16 đối số đa kiểu) và primitive bộ nhớ thô (`mem_alloc`, `mem_read_ptr`, `mem_write_i32`, `mem_read_f64`, `mem_write_f64`, `Buffer`) — **unsafe**, xem mục Giới hạn.
+- `import ffi`: Nạp `.dll`/`.so`, gọi hàm C (tới 20 đối số đa kiểu) và primitive bộ nhớ thô (`mem_alloc`, `mem_read_ptr`, `mem_write_i32`, `mem_read_f32`, `mem_write_f32`, `mem_read_u16`, `mem_write_u16`, `mem_read_f64`, `mem_write_f64`, `Buffer`) — **unsafe**, xem mục Giới hạn.
 - `import mmap`: Ánh xạ file lớn vào RAM zero-copy, nạp thẳng tensor float/quant từ đĩa.
 - `import gguf` / `import safetensors`: Đọc định dạng mô hình GGUF v2/v3 và Hugging Face Safetensors (metadata, catalog tensor, offset) qua mmap.
-- `import quant`: Lượng tử hóa & giải lượng tử hóa FP16, Q8_0, Q4_0 (giảm ~85% dung lượng mã).
+- `import quant`: Lượng tử hóa & giải lượng tử hóa FP16, BF16, FP32, Q8_0, Q4_0 (giảm ~85% dung lượng mã).
 - `import transformer`: Suy luận LLaMA/Mistral/Qwen trên CPU (RMSNorm, RoPE, KV-Cache, GQA, SwiGLU, BPE tokenizer, sampler top-k/top-p/temperature).
 - `import cuda`: Truy vấn driver CUDA qua FFI (thiết bị, VRAM, phiên bản) với fallback CPU êm khi không có GPU.
-- `import cublas`: GEMM trên GPU NVIDIA qua cuBLAS (`gemm`/`matmul` double-precision, qua FFI 16 đối số + `tensor.data_ptr()`), không có GPU/lib thì tự fallback về `@` CPU.
-- `import vulkan`: Probe Vulkan Loader + liệt kê physical devices mọi hãng (API, `device_count`, `devices`) qua FFI; compute shader SPIR-V chưa có nên `gemm` fallback CPU êm.
+- `import cublas` / `import cudnn`: GEMM trên GPU NVIDIA qua cuBLAS (`gemm`/`matmul` double-precision `cublasDgemm_v2`, Tensor Cores `gemm_fp16`/`gemm_bf16`/`gemm_f32`/`gemm_ex` qua `cublasGemmEx` 19 đối số) và tích chập 2D NCHW `conv2d` qua cuDNN (`cudnnConvolutionForward`), không có GPU/lib thì tự fallback về nhân C native / `@` CPU.
+- `import vulkan`: Khởi tạo Vulkan Loader + liệt kê đầy đủ physical devices (`name`, `vendor_id`, `device_id`, `type`, `api_version`) + biên dịch và thực thi trực tiếp Compute Shader nhị phân SPIR-V 1.0 trên GPU (`gemm_f32` và `gemm`/`matmul` với thuật toán phân rã mantissa Ozaki 4-lớp đạt chuẩn float64 `< 1e-13`). Máy không có Vulkan tự fallback CPU êm.
 - `import base64`: Mã hóa/giải mã Base64 RFC 4648 (padding `=`/`==` chuẩn).
 - `import thread`: Worker threads + kênh MPMC cách ly bộ nhớ (xem mục Giới hạn: không chia sẻ VM).
 
@@ -115,10 +115,11 @@ print([x * x for x in range(5) if x % 2 == 0])
 - Tự động đóng ngoặc, thụt lề thông minh 4 spaces.
 - Tích hợp Language Server chuẩn (`tools/tlsp.t`).
 
-## JIT x86-64 (`vm/jit_x64.c`) — Hoàn tất toàn bộ mục tiêu G1–G12
+## JIT x86-64 (`vm/jit_x64.c`) & ARM64 (`vm/jit_arm64.c`) — Hoàn tất toàn bộ mục tiêu G1–G13 & J7
 
-- Biên dịch hàm sang mã máy x86-64 (Windows Win64 ABI & POSIX System V ABI) + **OSR** cho vòng lặp trong hàm và vòng lặp top-level.
+- Biên dịch hàm sang mã máy x86-64 (Windows Win64 ABI & POSIX System V ABI) và ARM64 (AArch64 AAPCS64) + **OSR** cho vòng lặp trong hàm và vòng lặp top-level.
 - Hỗ trợ: `int`/`float`/`bool`/`nil`, biến cục bộ, `if/while/for range`, đệ quy & gọi hàm JIT chéo, đọc/ghi phần tử `list` có guard, tạo & đọc/ghi field `struct` (`SETATTR` cả ở OSR lẫn entry G8), hàm đệ quy trả `struct` (G9), cờ sở hữu động trên stack frame native cho biến nâng cấp `borrowed -> owned` (G10), `dict` (`{}`, literal `{"k": v}`, `d[k]`, `d[k] = v`, `d.get`, `d.has`, `d.remove`, `if d`) và chuỗi sở hữu được (`str()`, nối chuỗi, `s[i]`, truyền chuỗi mới vào hàm T, G7/G11/G12).
+- Trên ARM64 (`vm/jit_arm64.c`): Trình biên dịch Bytecode → AArch64 hoàn chỉnh với thông dịch trừu tượng suy diễn kiểu, 4 bản đặc hoá / hàm, số học `int64` kiểm tràn (`adds`/`subs` + `b.vs` deopt, floor-div/mod), số học `float64`, toán tử bitwise 64-bit, `list` (`OP_IDX`/`OP_SETIDX`/`OP_LEN`), đệ quy `bl`, OSR + Deopt, kèm bộ giả lập thực thi mã máy AArch64 (`a64_sim_exec`) kiểm chứng chéo ngay trên x86-64.
 - Bảo mật VM (`vm/tvm.c`): Bộ kiểm tra bytecode (`verify_bytecode`) kiểm tra tính hợp lệ của opcode, độ dài lệnh, chỉ số global, bảng `LN01`/`EX01` trước khi nạp; khởi tạo tiến trình con không qua shell; kiểm tra đường dẫn chống path traversal khi giải nén gói.
 
 ## Bộ công cụ thuần T (`tools/*.t`)

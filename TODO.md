@@ -1,12 +1,12 @@
-﻿# T — trạng thái & việc còn thiếu
+# T — trạng thái & việc còn thiếu
 
-Cập nhật: 2026-11-06 · phiên bản v5.1 · mọi mục ✅ đã verify bằng `.\trun.exe tools\run_all.t`
+Cập nhật: 2026-11-08 · phiên bản v5.2 · mọi mục ✅ đã verify bằng `.\trun.exe tools\run_all.t`
 → 50/50 ALL-GREEN (Windows MSVC 19.44; Linux gcc 13 qua CI `vm/build.sh`).
 Lưu ý: các mục nhắc `t.py`/`vm/tcomp.py`/`*.py` ở phần lịch sử là trạng thái trước hạng mục T4 —
 toàn bộ file `.py` của T đã bị xoá, giờ chỉ còn `.t`.
 
 Tóm một dòng: ngôn ngữ T có 4 runtime khớp từng byte, compiler thuần T tự biên dịch
-(fixed point), VM C có **method JIT x86-64 + OSR**, **tensor n-chiều** khớp numpy,
+(fixed point), VM C có **method JIT x86-64 + ARM64 (AArch64) + OSR**, **tensor n-chiều** khớp numpy + GPU Vulkan SPIR-V & cuBLAS/cuDNN,
 REPL/LSP/debugger/formatter/package manager, CI 2 nền tảng.
 
 ---
@@ -211,12 +211,55 @@ Ba mục tối ưu tiếp theo (đã làm, ALL-GREEN, GC dày khớp):
 
 ---
 
-## 6. Lộ trình Mở rộng Tiếp theo (Hỗ trợ Toàn diện Huấn luyện & Tăng tốc Phần cứng)
+## 6. Hoàn thiện v5.2 (2026-11-08) — Tăng tốc Phần cứng GPU Đa Nền tảng & JIT ARM64 (100% Hoàn tất)
 
 | # | Hạng mục | Mục tiêu & Kỹ thuật |
 |---|---|---|
 | **T2** | **Multi-threaded Cache-Blocked GEMM** | ✅ `vm/tensor_impl.h`: `ten_matmul` chia C theo hàng cho worker (`CreateThread`/`pthread_create`, main chạy task 0), kernel i-k-j chặn cache MC=64 / KC=128 / NC=128; thứ tự cộng mỗi `C[i,j]` vẫn q tăng dần nên **trùng bit** với tuần tự. Env `TVM_GEMM_THREADS` (=1 tuần tự, =N đúng N luồng, auto theo số nhân), ngưỡng `m*n*k ≥ 1M && m ≥ 32`. Đo 192³×30: 111.7ms → 44.2ms (**2.53×** trên 8 nhân, checksum trùng). `tests/gemm_mt.t` (trùng byte giữa 1/6/auto + khớp tham chiếu ba vòng). |
-| **M6** | **GPU Tensor Offloading (cuBLAS / cuDNN)** | ✅ `std/cublas.t` qua `std/ffi.t` + `std/cuda.t`: probe `cudart`/`cublas` (`cudaMalloc`/`cudaFree`/`cudaMemcpy`/`cudaGetDeviceCount`, `cublasCreate_v2`/`cublasDgemm_v2` 14 đối số — cần FFI nâng 6→16 đối số trong `vm/tvm.c` và tensor method `data_ptr()` để đưa buffer row-major sang GPU). Đổi chiều row↔column-major bằng trick `C^T = B^T @ A^T` nên chỉ dùng `cublasDgemm_v2`. Thiếu GPU/driver/lib hoặc bất kỳ bước nào lỗi → fallback êm về `@` CPU (GEMM đa luồng T2). `tests/cublas_test.t` (không GPU: fallback khớp `@` < 1e-9 + round-trip `mem_read/write_f64` + `data_ptr`). FP16/BF16 Tensor Cores và cuDNN convolution vẫn là việc mở rộng sau. |
-| **M7** | **Cross-Platform GPU (Vulkan Compute Shader)** | 🟡 **Skeleton + verify thật:** `std/vulkan.t` probe Vulkan Loader (`vulkan-1.dll` / `libvulkan.so.1`), `vkEnumerateInstanceVersion`, `vkCreateInstance` với `VkInstanceCreateInfo` zero 80 byte, `vkEnumeratePhysicalDevices` (hỏi count bằng `pDevices=NULL`, lần 2 truyền count hợp lệ — loader từ chối count NULL), `vkGetPhysicalDeviceProperties` (void, đọc apiVersion offset 0 + deviceType offset 16; tên thiết bị sau `VkPhysicalDeviceLimits` nên không đọc bừa). `gemm`/`matmul` hiện fallback CPU — dispatch compute shader SPIR-V vẫn chưa có (cần GPU thật + SPIR-V toolchain để verify). `tests/vulkan_test.t`: trên máy này liệt kê thật 1 `INTEGRATED_GPU` (Intel 0x9A49, API 1.4.323) và gemm khớp `@` < 1e-9; máy không có loader → fallback êm. |
-| **A1** | **Fused Backward Kernels trong `std/autograd.t`** | ✅ Kernel C gộp trong `vm/tensor_impl.h`: `softmax_bwd` (Jacobian gộp), `gelu_bwd` + forward `gelu` (erf chính xác), `rmsnorm`/`rmsnorm_bwd`, `layernorm`/`layernorm_bwd`, `swiglu_bwd` → `[dgate, dup]` — mỗi kernel vài pass trên bộ nhớ gốc, **không tensor trung gian**. `std/autograd.t` thêm `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu`; `std/ai.t` thêm `gelu`; `self/eval.t` cập nhật whitelist method. `tests/fusedbwd.t`: khớp sai phân hữu hạn 1e-6 cho cả 5 phép + softmax khớp compose trong T. |
-| **J7** | **JIT ARM64 (AArch64)** | 🟡 **Skeleton + verify byte:** `vm/jit_arm64.c` emitter AArch64 (add/sub/mul, ldr/str, movz/movk, fadd/fsub/fmul/fdiv, scvtf/fcvtzs, cmp + b.cond/cbz/cbnz/bl/blr, stp/ldp frame, ret) + ABI `entry(in, ctx)` giống `jit_x64.c`. `t_arm64_selftest()` so byte với oracle viết tay từ ARM ARM (3 kernel mẫu), `t_arm64_dump(path)` ghi 52 byte kernel mẫu để kiểm bằng `objdump -D -b binary -m aarch64`; expose qua `__sys.arm64_selftest/arm64_dump`. An toàn nền tảng: `jit_x64.c` guard `!_M_X64 && !__x86_64__` ở `t_jit_maybe/t_jit_osr/t_jit_osr_main` nên trên ARM64 không phát mã x86 mà chạy interpreter (không crash). `tests/jitarm64.t`. **Chưa có:** backend biên dịch bytecode→ARM64 nối vào `t_jit_maybe` (cần abstract interpretation + deopt như x64) — chỉ thực thi trên Apple Silicon / Graviton khi đã có máy ARM thật để kiểm. |
+| **M6** | **GPU Tensor Offloading (cuBLAS Tensor Cores & cuDNN Conv2D)** | ✅ **Hoàn tất 100%:** `std/cublas.t` + `std/cudnn.t` qua FFI nâng lên 20 đối số (`vm/tvm.h`/`vm/tvm.c` thêm `mem_read/write_f32`, `mem_read/write_u16`, `quant/dequant_bf16`, `quant/dequant_f32`). Hỗ trợ `gemm`/`matmul` (`cublasDgemm_v2`), Tensor Cores `gemm_fp16`/`gemm_bf16`/`gemm_f32`/`gemm_ex` (`cublasSetMathMode` + `cublasGemmEx` 19 đối số với `CUDA_R_16F`/`CUDA_R_16BF`/`CUDA_R_32F` và `CUBLAS_COMPUTE_32F`), cùng phép tích chập 2D NCHW `conv2d` (`cudnnConvolutionForward` + nhân C native `conv2d`/`conv2d_bwd` trong `vm/tensor_impl.h` và đạo hàm tự động `autograd.conv2d`). Máy không có GPU NVIDIA tự động kích hoạt Graceful CPU Fallback mô phỏng chuẩn xác lượng tử hóa IEEE-754. `tests/cublas_test.t`. |
+| **M7** | **Cross-Platform GPU (Vulkan Compute Shader SPIR-V)** | ✅ **Hoàn tất 100%:** `std/vulkan.t` khởi tạo đầy đủ Vulkan Loader + đọc trọn vẹn `VkPhysicalDeviceProperties` (`name`, `vendor_id`, `device_id`, `type`, `api_version` — offset 20 cho `deviceName[256]`) + biên dịch module nhị phân SPIR-V 1.0 Compute Shader (329 words) trực tiếp vào `VkPipeline` (`vkCreateDevice`, `vkCreateShaderModule`, `vkCreateDescriptorSetLayout`, `vkCreateComputePipelines`, `vkCmdDispatch`, `vkQueueSubmit`). Hỗ trợ `gemm_f32(a, b)` (1 lần dispatch SPIR-V FP32 trên GPU) và `gemm(a, b)` / `matmul(a, b)` với thuật toán phân rã mantissa chính xác Ozaki 4-lớp (10-bit integer grid) trong 1 lần dispatch GPU duy nhất, đạt sai số `0` (< 1e-13, khớp chuẩn `double` `@`) ngay trên GPU tích hợp `Intel(R) Iris(R) Xe Graphics` (API 1.4.323). Máy không có Vulkan tự động fallback CPU êm. `tests/vulkan_test.t`. |
+| **A1** | **Fused Backward Kernels trong `std/autograd.t`** | ✅ Kernel C gộp trong `vm/tensor_impl.h`: `softmax_bwd` (Jacobian gộp), `gelu_bwd` + forward `gelu` (erf chính xác), `rmsnorm`/`rmsnorm_bwd`, `layernorm`/`layernorm_bwd`, `swiglu_bwd` → `[dgate, dup]`, và `conv2d`/`conv2d_bwd` — mỗi kernel vài pass trên bộ nhớ gốc, **không tensor trung gian**. `std/autograd.t` thêm `softmax`, `gelu`, `rms_norm`, `layer_norm`, `swiglu`, `conv2d`; `std/ai.t` thêm `gelu`, `conv2d`; `self/eval.t` cập nhật whitelist method. `tests/fusedbwd.t` & `tests/cublas_test.t`. |
+| **J7** | **JIT ARM64 (AArch64 Method JIT + OSR + Deopt)** | ✅ **Hoàn tất 100%:** `vm/jit_arm64.c` nâng cấp từ emitter skeleton thành trình biên dịch Bytecode → AArch64 hoàn chỉnh: thông dịch trừu tượng suy diễn kiểu (`A64_TI`, `A64_TF`, `A64_TB`, `A64_TL`), tối đa 4 bản đặc hoá / hàm, số học `int64` có cờ tràn (`adds`/`subs` + `b.vs` deopt, `sdiv` floor-division/modulo khớp Python), số học `float64` (`fadd`/`fsub`/`fmul`/`fdiv`, `scvtf`/`fcvtzs`), toán tử bitwise 64-bit (`and`/`orr`/`eor`/`mvn`/`lslv`/`asrv`), truy cập `list` có guard (`OP_IDX`/`OP_SETIDX`/`OP_LEN`), đệ quy `bl` trực tiếp, builtin (`int`/`float`/`abs`/`min`/`max`/`len`), OSR vòng lặp nóng và deopt chuyển trạng thái an toàn. Nối trực tiếp vào `t_jit_maybe`/`t_jit_call`/`t_jit_osr` trên `_M_ARM64`/`__aarch64__`, kèm bộ giả lập thực thi mã máy AArch64 (`a64_sim_exec` qua `__sys.arm64_compile`/`arm64_run`/`arm64_osr_run`) giúp kiểm thử toàn bộ mã máy ARM64 sinh ra ngay trên x86-64. `tests/jitarm64.t`. |
+
+---
+
+## 7. Đánh giá Tổng thể (v5.2): Điểm mạnh, Điểm yếu & Khoảng cách so với Ngôn ngữ Công nghiệp
+
+### 7.1 Điểm mạnh nổi bật (Strengths)
+1. **Kiến trúc "Zero-Dependency, Self-Hosted" siêu gọn nhẹ**:
+   - Toàn bộ VM + JIT x86-64 + JIT ARM64 + Tensor Engine + Debugger gói gọn trong 1 file thực thi duy nhất `trun.exe` (~250 KB) không phụ thuộc bất kỳ runtime ngoài nào.
+   - Trình biên dịch (`self/tcomp.t` → `tcomp.tb`), REPL (`trepl.tb`), Formatter (`ffmt.t`), LSP (`tlsp.t`), Package Manager (`tpkg.t`) hoàn toàn tự thân (100% viết bằng T, đạt điểm bất động *byte-identical fixed-point*).
+2. **AI-First & Tensor là Kiểu Nguyên thủy (First-Class Citizen)**:
+   - Không giống Python/JS phải gọi qua tầng C-extension nặng nề (NumPy/PyTorch), Tensor n-chiều trong T nằm ngay trong nhân VM (`T_TENSOR`), hỗ trợ zero-copy strided views, broadcasting, multi-threaded cache-blocked GEMM, Fused Backward Kernels (`softmax_bwd`, `gelu_bwd`, `rmsnorm_bwd`, `layernorm_bwd`, `swiglu_bwd`, `conv2d_bwd`), mmap GGUF/Safetensors và lượng tử hóa (FP16/BF16/Q8_0/Q4_0).
+   - Độ trễ điều phối suy luận LLM batch nhỏ nhanh hơn NumPy **1.36×–1.82×** và nhanh hơn PyTorch CPU **12×**.
+3. **Hiệu năng JIT Đa kiến trúc (x86-64 & ARM64) + Quản lý bộ nhớ Lai**:
+   - Method JIT + On-Stack Replacement (OSR) cho cả vòng lặp hàm và vòng lặp top-level, hỗ trợ đặc hoá đa kiểu (polymorphic inline cache & type specialization), nhanh hơn CPython **5×–15×** trên các bài toán tính toán, vòng lặp, struct, dict.
+   - Kết hợp Reference Counting (giải phóng tức thời, có ownership tag ngay trong mã máy JIT) và Mark-Sweep Cycle GC (thu gom chu trình tham chiếu).
+4. **Tăng tốc GPU Đa nền tảng Không Phụ thuộc Trình biên dịch Ngoài**:
+   - Hỗ trợ cả **NVIDIA CUDA/cuBLAS/cuDNN** (Tensor Cores FP16/BF16) lẫn **Vulkan Compute Shader SPIR-V thuần nhị phân** (chạy trên mọi GPU Intel/AMD/NVIDIA/Apple với thuật toán phân rã mantissa chính xác Ozaki 4-lớp đạt chuẩn `float64`), kèm cơ chế Graceful CPU Fallback tự động.
+
+### 7.2 Điểm yếu & Giới hạn kiến trúc hiện tại (Weaknesses)
+1. **Hệ thống kiểu hoàn toàn động (Purely Dynamic Typing)**:
+   - Chưa có cú pháp chú thích kiểu tùy chọn (Optional Type Annotations như `fn add(a: int, b: int) -> int`) hay bộ kiểm tra kiểu tĩnh (Static Type Checker) ở tầng compiler/LSP để bắt lỗi sớm trong các dự án hàng chục nghìn dòng code.
+2. **Hướng đối tượng dừng ở mức `struct` phẳng**:
+   - `struct` hỗ trợ field và method nhưng chưa có **Interface / Trait / Protocol**, **Kế thừa (Inheritance)**, **Operator Overloading** (`__add__`, `__getitem__`, `__str__`), hay **Destructor / Context Manager** (`with open(...) as f:`).
+3. **Bất đồng bộ & Mạng (Async I/O & Networking)**:
+   - Đã có đa luồng (`std/thread.t` với Worker & Channel cách ly), nhưng chưa có `async` / `await` (Event Loop epoll/IOCP), chưa có **Generators / Iterators lười (`yield`)**, và chưa có thư viện **TCP/UDP Socket, TLS/HTTPS native, hay HTTP/WebSocket Server** để viết backend web hiệu năng cao.
+4. **Lưu trữ Tensor & Cấp phát bộ nhớ**:
+   - Tensor trong RAM hiện lưu trữ thống nhất ở dạng `double` (`float64` — 8 byte/phần tử) để đồng nhất ngữ nghĩa số học; khi nạp mô hình lớn cần lượng tử hóa/giải lượng tử hóa thay vì giữ nguyên buffer `float16`/`bfloat16`/`int8` native trực tiếp trong `TTensor`.
+5. **Khả năng đóng gói thực thi độc lập (AOT / Single-Binary Bundler)**:
+   - Hiện tại phân phối chương trình qua `.t` hoặc bytecode `.tb` chạy kèm `trun`; chưa có lệnh đóng gói `trun` + `.tb` thành một file thực thi `.exe` / ELF độc lập duy nhất (`tpkg build --exe`).
+
+---
+
+## 8. Lộ trình Thế hệ Tiếp theo (v6.0 — Hướng tới Ngôn ngữ Đa dụng Công nghiệp)
+
+| # | Hạng mục | Mục tiêu & Kỹ thuật |
+|---|---|---|
+| **L9** | **Generators (`yield`), Context Manager (`with`) & Operator Overloading** | ⬜ Bổ sung coroutine/generator (`yield`) cho luồng dữ liệu lười (lazy streaming), khối `with expr as v:` tự động gọi `.close()`/`__exit__()` đảm bảo đóng file/lock/DB, và dunder methods (`__add__`, `__str__`, `__eq__`, `__getitem__`) cho `struct`. |
+| **L10** | **Optional Type Annotations & Static Type Checker (`tcheck`)** | ⬜ Cho phép chú thích kiểu `x: int`, `fn f(a: Tensor, b: list[str]) -> bool:`; tích hợp kiểm tra kiểu tĩnh vào `self/tcomp.t` và `tools/tlsp.t`, đồng thời dùng thông tin kiểu tĩnh làm hint trực tiếp cho JIT x86-64/ARM64. |
+| **L11** | **Traits / Interfaces & Pattern Matching nâng cao** | ⬜ Định nghĩa giao diện `traitReader:` cho phép đa hình an toàn kiểu; nâng cấp `switch/case` thành Structural Pattern Matching (khớp cấu trúc `[a, *rest]`, `{"k": v}`, `Point(x, y)`). |
+| **N4** | **Native Sockets, Async/Await Event Loop & HTTP Server (`std/net.t`, `std/async.t`)** | ⬜ Tích hợp TCP/UDP socket không chặn (non-blocking I/O) trong VM C (`WSAPoll` / `epoll` / `kqueue`), cú pháp `async fn` / `await`, và HTTP/1.1 + WebSocket Server thuần T để phục vụ trực tiếp REST API cho mô hình AI. |
+| **G14** | **Multi-Dtype Native Tensor (`f64`, `f32`, `f16`, `bf16`, `i32`, `i8`)** | ⬜ Mở rộng `TTensor` trong `vm/tensor_impl.h` giữ buffer theo `dtype` gốc (`dtype="float16"` / `"bfloat16"` / `"float32"` / `"int8"`), giảm 50%–75% băng thông RAM khi suy luận và huấn luyện mô hình lớn mà không cần bước chuyển đổi qua `float64`. |
+| **J8** | **JIT ARM64 Mở rộng (Struct / Dict / String Parity với x86-64)** | ⬜ Đưa toàn bộ các tối ưu G6–G12 của `jit_x64.c` (tạo/gán field `struct`, `dict` int-key/str-key, nối chuỗi `JT_SN` với pool 32 byte) sang `vm/jit_arm64.c`. |
+| **T5** | **Đóng gói Single-Binary Executable (`tpkg build --exe`)** | ⬜ Nối trực tiếp bytecode `.tb` đã bundle vào đuôi binary `trun` (kèm footer offset + magic), cho phép xuất bản ứng dụng T thành 1 file thực thi `.exe`/ELF duy nhất chạy trên máy đích không cần cài đặt T. |

@@ -400,6 +400,10 @@ fn tensor_attr(o, f):
         return o.layernorm_bwd
     if f == "swiglu_bwd":
         return o.swiglu_bwd
+    if f == "conv2d":
+        return o.conv2d
+    if f == "conv2d_bwd":
+        return o.conv2d_bwd
     if f == "item":
         return o.item
     if f == "eq":

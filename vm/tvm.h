@@ -407,9 +407,15 @@ int64_t tjit_dict_has(TDict *d, int64_t kbits, int kstr);
 int64_t tjit_dict_remove(TDict *d, int64_t kbits, int kstr);
 TVal *tjit_str_idx(const TVal *s, int64_t i); /* trả &str1_cache[ch] (mượn) hoặc NULL nếu ngoài biên */
 
-/* JIT ARM64 skeleton (jit_arm64.c): emitter byte + tự kiểm chứng oracle */
-int t_arm64_selftest(void);            /* 1 = khớp toàn bộ oracle byte */
-int t_arm64_dump(const char *path);    /* ghi kernel mẫu ra file; 1/0 */
+/* JIT ARM64 (jit_arm64.c): emitter AArch64 + compiler bytecode->ARM64 + OSR + sim */
+int  t_arm64_selftest(void);            /* 1 = khớp toàn bộ oracle byte + compiler selftest */
+int  t_arm64_dump(const char *path);    /* ghi kernel mẫu ra file; 1/0 */
+void t_arm64_jit_maybe(TVM *vm, TFn *fn, TVal *args);
+int  t_arm64_jit_call(TVM *vm, TFn *fn, TVal *args, int argc, TVal *ret);
+int  t_arm64_jit_osr(TVM *vm, TFn *fn, TVal *locals, size_t pc, TVal *ret);
+void sys_arm64_compile(TVM *vm, TVal *a, int argc, TVal *r);
+void sys_arm64_run(TVM *vm, TVal *a, int argc, TVal *r);
+void sys_arm64_osr_run(TVM *vm, TVal *a, int argc, TVal *r);
 
 /* Debugger (tdbg.c) */
 extern int tvm_dbg_on;

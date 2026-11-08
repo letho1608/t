@@ -1138,6 +1138,142 @@ static void m_ten_swiglu_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
     r->u.list = l;
 }
 
+/* conv2d NCHW: x.conv2d(w[, bias, stride, pad])
+   Hỗ trợ 4D [N, Cin, H, W] * [Cout, Cin, kH, kW] -> [N, Cout, outH, outW]
+   và 2D [H, W] * [kH, kW] -> [outH, outW]. */
+static void m_ten_conv2d(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 2 || argc > 5 || a[0].t != T_TENSOR || a[1].t != T_TENSOR)
+        die(vm, "conv2d(weight[, bias, stride, pad])");
+    const TTensor *x = a[0].u.ten, *w = a[1].u.ten;
+    const TTensor *b = NULL;
+    if (argc >= 3 && a[2].t != T_NIL) {
+        if (a[2].t != T_TENSOR) die(vm, "conv2d: bias phải là tensor hoặc nil");
+        b = a[2].u.ten;
+    }
+    int64_t stride = (argc >= 4 && a[3].t == T_INT) ? a[3].u.i : 1;
+    int64_t pad    = (argc >= 5 && a[4].t == T_INT) ? a[4].u.i : 0;
+    if (stride <= 0 || pad < 0) die(vm, "conv2d: stride > 0, pad >= 0");
+
+    int is2d = (x->ndim == 2 && w->ndim == 2);
+    if (!is2d && (x->ndim != 4 || w->ndim != 4))
+        die(vm, "conv2d: cần tensor 4D [N,C,H,W] hoặc 2D [H,W]");
+
+    size_t N    = is2d ? 1 : x->shape[0];
+    size_t Cin  = is2d ? 1 : x->shape[1];
+    size_t H    = is2d ? x->shape[0] : x->shape[2];
+    size_t W    = is2d ? x->shape[1] : x->shape[3];
+    size_t Cout = is2d ? 1 : w->shape[0];
+    size_t wCin = is2d ? 1 : w->shape[1];
+    size_t kH   = is2d ? w->shape[0] : w->shape[2];
+    size_t kW   = is2d ? w->shape[1] : w->shape[3];
+    if (Cin != wCin) die(vm, "conv2d: Cin không khớp");
+    if (b && (b->ndim != 1 || b->shape[0] != Cout)) die(vm, "conv2d: bias shape phải là [Cout]");
+    int64_t oH_s = ((int64_t)H + 2 * pad - (int64_t)kH) / stride + 1;
+    int64_t oW_s = ((int64_t)W + 2 * pad - (int64_t)kW) / stride + 1;
+    if (oH_s <= 0 || oW_s <= 0) die(vm, "conv2d: kích thước đầu ra <= 0");
+    size_t oH = (size_t)oH_s, oW = (size_t)oW_s;
+
+    size_t osh[4];
+    int ondim = is2d ? 2 : 4;
+    if (is2d) { osh[0] = oH; osh[1] = oW; }
+    else { osh[0] = N; osh[1] = Cout; osh[2] = oH; osh[3] = oW; }
+    TTensor *out = ten_alloc(ondim, osh);
+    ten_sync(x); ten_sync(w);
+    if (b) ten_sync(b);
+
+    for (size_t n = 0; n < N; n++) {
+        for (size_t co = 0; co < Cout; co++) {
+            double bv = b ? b->d[co] : 0.0;
+            for (size_t oh = 0; oh < oH; oh++) {
+                int64_t ih0 = (int64_t)oh * stride - pad;
+                for (size_t ow = 0; ow < oW; ow++) {
+                    int64_t iw0 = (int64_t)ow * stride - pad;
+                    double acc = bv;
+                    for (size_t ci = 0; ci < Cin; ci++) {
+                        const double *xp = x->d + ((n * Cin + ci) * H) * W;
+                        const double *wp = w->d + ((co * Cin + ci) * kH) * kW;
+                        for (size_t kh = 0; kh < kH; kh++) {
+                            int64_t ih = ih0 + (int64_t)kh;
+                            if (ih < 0 || ih >= (int64_t)H) continue;
+                            const double *xrow = xp + (size_t)ih * W;
+                            const double *wrow = wp + kh * kW;
+                            for (size_t kw = 0; kw < kW; kw++) {
+                                int64_t iw = iw0 + (int64_t)kw;
+                                if (iw >= 0 && iw < (int64_t)W)
+                                    acc += xrow[iw] * wrow[kw];
+                            }
+                        }
+                    }
+                    out->d[((n * Cout + co) * oH + oh) * oW + ow] = acc;
+                }
+            }
+        }
+    }
+    *r = ten_val(out);
+}
+
+/* conv2d_bwd: x.conv2d_bwd(w, dy[, stride, pad]) -> [dx, dw, db] */
+static void m_ten_conv2d_bwd(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc < 3 || argc > 5 || a[0].t != T_TENSOR || a[1].t != T_TENSOR || a[2].t != T_TENSOR)
+        die(vm, "conv2d_bwd(weight, dy[, stride, pad])");
+    const TTensor *x = a[0].u.ten, *w = a[1].u.ten, *dy = a[2].u.ten;
+    int64_t stride = (argc >= 4 && a[3].t == T_INT) ? a[3].u.i : 1;
+    int64_t pad    = (argc >= 5 && a[4].t == T_INT) ? a[4].u.i : 0;
+    if (x->ndim != 4 || w->ndim != 4 || dy->ndim != 4) die(vm, "conv2d_bwd: cần tensor 4D");
+    size_t N = x->shape[0], Cin = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t Cout = w->shape[0], kH = w->shape[2], kW = w->shape[3];
+    size_t oH = dy->shape[2], oW = dy->shape[3];
+    if (w->shape[1] != Cin || dy->shape[0] != N || dy->shape[1] != Cout)
+        die(vm, "conv2d_bwd: shape không khớp");
+
+    size_t bsh[1] = { Cout };
+    TTensor *dx = ten_alloc(4, x->shape);
+    TTensor *dw = ten_alloc(4, w->shape);
+    TTensor *db = ten_alloc(1, bsh);
+    for (size_t i = 0; i < dx->len; i++) dx->d[i] = 0.0;
+    for (size_t i = 0; i < dw->len; i++) dw->d[i] = 0.0;
+    for (size_t i = 0; i < db->len; i++) db->d[i] = 0.0;
+    ten_sync(x); ten_sync(w); ten_sync(dy);
+
+    for (size_t n = 0; n < N; n++) {
+        for (size_t co = 0; co < Cout; co++) {
+            double bsum = 0.0;
+            for (size_t oh = 0; oh < oH; oh++) {
+                int64_t ih0 = (int64_t)oh * stride - pad;
+                for (size_t ow = 0; ow < oW; ow++) {
+                    int64_t iw0 = (int64_t)ow * stride - pad;
+                    double g = dy->d[((n * Cout + co) * oH + oh) * oW + ow];
+                    bsum += g;
+                    for (size_t ci = 0; ci < Cin; ci++) {
+                        double *dxp = dx->d + ((n * Cin + ci) * H) * W;
+                        const double *xp = x->d + ((n * Cin + ci) * H) * W;
+                        double *dwp = dw->d + ((co * Cin + ci) * kH) * kW;
+                        const double *wp = w->d + ((co * Cin + ci) * kH) * kW;
+                        for (size_t kh = 0; kh < kH; kh++) {
+                            int64_t ih = ih0 + (int64_t)kh;
+                            if (ih < 0 || ih >= (int64_t)H) continue;
+                            for (size_t kw = 0; kw < kW; kw++) {
+                                int64_t iw = iw0 + (int64_t)kw;
+                                if (iw >= 0 && iw < (int64_t)W) {
+                                    dxp[(size_t)ih * W + (size_t)iw] += g * wp[kh * kW + kw];
+                                    dwp[kh * kW + kw] += g * xp[(size_t)ih * W + (size_t)iw];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            db->d[co] += bsum;
+        }
+    }
+    TList *l = list_new(3);
+    list_push(l, ten_val(dx));
+    list_push(l, ten_val(dw));
+    list_push(l, ten_val(db));
+    r->t = T_LIST;
+    r->u.list = l;
+}
+
 static void ten_cmp_m(TVM *vm, TVal *a, int argc, TVal *r, int op) {
     NARG(2);
     if (a[1].t != T_TENSOR && a[1].t != T_INT && a[1].t != T_FLOAT) die(vm, "bad tensor op");
@@ -1167,6 +1303,7 @@ static TNativeFn tensor_method(const char *nb) {
         {"rmsnorm", m_ten_rmsnorm}, {"rmsnorm_bwd", m_ten_rmsnorm_bwd},
         {"layernorm", m_ten_layernorm}, {"layernorm_bwd", m_ten_layernorm_bwd},
         {"softmax_bwd", m_ten_softmax_bwd}, {"swiglu_bwd", m_ten_swiglu_bwd},
+        {"conv2d", m_ten_conv2d}, {"conv2d_bwd", m_ten_conv2d_bwd},
     };
     for (size_t i = 0; i < sizeof(tb) / sizeof(tb[0]); i++) if (!strcmp(nb, tb[i].n)) return tb[i].f;
     return NULL;

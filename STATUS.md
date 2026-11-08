@@ -1,13 +1,14 @@
-﻿# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v5.1, 2026-11-06)
+# Ngôn ngữ T — Báo cáo trạng thái (cập nhật v5.2, 2026-11-08)
 
 > Vị trí: `D:\Code\t`. Trạng thái: **`.\trun.exe tools\run_all.t` → ALL-GREEN** trên
 > Windows (MSVC 19.44): 50/50 bộ kiểm thử (7 subsystem + 43 `tests/*.t`), hoàn toàn tự thân
-> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G12 JIT x86-64,
+> thuần `.t` (0 file `.py` trong compiler/runtime/tools), hoàn tất G1–G13 JIT x86-64 & J7 JIT ARM64 (AArch64),
+> M6 GPU cuBLAS (Tensor Cores FP16/BF16/FP32) & cuDNN Conv2D, M7 GPU Vulkan Compute Shader SPIR-V,
 > bảo mật bytecode/process/archive, tham số mặc định, thư viện chuẩn đầy đủ (`math`, `json`,
 > `os`, `path`, `time`, `random`, `re`, `csv`, `http`, `sqlite`, `ffi`, `mmap`, `gguf`,
-> `safetensors`, `quant`, `transformer`, `cuda`, `base64`, `thread`, `autograd`, `ai`).
+> `safetensors`, `quant`, `transformer`, `cuda`, `cublas`, `cudnn`, `vulkan`, `base64`, `thread`, `autograd`, `ai`).
 >
-> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v5.1) và mục tiêu v4.0/v5.0/v5.1 trong đó.
+> Lưu ý: các mục bên dưới có đánh dấu phiên bản (v0.x–v3.0) là báo cáo **lịch sử** tại thời điểm đó; trạng thái hiện hành xem ở `TODO.md` (v5.2) và mục tiêu v4.0/v5.0/v5.1/v5.2 trong đó.
 
 ## v3.0 — Tự thân hoàn toàn (`.t`), hoàn tất JIT G8/G9/G10/G12, chuẩn hóa bảo mật & stdlib
 

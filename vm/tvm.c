@@ -3874,6 +3874,79 @@ static void sys_dequant_f16(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = ten_val(t);
 }
 
+static uint16_t double_to_bf16(double x) {
+    float f = (float)x;
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    /* round-to-nearest-even trên 16 bit cao của IEEE-754 float32 */
+    if ((bits & 0x7F800000u) != 0x7F800000u) {
+        uint32_t rounding_bias = 0x00007FFFu + ((bits >> 16) & 1u);
+        bits += rounding_bias;
+    }
+    return (uint16_t)(bits >> 16);
+}
+
+static double bf16_to_double(uint16_t h) {
+    uint32_t bits = ((uint32_t)h) << 16;
+    float f;
+    memcpy(&f, &bits, 4);
+    return (double)f;
+}
+
+static void sys_quant_bf16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_bf16(tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    size_t bytes = t->len * 2;
+    char *out = (char*)malloc(bytes ? bytes : 1);
+    if (!out) die(vm, "quant_bf16: out of memory");
+    uint16_t *dst = (uint16_t*)out;
+    for (size_t i = 0; i < t->len; i++) dst[i] = double_to_bf16(t->d[i]);
+    *r = mk_str_n(out, bytes);
+    free(out);
+}
+
+static void sys_dequant_bf16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR) die(vm, "dequant_bf16(bytes: str, shape)");
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[1], sh, "dequant_bf16");
+    TTensor *t = ten_alloc(nd, sh);
+    if (a[0].u.str.n < t->len * 2) {
+        free(t->d); free(t);
+        die(vm, "dequant_bf16: buffer size too small");
+    }
+    const uint16_t *src = (const uint16_t*)a[0].u.str.s;
+    for (size_t i = 0; i < t->len; i++) t->d[i] = bf16_to_double(src[i]);
+    *r = ten_val(t);
+}
+
+static void sys_quant_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_f32(tensor)");
+    TTensor *t = a[0].u.ten;
+    ten_sync(t);
+    size_t bytes = t->len * 4;
+    char *out = (char*)malloc(bytes ? bytes : 1);
+    if (!out) die(vm, "quant_f32: out of memory");
+    float *dst = (float*)out;
+    for (size_t i = 0; i < t->len; i++) dst[i] = (float)t->d[i];
+    *r = mk_str_n(out, bytes);
+    free(out);
+}
+
+static void sys_dequant_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_STR) die(vm, "dequant_f32(bytes: str, shape)");
+    size_t sh[TMAXDIM];
+    int nd = ten_shape_arg(vm, &a[1], sh, "dequant_f32");
+    TTensor *t = ten_alloc(nd, sh);
+    if (a[0].u.str.n < t->len * 4) {
+        free(t->d); free(t);
+        die(vm, "dequant_f32: buffer size too small");
+    }
+    const float *src = (const float*)a[0].u.str.s;
+    for (size_t i = 0; i < t->len; i++) t->d[i] = (double)src[i];
+    *r = ten_val(t);
+}
+
 static void sys_quant_q4_0(TVM *vm, TVal *a, int argc, TVal *r) {
     if (argc != 1 || a[0].t != T_TENSOR) die(vm, "quant_q4_0(tensor)");
     TTensor *t = a[0].u.ten;
@@ -4113,10 +4186,10 @@ static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
     size_t ntypes = a[2].u.str.n;
     TList *args = a[3].u.list;
     if (args->len != ntypes) die(vm, "ffi_call: arg count mismatch");
-    if (args->len > 16) die(vm, "ffi_call: max 16 arguments supported");
+    if (args->len > 20) die(vm, "ffi_call: max 20 arguments supported");
 
-    uint64_t u[16] = {0};
-    double d[16] = {0.0};
+    uint64_t u[20] = {0};
+    double d[20] = {0.0};
     for (size_t i = 0; i < args->len; i++) {
         char t = argtypes[i];
         TVal *arg = &args->items[i];
@@ -4191,6 +4264,10 @@ static void sys_ffi_call(TVM *vm, TVal *a, int argc, TVal *r) {
         case 14: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13]); break;
         case 15: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14]); break;
         case 16: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]); break;
+        case 17: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16]); break;
+        case 18: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16], u[17]); break;
+        case 19: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16], u[17], u[18]); break;
+        case 20: res = ((uint64_t(*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15], u[16], u[17], u[18], u[19]); break;
         }
     }
 
@@ -4656,6 +4733,41 @@ static void sys_mem_write_f64(TVM *vm, TVal *a, int argc, TVal *r) {
     *r = mk_nil();
 }
 
+static void sys_mem_read_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_f32(ptr: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_read_f32: null pointer dereference");
+    float val = *(float*)p;
+    *r = mk_float((double)val);
+}
+
+static void sys_mem_write_f32(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT) die(vm, "mem_write_f32(ptr: int, val: float)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_write_f32: null pointer dereference");
+    int ok = 1;
+    double val = to_num(&a[1], &ok);
+    if (!ok) die(vm, "mem_write_f32: expected number");
+    *(float*)p = (float)val;
+    *r = mk_nil();
+}
+
+static void sys_mem_read_u16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 1 || a[0].t != T_INT) die(vm, "mem_read_u16(ptr: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_read_u16: null pointer dereference");
+    uint16_t val = *(uint16_t*)p;
+    *r = mk_int((int64_t)val);
+}
+
+static void sys_mem_write_u16(TVM *vm, TVal *a, int argc, TVal *r) {
+    if (argc != 2 || a[0].t != T_INT || a[1].t != T_INT) die(vm, "mem_write_u16(ptr: int, val: int)");
+    uintptr_t p = (uintptr_t)a[0].u.i;
+    if (!p) die(vm, "mem_write_u16: null pointer dereference");
+    *(uint16_t*)p = (uint16_t)a[1].u.i;
+    *r = mk_nil();
+}
+
 static void sys_arm64_selftest(TVM *vm, TVal *a, int argc, TVal *r) {
     (void)vm; (void)a; (void)argc;
     *r = mk_bool(t_arm64_selftest());
@@ -4692,6 +4804,8 @@ static void make_sys_mod(TVM *vm, TVal *r) {
 
         /* quant / dequant */
         {"quant_f16", sys_quant_f16}, {"dequant_f16", sys_dequant_f16},
+        {"quant_bf16", sys_quant_bf16}, {"dequant_bf16", sys_dequant_bf16},
+        {"quant_f32", sys_quant_f32}, {"dequant_f32", sys_dequant_f32},
         {"quant_q4_0", sys_quant_q4_0}, {"dequant_q4_0", sys_dequant_q4_0},
         {"quant_q8_0", sys_quant_q8_0}, {"dequant_q8_0", sys_dequant_q8_0},
 
@@ -4703,9 +4817,13 @@ static void make_sys_mod(TVM *vm, TVal *r) {
         {"mem_alloc", sys_mem_alloc}, {"mem_free", sys_mem_free},
         {"mem_read_ptr", sys_mem_read_ptr}, {"mem_write_ptr", sys_mem_write_ptr},
         {"mem_read_i32", sys_mem_read_i32}, {"mem_write_i32", sys_mem_write_i32},
+        {"mem_read_u16", sys_mem_read_u16}, {"mem_write_u16", sys_mem_write_u16},
         {"mem_read_str", sys_mem_read_str},
+        {"mem_read_f32", sys_mem_read_f32}, {"mem_write_f32", sys_mem_write_f32},
         {"mem_read_f64", sys_mem_read_f64}, {"mem_write_f64", sys_mem_write_f64},
         {"arm64_selftest", sys_arm64_selftest}, {"arm64_dump", sys_arm64_dump},
+        {"arm64_compile", sys_arm64_compile}, {"arm64_run", sys_arm64_run},
+        {"arm64_osr_run", sys_arm64_osr_run},
 
         /* thread & channel */
         {"channel_new", sys_channel_new}, {"channel_send", sys_channel_send},

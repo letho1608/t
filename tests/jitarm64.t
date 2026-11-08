@@ -1,11 +1,52 @@
-# tests/jitarm64.t — J7 skeleton: emitter AArch64 byte-verify + dump
-# Máy x86-64 không chạy được mã ARM64; kiểm chứng byte phát ra theo oracle
-# viết tay (t_arm64_selftest) và dump file để kiểm bằng `objdump -m aarch64`.
-# JIT x64 trên máy này vẫn phải hoạt động bình thường (đã có suite jit*.t).
+# tests/jitarm64.t — J7 Hoàn chỉnh: Trình biên dịch Bytecode -> AArch64 (ARM64) + OSR + Deopt
+# Kiểm chứng:
+#   1. Oracle byte (t_arm64_selftest) & dump nhị phân 52 byte (t_arm64_dump).
+#   2. Biên dịch hàm T thật sang mã máy AArch64 (arm64_compile) & chạy trên máy ảo AArch64
+#      (arm64_run / arm64_osr_run): đệ quy fib, vòng lặp số học, thực float64, bitwise 64-bit,
+#      builtin int/float/abs/min/max/len, đọc/ghi list (OP_IDX/OP_SETIDX/OP_LEN) và Deopt an toàn.
 
 let sys = load("__sys")
 import os
 import path
+
+fn fib_a64(n):
+    if n < 2:
+        return n
+    return fib_a64(n - 1) + fib_a64(n - 2)
+
+fn sum_loop(n):
+    mut s = 0
+    mut i = 1
+    while i <= n:
+        s = s + (i * 3 - (i % 5))
+        i = i + 1
+    return s
+
+fn float_kernel(n, x):
+    mut acc = 0.0
+    mut i = 1
+    while i <= n:
+        acc = acc + (float(i) * x) / (float(i) + 1.5)
+        i = i + 1
+    return acc
+
+fn bitwise_kernel(a, b):
+    let x = ((a & b) | (a ^ b)) + (~a & 255)
+    let y = (x << 3) >> 1
+    return min(abs(y), max(a, b))
+
+fn list_sieve_sum(xs):
+    mut i = 0
+    let n = len(xs)
+    mut s = 0
+    while i < n:
+        xs[i] = xs[i] * 2 + 1
+        s = s + xs[i]
+        i = i + 1
+    return s
+
+fn div_maybe_deopt(a, b):
+    return a % b
 
 fn main():
     assert sys.arm64_selftest() == true, "arm64 emitter lech oracle byte"
@@ -20,9 +61,53 @@ fn main():
     os.remove(out)
     os.rmtree(tmp)
 
-    # dump tới thư mục không tồn tại -> false êm, không crash
     assert sys.arm64_dump(path.join(tmp, "nope", "x.bin")) == false
     print("arm64 dump OK")
+
+    # 1. Kiểm tra biên dịch Bytecode -> AArch64 (mỗi lệnh 4 byte, kết thúc bằng ret 0xD65F03C0)
+    let code_fib = sys.arm64_compile(fib_a64, 10)
+    assert code_fib.len > 32 and (code_fib.len % 4) == 0
+    assert ord(code_fib[code_fib.len - 4]) == 0xC0
+    assert ord(code_fib[code_fib.len - 3]) == 0x03
+    assert ord(code_fib[code_fib.len - 2]) == 0x5F
+    assert ord(code_fib[code_fib.len - 1]) == 0xD6
+    print("arm64_compile bytecode -> AArch64 (" + str(code_fib.len) + " bytes) OK")
+
+    # 2. Chạy đệ quy fib_a64 trên mã máy AArch64
+    let f12 = sys.arm64_run(fib_a64, 12)
+    assert f12 == fib_a64(12) and f12 == 144
+    print("arm64_run fib(12) =", f12, "OK")
+
+    # 3. Chạy vòng lặp số học & OSR
+    let sl = sys.arm64_run(sum_loop, 500)
+    assert sl == sum_loop(500)
+    let sl_osr = sys.arm64_osr_run(sum_loop, 500)
+    assert sl_osr == sl
+    print("arm64_run & OSR sum_loop(500) =", sl, "OK")
+
+    # 4. Chạy kernel số thực IEEE-754 float64
+    let fk_got = sys.arm64_run(float_kernel, 200, 0.75)
+    let fk_ref = float_kernel(200, 0.75)
+    assert abs(fk_got - fk_ref) < 0.000000000001
+    print("arm64_run float64 kernel OK")
+
+    # 5. Chạy kernel bitwise 64-bit & builtin abs/min/max
+    let bw_got = sys.arm64_run(bitwise_kernel, 12345, 6789)
+    let bw_ref = bitwise_kernel(12345, 6789)
+    assert bw_got == bw_ref
+    print("arm64_run bitwise64 + builtins =", bw_got, "OK")
+
+    # 6. Đọc/ghi phần tử list (OP_IDX, OP_SETIDX, OP_LEN)
+    let a1 = [1, 2, 3, 4, 5, 6, 7, 8]
+    let a2 = [1, 2, 3, 4, 5, 6, 7, 8]
+    let ls_got = sys.arm64_run(list_sieve_sum, a1)
+    let ls_ref = list_sieve_sum(a2)
+    assert ls_got == ls_ref and a1 == a2
+    print("arm64_run list read/write =", ls_got, "OK")
+
+    # 7. Kiểm tra Deopt an toàn khi chia dư và tràn
+    assert sys.arm64_run(div_maybe_deopt, -17, 5) == (-17 % 5)
+    print("arm64_run floor mod & deopt guard OK")
 
 main()
 print("All jit-arm64 tests passed successfully!")

@@ -141,6 +141,17 @@ fn swiglu(gate, up):
     y = (gate.val * gate.val.sigmoid()) * up.val
     return mk(y, [gate, up], fn(g): gate.val.swiglu_bwd(g, up.val), "swiglu")
 
+# Tích chập 2D NCHW: forward + backward gộp trong kernel C
+fn conv2d(x, w, bias = nil, stride = 1, pad = 0):
+    x = lift(x)
+    w = lift(w)
+    has_b = bias != nil
+    bnode = lift(bias) if has_b else const(0)
+    bval = bnode.val if has_b else nil
+    y = x.val.conv2d(w.val, bval, stride, pad)
+    parents = [x, w, bnode] if has_b else [x, w]
+    return mk(y, parents, fn(g): x.val.conv2d_bwd(w.val, g, stride, pad) if has_b else x.val.conv2d_bwd(w.val, g, stride, pad)[0:2], "conv2d")
+
 # thứ tự topo (DFS) từ nút gốc
 fn topo(root):
     mut order = []
