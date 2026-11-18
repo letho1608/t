@@ -2,7 +2,7 @@
 
 # The T Programming Language
 
-**A self-hosted, AI-first programming language with native multi-dtype tensors, dual x86-64 and ARM64 JIT compilation, native AOT transpilation, and Rust-grade safety guarantees.**
+**A self-hosted programming language featuring native multi-dimensional tensors, dual x86-64 and ARM64 JIT compilers, and an integrated autograd engine.**
 
 [![CI](https://github.com/letho1608/t/actions/workflows/ci.yml/badge.svg)](https://github.com/letho1608/t/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-v7.1-blue.svg)](https://github.com/letho1608/t)
@@ -20,9 +20,9 @@
 
 ## Overview
 
-The T programming language combines indentation-based syntax with execution speeds approaching C and Rust. Designed with an AI-first philosophy, the runtime treats multi-dimensional tensors as first-class language primitives and embeds reverse-mode automatic differentiation directly into the standard library.
+The T programming language combines indentation-based syntax with native support for multi-dimensional numeric tensors and reverse-mode automatic differentiation.
 
-The entire ecosystem is self-hosted: the reference compiler, interactive REPL, language server, code formatter, package manager, and test harness are written entirely in T and bootstrap without external language dependencies.
+The entire toolchain is self-hosted: the compiler, interactive REPL, language server, code formatter, package manager, and test harness are implemented directly in T.
 
 ---
 
@@ -48,7 +48,7 @@ ag.backward(activations)
 print("Weight gradients:", weights.grad)
 ```
 
-For more language samples—including structs, async networking, Rayon-style parallel reductions, and LLM Transformer inference—explore the [`examples/`](examples/) directory.
+For more language samples—including structs, async networking, parallel reductions, and LLM Transformer inference—explore the [`examples/`](examples/) directory.
 
 ---
 
@@ -115,11 +115,11 @@ All 52 subsystem test suites must report `[PASS]` and conclude with an `ALL-GREE
 
 The T runtime architecture consists of several modular subsystems:
 
-- **100% Self-Hosted Compiler**: The compiler frontend and bytecode generator (`self/tcomp.t`) are implemented in pure T and produce deterministic bytecode output across architectures.
+- **Self-Hosted Compiler**: The compiler frontend and bytecode generator (`self/tcomp.t`) are implemented in pure T and produce deterministic bytecode output across architectures.
 - **Dual-Tier JIT Engine**: The virtual machine incorporates Method JIT and On-Stack Replacement (OSR) compilers for x86-64 (Win64 and System V ABIs) and ARM64 (AArch64 AAPCS64). Execution paths deoptimize smoothly to the interpreter upon guard failure.
 - **Hardware Acceleration**: The runtime dispatches SPIR-V 1.0 compute shaders through the Vulkan Loader and drives NVIDIA Tensor Core GEMM operations via cuBLAS and cuDNN foreign function bindings.
-- **Rust-Grade Safety & Concurrency**: The language provides algebraic data types (`Result<T, E>` and `Option<T>`) with postfix error propagation (`?`), a static borrow and move checker (`std/typecheck.t`), contiguous C-layout structs (`#[repr(C)]`), and lock-free thread coordination primitives.
-- **High-Performance Primitives**: The standard library includes 8-pass $O(N)$ LSD Radix Sort, unboxed contiguous vectors (`VecI64`, `VecF64`), multiplicative Fibonacci hash maps (`IntMap`), and a zero-allocation native thread pool (`std/thread.t`).
+- **Type Safety and Concurrency**: The language provides algebraic data types (`Result<T, E>` and `Option<T>`) with postfix error propagation (`?`), a static borrow and move checker (`std/typecheck.t`), contiguous C-layout structs (`#[repr(C)]`), and lock-free thread coordination primitives.
+- **High-Performance Primitives**: The standard library includes an 8-pass $O(N)$ LSD Radix Sort, unboxed contiguous vectors (`VecI64`, `VecF64`), multiplicative Fibonacci hash maps (`IntMap`), and a zero-allocation native thread pool (`std/thread.t`).
 
 ---
 
