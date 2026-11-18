@@ -1,3 +1,6 @@
 *.bat text eol=crlf
 *.sh text eol=lf
 *.tb binary
+
+# Map T source files to Python syntax highlighting and eliminate misclassification as Terra/Raku/Perl/Turing
+*.t linguist-language=Python
