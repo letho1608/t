@@ -1,13 +1,10 @@
 #!/bin/sh
-# build.sh — build trun trên POSIX (Linux/macOS x86-64) + tự host tcomp.tb/trepl.tb.
-# Đã verify: Debian (gcc 13, glibc) x86-64 — toàn bộ tools/run_all.t xanh.
+# build.sh — build trun on POSIX (Linux/macOS x86-64 / ARM64) + self-host tcomp.tb/trepl.tb.
 #   sh vm/build.sh            # -> ./trun + tcomp.tb + trepl.tb
 #   ./trun tools/run_all.t    # -> ALL-GREEN
 set -e
 cd "$(dirname "$0")/.."
 CC="${CC:-cc}"
-# gcc 12+ ở -O2 chỉ vector hoá vòng lặp biết trước số lần lặp ("very-cheap"): kernel
-# tensor cần cost model động (phép cộng dồn vẫn tuần tự -> kết quả trùng bit)
 VEC=""
 if $CC --version 2>/dev/null | grep -q "Free Software Foundation"; then VEC=" -fvect-cost-model=dynamic"; fi
 CFLAGS="${CFLAGS:--O2$VEC -std=c99 -Wall}"

@@ -1,8 +1,7 @@
 @echo off
-REM build.bat — build trun.exe bằng MSVC + tự host tcomp.tb/trepl.tb (Windows x64).
-REM   vm\build.bat            (chạy được từ bất kỳ thư mục nào)
-REM Cần Visual Studio Build Tools 2019+ (cl.exe). Nếu đã ở trong "x64 Native
-REM Tools Command Prompt" thì dùng luôn cl hiện có.
+REM build.bat — build trun.exe with MSVC + self-host tcomp.tb/trepl.tb (Windows x64).
+REM   vm\build.bat            (runnable from any directory)
+REM Requires Visual Studio Build Tools 2019+ (cl.exe).
 setlocal
 set "ROOT=%~dp0.."
 cd /d "%ROOT%"
@@ -17,12 +16,11 @@ if defined VSDIR (
 ) else (
   call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
 )
-REM vcvars có thể đổi thư mục hiện tại
 cd /d "%ROOT%"
 :havecl
 where cl >nul 2>nul
 if errorlevel 1 (
-  echo [build] khong tim thay cl.exe ^(MSVC^)
+  echo [build] cl.exe (MSVC) not found
   exit /b 1
 )
 if not exist build mkdir build
@@ -38,6 +36,6 @@ if exist "%ROOT%\tcomp.tb" (
   move /y tcomp.new.tb tcomp.tb >nul
   "%ROOT%\trun.exe" tcomp.tb -b tools\repl.t trepl.tb >nul
   if errorlevel 1 exit /b 1
-  echo [build] OK: tcomp.tb + trepl.tb ^(self-hosted^)
+  echo [build] OK: tcomp.tb + trepl.tb (self-hosted)
 )
 exit /b 0

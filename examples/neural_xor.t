@@ -1,7 +1,7 @@
-# examples/neural_xor.t — Huấn luyện mạng MLP 2 lớp giải bài toán XOR bằng autograd & sgd
+# examples/neural_xor.t — Train a 2-layer MLP to solve the nonlinear XOR problem using autograd & SGD
 import autograd as ag
 
-print("=== Huấn luyện Mạng Nơ-ron giải bài toán phi tuyến XOR ===")
+print("=== Training Neural Network on Nonlinear XOR Problem ===")
 seed(1)
 
 let X = ag.const(tensor([[0, 0], [0, 1], [1, 0], [1, 1]]))
@@ -24,9 +24,9 @@ for step in range(500):
     ag.sgd(params, 1.0)
     if (step + 1) % 100 == 0:
         lval = round(loss.val.item() * 10000.0) / 10000.0
-        print(f"Bước {step + 1} / 500 | Loss: {lval}")
+        print(f"Step {step + 1} / 500 | Loss: {lval}")
 
-print("\n=== Kết quả dự đoán sau huấn luyện ===")
+print("\n=== Predictions After Training ===")
 pred = ((X.val @ W1.val + b1.val).tanh() @ W2.val + b2.val).sigmoid()
 let inputs = [[0, 0], [0, 1], [1, 0], [1, 1]]
 let targets = [0, 1, 1, 0]
@@ -37,4 +37,4 @@ for i in range(4):
     target = targets[i]
     prob = round(probs[i] * 1000.0) / 1000.0
     ans = 1 if prob > 0.5 else 0
-    print(f"XOR({in_a}, {in_b}) -> Kỳ vọng: {target} | Dự đoán: {ans} (xác suất: {prob})")
+    print(f"XOR({in_a}, {in_b}) -> Expected: {target} | Predicted: {ans} (prob: {prob})")

@@ -1,18 +1,21 @@
-# Tiện ích mở rộng VS Code cho Ngôn ngữ T
+# T Language — VS Code Extension
 
-Cung cấp tô màu cú pháp (Syntax Highlighting), quy tắc thụt lề (Indentation Rules) và tích hợp Language Server cho ngôn ngữ lập trình T (`.t`).
+Provides rich language support for the T programming language (`.t` files) in Visual Studio Code.
 
-## Tính năng
+## Features
 
-- **Tô màu cú pháp đầy đủ**: Từ khóa (`fn`, `struct`, `let`, `mut`, `try/except/finally`), toán tử bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`), f-strings, số nhị phân/hex/float, tensor và builtins.
-- **Tự động đóng ngoặc & bình luận**: Đóng mở `()`, `[]`, `{}`, nháy đơn/kép, và comment dòng với `#`.
-- **Tự động thụt lề**: Tự động tăng 4 spaces sau các khối có kết thúc bằng `:`.
-- **Tương thích LSP**: Sử dụng Language Server chuẩn của T ([tools/tlsp.t](../../tools/tlsp.t)) qua lệnh `trun tools/tlsp.t`.
+- **Full syntax highlighting** — keywords (`fn`, `struct`, `let`, `mut`, `try/except/finally`), 64-bit bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`), f-strings, binary/hex/float literals, tensor builtins, and more.
+- **Auto-closing pairs** — brackets `()`, `[]`, `{}`, single/double quotes, and line comments with `#`.
+- **Smart indentation** — automatically increases indent by 4 spaces after blocks ending with `:`.
+- **LSP integration** — connects to the T Language Server ([tools/tlsp.t](../../tools/tlsp.t)) via `trun tools/tlsp.t`, providing hover docs, go-to-definition, find references, rename, completions, and diagnostics.
 
-## Cài đặt cục bộ
+## Local Installation
 
-Chép thư mục `editors/vscode` vào thư mục extensions của VS Code:
-- **Windows**: `%USERPROFILE%\.vscode\extensions\t-lang`
-- **Linux / macOS**: `~/.vscode/extensions/t-lang`
+Copy the `editors/vscode` directory into your VS Code extensions folder:
 
-Hoặc mở thư mục này trong VS Code và nhấn `F5` để chạy thử nghiệm.
+| Platform | Path |
+|---|---|
+| Windows | `%USERPROFILE%\.vscode\extensions\t-lang` |
+| Linux / macOS | `~/.vscode/extensions/t-lang` |
+
+Alternatively, open this folder in VS Code and press `F5` to launch an Extension Development Host for testing.

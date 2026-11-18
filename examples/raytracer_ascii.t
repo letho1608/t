@@ -1,4 +1,4 @@
-# examples/raytracer_ascii.t — Trình dò tia 3D (Raytracer) kết xuất quả cầu ASCII
+# examples/raytracer_ascii.t — 3D Raytracer rendering an ASCII sphere
 import math
 
 struct Vec3:
@@ -26,17 +26,17 @@ let radius = 1.0
 
 let width = 60
 let height = 30
-let aspect = 2.0  # Tỉ lệ ký tự dòng/cột của terminal
+let aspect = 2.0  # Terminal character row/column aspect ratio
 
 mut lines = []
 for y in range(height):
-    # Chuẩn hóa tọa độ màn hình [-1, 1]
+    # Normalized screen coordinates [-1, 1]
     ny = (float(y) / float(height - 1)) * 2.0 - 1.0
     mut row = ""
     for x in range(width):
         nx = ((float(x) / float(width - 1)) * 2.0 - 1.0) * aspect
         ray_dir = Vec3(nx, ny, 1.5).normalize()
-        # Giao tuyến tia sáng với mặt cầu: |origin + t*dir - center|^2 = r^2
+        # Ray-sphere intersection: |origin + t*dir - center|^2 = r^2
         # origin = (0, 0, 0) -> oc = -center
         oc = Vec3(0.0 - sphere_center.x, 0.0 - sphere_center.y, 0.0 - sphere_center.z)
         b = 2.0 * ray_dir.dot(oc)
@@ -57,5 +57,5 @@ for y in range(height):
             row = row + " "
     lines.append(row)
 
-print("=== Quả Cầu 3D Chiếu Sáng (Raytraced ASCII) ===")
+print("=== 3D Raytraced ASCII Sphere ===")
 print("\n".join(lines))

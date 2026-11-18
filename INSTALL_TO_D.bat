@@ -1,11 +1,11 @@
 @echo off
-REM T language v3.0 one-click installer: chép dự án vào D:\Code\t, build VM C, chạy toàn bộ test thuần T.
-REM   INSTALL_TO_D.bat            (chạy từ thư mục nguồn bất kỳ)
+REM T language one-click installer: copy project into D:\Code\t, build C VM, run full test suite.
+REM   INSTALL_TO_D.bat            (runnable from any source directory)
 setlocal
 set "SRC=%~dp0"
 set "DST=D:\Code\t"
 if /I "%SRC%"=="%DST%\" (
-  echo [T] nguon trung dich, bo qua buoc chep
+  echo [T] Source is destination, skipping copy step
   goto :build
 )
 for %%D in (std tests bench self tools vm .github\workflows) do mkdir "%DST%\%%D" 2>nul
@@ -24,7 +24,7 @@ echo.
 echo [T] building C VM (MSVC) + self-hosting tcomp.tb/trepl.tb...
 call "%DST%\vm\build.bat"
 if errorlevel 1 (
-  echo [T] khong build duoc trun.exe ^(can MSVC^)
+  echo [T] failed to build trun.exe (MSVC required)
   goto :fail
 )
 echo.

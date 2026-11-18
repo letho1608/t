@@ -12,7 +12,7 @@
 [![Tests](https://img.shields.io/badge/tests-52%2F52%20ALL--GREEN-success.svg)](#)
 [![Self-Hosted](https://img.shields.io/badge/self--hosted-100%25%20pure%20.t-orange.svg)](#)
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Install & Build](#-install--build) • [Syntax](#-language-syntax) • [Standard Library](#-standard-library) • [Tooling](#-developer-tooling) • [Security](#-security)
+[Features](#-syntax--features) • [Quick Start](#-quick-start) • [Install & Build](#-install--build) • [Standard Library](#-standard-library) • [Tooling](#-developer-tooling) • [Security](#-security) • [Contributing](CONTRIBUTING.md) • [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -86,7 +86,7 @@ The build script will:
 
 ---
 
-## ✨ Features
+## ✨ Syntax & Features
 
 ### 1. Clean Indentation-Based Syntax
 
@@ -311,6 +311,15 @@ tcomp.tb             Pre-bootstrapped compiler bytecode (no Python required)
 LICENSE              MIT License
 README.md            This file
 ```
+
+---
+
+## 🤝 Community & Contributing
+
+Contributions are warmly welcomed! Please review our **[Contributing Guide](CONTRIBUTING.md)** and **[Security Policy](SECURITY.md)** before opening pull requests or reporting issues.
+
+- **Issue Tracker**: Use [GitHub Issues](https://github.com/letho1608/t/issues) for bug reports and feature requests.
+- **Release History**: See the [Changelog](CHANGELOG.md) for full release notes across versions.
 
 ---
 

@@ -1,25 +1,25 @@
-# examples/data_pipeline.t — Pipeline xử lý dữ liệu: CSV -> Regex -> Thống kê -> JSON
+# examples/data_pipeline.t — Data Processing Pipeline: CSV -> Regex -> Statistics -> JSON
 import csv
 import json
 import re
 import math
 import random
 
-print("=== 1. Sinh dữ liệu bán hàng ngẫu nhiên ===")
+print("=== 1. Generating Mock Sales Data ===")
 random.seed(123)
-let categories = ["Laptop", "Điện thoại", "Phụ kiện", "Màn hình"]
+let categories = ["Laptop", "Phone", "Accessories", "Monitor"]
 mut raw_records = []
 for i in range(1, 21):
     cat = random.choice(categories)
-    price = random.randint(15, 300) * 100000
+    price = random.randint(15, 300) * 10
     sku = f"SKU-{cat[0:3].upper()}-{1000 + i}"
-    email = f"khach_{i}@shop{random.randint(1, 3)}.vn"
+    email = f"customer_{i}@store{random.randint(1, 3)}.com"
     raw_records.append([str(i), sku, cat, str(price), email])
 
 csv_content = csv.dumps([["id", "sku", "category", "price", "email"]] + raw_records)
-print(f"Đã tạo bảng CSV {raw_records.len} dòng.")
+print(f"Generated CSV table with {raw_records.len} rows.")
 
-print("\n=== 2. Phân tích CSV & Lọc hợp lệ bằng Regex ===")
+print("\n=== 2. Parsing CSV & Validating with Regex ===")
 rows = csv.loads(csv_content)
 let header = rows[0]
 mut valid_items = []
@@ -34,9 +34,9 @@ for i in range(1, rows.len):
     if re.fullmatch(email_rx, email):
         valid_items.append({"sku": sku, "category": cat, "price": price, "email": email})
 
-print(f"Số bản ghi hợp lệ: {valid_items.len} / {raw_records.len}")
+print(f"Valid records: {valid_items.len} / {raw_records.len}")
 
-print("\n=== 3. Tính toán Thống kê ===")
+print("\n=== 3. Computing Statistics ===")
 mut total_rev = 0
 mut prices = []
 for it in valid_items:
@@ -51,12 +51,12 @@ for p in prices:
     var_sum = var_sum + diff * diff
 std_dev = math.sqrt(var_sum / float(valid_items.len))
 
-print(f"Tổng doanh thu: {total_rev} VND")
-print(f"Giá trung bình: {int(mean_price)} VND | Độ lệch chuẩn: {int(std_dev)} VND")
+print(f"Total Revenue: ${total_rev}")
+print(f"Average Price: ${int(mean_price)} | Standard Deviation: ${int(std_dev)}")
 
-print("\n=== 4. Xuất Báo Cáo JSON ===")
+print("\n=== 4. Exporting JSON Report ===")
 let report = {
-    "title": "Báo cáo tổng hợp doanh thu",
+    "title": "Sales Revenue Summary Report",
     "total_records": valid_items.len,
     "total_revenue": total_rev,
     "average_price": int(mean_price),
