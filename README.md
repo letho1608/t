@@ -1,8 +1,8 @@
 <div align="center">
 
-# ⚡ T Programming Language
+# T Programming Language
 
-**A modern, 100% self-hosted, AI-first programming language with native tensors, dual x86-64/ARM64 JIT, AOT compilation, and Rust-grade performance.**
+**A self-hosted, AI-first programming language with native multi-dtype tensors, dual x86-64 and ARM64 JIT compilers, AOT transpilation, and Rust-grade safety guarantees.**
 
 [![CI](https://github.com/letho1608/t/actions/workflows/ci.yml/badge.svg)](https://github.com/letho1608/t/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-v7.1-blue.svg)](https://github.com/letho1608/t)
@@ -12,7 +12,7 @@
 [![Tests](https://img.shields.io/badge/tests-52%2F52%20ALL--GREEN-success.svg)](#)
 [![Self-Hosted](https://img.shields.io/badge/self--hosted-100%25%20pure%20.t-orange.svg)](#)
 
-[Features](#-syntax--features) • [Quick Start](#-quick-start) • [Install & Build](#-install--build) • [Standard Library](#-standard-library) • [Tooling](#-developer-tooling) • [Security](#-security) • [Contributing](CONTRIBUTING.md) • [Changelog](CHANGELOG.md)
+[Overview](#overview) • [Quick Start](#quick-start) • [Installation and Building](#installation-and-building) • [Language Syntax and Features](#language-syntax-and-features) • [Performance Optimizations](#performance-optimizations) • [Standard Library](#standard-library) • [Developer Tooling](#developer-tooling) • [Security Architecture](#security-architecture) • [Community and Contributing](#community-and-contributing) • [License](#license)
 
 </div>
 
@@ -20,309 +20,302 @@
 
 ## Overview
 
-**T** is a general-purpose programming language combining Python/Go-style indented syntax with near-C/Rust performance. It is designed to be AI-first, with multi-dimensional tensors as a first-class primitive type.
+The T programming language combines indentation-based syntax with execution performance approaching C and Rust. The language treats multi-dimensional tensors as first-class primitives and integrates reverse-mode automatic differentiation directly into the standard runtime.
 
-- **100% Self-Hosted** — The compiler (`self/tcomp.t`), REPL (`tools/repl.t`), LSP server (`tools/tlsp.t`), formatter (`tools/ffmt.t`), package manager (`tools/tpkg.t`), and test runner (`tools/run_all.t`) are all written in T and bootstrap themselves.
-- **AI-First & Native Tensors** — Multi-dimensional, multi-dtype tensors (`f64`, `f32`, `f16`, `bf16`, `i32`, `i8`) are a language primitive with built-in reverse-mode automatic differentiation.
-- **Dual JIT Compiler** — Generates native code for x86-64 (Win64 ABI + System V) and ARM64 (AArch64 AAPCS64), with On-Stack Replacement (OSR) and deoptimization.
-- **AOT Native Compiler** — Transpiles T source to optimized C99 or Rust, or produces standalone `.dll`/`.so` libraries with AVX2 (`std/aot.t`).
-- **GPU Acceleration** — Vulkan Compute Shaders (SPIR-V 1.0) and NVIDIA cuBLAS/cuDNN (Tensor Cores FP16/BF16/FP32) supported natively.
-- **Rust-Grade Safety** — `Result<T,E>` / `Option<T>` / `?` operator, static Borrow/Move checker (`std/typecheck.t`), `#[repr(C)]` flat struct arrays (`std/cstruct.t`), and lock-free concurrency primitives.
-- **Single-Binary Packaging** — Produces a fully self-contained executable (`.exe` / ELF) embedding the VM and bytecode (`trun --build-exe`).
+- **Self-Hosting Toolchain**: The entire development environment is implemented in T itself. The reference compiler (`self/tcomp.t`), interactive REPL (`tools/repl.t`), language server (`tools/tlsp.t`), code formatter (`tools/ffmt.t`), package manager (`tools/tpkg.t`), and test harness (`tools/run_all.t`) are all written in pure T and bootstrap without external language runtimes.
+- **Native Tensor Primitives**: The runtime supports contiguous multi-dimensional tensors across diverse numeric datatypes (`f64`, `f32`, `f16`, `bf16`, `i32`, `i8`). Tensors support broadcast arithmetic and multi-threaded SIMD matrix multiplication.
+- **Dual-Tier JIT Compilation**: The virtual machine includes Method JIT and On-Stack Replacement (OSR) engines targeting x86-64 (Windows Win64 and System V ABIs) and ARM64 (AArch64 AAPCS64). Code paths that fail type guards automatically deoptimize back to the bytecode interpreter.
+- **Ahead-of-Time (AOT) Native Compilation**: The `std/aot.t` subsystem translates T source code into standalone C99 or Rust source files, and can compile native dynamic libraries (`.dll` or `.so`) with AVX2 instruction support.
+- **Hardware GPU Acceleration**: The runtime dispatches Vulkan Compute Shaders (SPIR-V 1.0) directly through the Vulkan Loader and drives NVIDIA Tensor Core operations via cuBLAS and cuDNN bindings.
+- **Static Safety and Concurrency**: The language provides algebraic data types (`Result<T, E>` and `Option<T>`) paired with an error-propagation operator (`?`). A static borrow checker verifies variable lifetimes and prevents use-after-move errors. Concurrency primitives include lock-free atomics and flat contiguous struct arrays (`#[repr(C)]`).
+- **Single-Binary Distribution**: Developers can bundle the C virtual machine runtime and compiled bytecode into a single standalone executable file (`trun --build-exe`).
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
+
+The table below summarizes common command-line invocations for running, compiling, and analyzing T programs:
 
 | Action | Command | Description |
 |---|---|---|
-| Run a source file | `trun app.t` | Transparently compiles via `tcomp.tb` and executes with JIT |
-| Evaluate a snippet | `trun -c "print(1 + 2)"` | One-shot expression evaluation |
-| Run bytecode | `trun app.tb` | Zero compile-time startup + JIT |
-| Interactive REPL | `trun` | Smart interactive shell |
-| Compile to bytecode | `trun tcomp.tb app.t app.tb` | Explicit compilation via the self-hosted compiler |
-| Package as binary | `trun --build-exe app.t app.exe` | Bundle VM + bytecode into one standalone binary |
-| AOT compile | `trun tools/taot.t --emit-c app.t` | Transpile to optimized C99 or Rust |
-| Static type check | `trun tools/tcheck.t app.t` | Borrow check, Use-After-Move/Close, exhaustiveness |
+| Run a source file | `trun app.t` | The runtime compiles the source file through `tcomp.tb` and executes the resulting bytecode with the JIT compiler. |
+| Evaluate an expression | `trun -c "print(1 + 2)"` | The runtime parses and evaluates the given expression string immediately. |
+| Execute bytecode | `trun app.tb` | The virtual machine executes precompiled bytecode directly with zero compilation overhead. |
+| Start the REPL | `trun` | The runtime launches an interactive read-eval-print loop with multi-line input support. |
+| Compile source to bytecode | `trun tcomp.tb app.t app.tb` | The self-hosted compiler compiles a source script into an optimized bytecode binary. |
+| Bundle a standalone binary | `trun --build-exe app.t app.exe` | The tool concatenates the VM runtime and bytecode into a self-contained executable file. |
+| Generate native C source | `trun tools/taot.t --emit-c app.t` | The AOT compiler transpiles the T source code into standard C99 source code. |
+| Run static analysis | `trun tools/tcheck.t app.t` | The static checker validates type annotations and verifies memory ownership rules. |
 
 ---
 
-## 🛠️ Install & Build
+## Installation and Building
 
-### Prerequisites
+### System Requirements
 
-| Platform | Requirement |
-|---|---|
-| Windows | MSVC (`cl.exe`) from Visual Studio or Build Tools |
-| Linux / macOS | GCC or Clang |
+The project requires a standard C compiler and the Git version control system:
+- On Windows, the build scripts require the Microsoft Visual C++ compiler (`cl.exe`), which is included with Visual Studio 2019 or later and the standalone Build Tools for Visual Studio.
+- On Linux and macOS, the build scripts require either GCC (version 11 or later) or Clang (version 13 or later).
 
-### Build from Source
+### Building from Source
+
+To clone the repository and build the runtime binary from source, run the following commands:
 
 ```bash
-# Windows (run inside a Visual Studio Developer Command Prompt)
+# Clone the repository
+git clone https://github.com/letho1608/t.git
+cd t
+
+# On Windows (execute within a Visual Studio Developer Command Prompt)
 vm\build.bat
 
-# Linux / macOS
+# On Linux or macOS
 sh vm/build.sh
 ```
 
-The build script will:
-1. Compile the C VM (`vm/tvm.c`, `vm/jit_x64.c`, `vm/jit_arm64.c`) into `trun` / `trun.exe`.
-2. Use the resulting `trun` to self-host the compiler (`self/tcomp.t` → `tcomp.tb`) and REPL (`tools/repl.t` → `trepl.tb`).
+The build scripts perform the following steps:
+1. The host C compiler compiles the virtual machine files (`vm/tvm.c`, `vm/jit_x64.c`, `vm/jit_arm64.c`, `vm/tdbg.c`, `vm/trun.c`) into the `trun` executable binary.
+2. The newly produced `trun` binary bootstraps the self-hosted compiler from `self/tcli.t` into `tcomp.tb`.
+3. The bootstrapped compiler compiles `tools/repl.t` into `trepl.tb`.
 
-### Run Tests & Benchmarks
+### Verification and Benchmarks
+
+To verify that the build succeeds and all subsystem tests pass, run the test runner:
 
 ```bash
-# Run the full 52-suite test harness
-./trun tools/run_all.t        # Linux / macOS
-.\trun.exe tools\run_all.t    # Windows
+# Execute the comprehensive 52-suite test harness
+.\trun.exe tools\run_all.t      # On Windows
+./trun tools/run_all.t          # On Linux or macOS
 
-# Benchmark against Python
+# Run performance benchmarks against Python
 .\trun.exe bench\bench.t
 
-# Benchmark against Rust / native -O2
+# Run head-to-head performance benchmarks against native Rust compiled with -O2
 .\trun.exe bench\rust_vs_t.t
 ```
 
 ---
 
-## ✨ Syntax & Features
+## Language Syntax and Features
 
-### 1. Clean Indentation-Based Syntax
+### Variable Declarations and Control Flow
+
+T enforces block structure through 4-space indentation. Variables are immutable by default and must be explicitly marked mutable:
 
 ```python
-# Immutable (let) and mutable (mut) bindings
+# Variables declared with 'let' cannot be reassigned
 let pi = 3.14159
+
+# Variables declared with 'mut' can be modified
 mut counter = 0
 counter += 1
 
-# Inline conditional expression
-label = "even" if counter % 2 == 0 else "odd"
+# Conditional expressions can be written inline
+let status = "even" if counter % 2 == 0 else "odd"
 
-# 64-bit bitwise operators — JIT-compiled directly to x86-64 / ARM64 machine code
-mask = (0b1100 & 0b1010) | (~0 & 3) ^ (1 << 4)
+# The runtime compiles 64-bit bitwise expressions directly into native instructions
+let mask = (0b1100 & 0b1010) | (~0 & 3) ^ (1 << 4)
 
-# Default parameters and variadic *args
-fn log(module, *messages, level = "INFO"):
-    print(f"[{level}][{module}]", " ".join([str(m) for m in messages]))
+# Functions support default arguments and variable-length argument lists
+fn log_message(subsystem, *items, level = "INFO"):
+    print(f"[{level}][{subsystem}]", " ".join([str(item) for item in items]))
 
-log("NET", "Connected", "port", 8080)
+log_message("NETWORK", "Connection established on port", 8080)
 ```
 
-### 2. Structs with Methods
+### Structures and Methods
+
+Structures group fields together and support method declarations:
 
 ```python
-struct Vec2:
+struct Vector2:
     x, y
 
-    fn length(self):
+    fn magnitude(self):
         import math
         return math.hypot(float(self.x), float(self.y))
 
     fn add(self, other):
-        return Vec2(self.x + other.x, self.y + other.y)
+        return Vector2(self.x + other.x, self.y + other.y)
 
-a = Vec2(3, 4)
-b = Vec2(1, 2)
-print(a.length())          # 5.0
-print(a.add(b).x)          # 4
+let first = Vector2(3, 4)
+let second = Vector2(1, 2)
+let combined = first.add(second)
+
+print(first.magnitude())     # Output: 5.0
+print(combined.x)            # Output: 4
 ```
 
-### 3. Native Tensors & Autograd
+### First-Class Tensors and Reverse-Mode Automatic Differentiation
 
-Tensors are a first-class primitive supporting multiple dtypes (`f64`, `f32`, `f16`, `bf16`, `i32`, `i8`) with vectorised SIMD matrix multiplication (`@`) and multi-threading.
+The runtime provides multi-dimensional tensors with automatic differentiation for neural network operations:
 
 ```python
 import autograd as ag
 
-# Differentiable parameters
-w = ag.param(tensor([[0.5, -0.2], [0.1, 0.8]]))
-b = ag.param(tensor([[0.0, 0.0]]))
-x = ag.const(tensor([[1.0, 2.0]]))
+# Initialize parameters with gradient tracking enabled
+let weights = ag.param(tensor([[0.5, -0.2], [0.1, 0.8]]))
+let bias = ag.param(tensor([[0.0, 0.0]]))
+let inputs = ag.const(tensor([[1.0, 2.0]]))
 
-# Forward pass
-z = ag.add(ag.matmul(x, w), b)
-out = ag.gelu(z)
+# Compute the forward pass through linear projection and GELU activation
+let linear = ag.add(ag.matmul(inputs, weights), bias)
+let activations = ag.gelu(linear)
 
-# Reverse-mode backward pass
-ag.backward(out)
-print("dw:", w.grad)
+# Execute the backward pass to compute gradients across the computation graph
+ag.backward(activations)
+
+print("Weight gradients:", weights.grad)
 ```
 
-### 4. Error Handling — `try/except` and `Result<T, E>`
+### Algebraic Data Types and Error Handling
+
+T supports traditional exception handling through `try/except/finally` as well as zero-cost `Result` types:
 
 ```python
-import result as r
+import result as res
 
-fn divide(a, b):
-    if b == 0:
-        return r.Err("division by zero")
-    return r.Ok(a / b)
+fn divide(numerator, denominator):
+    if denominator == 0:
+        return res.Err("division by zero")
+    return res.Ok(numerator / denominator)
 
-fn pipeline():
-    val = divide(10, 2)?   # unwrap Ok or propagate Err
-    return r.Ok(val * 3)
+fn calculate():
+    # The question mark operator extracts an Ok value or returns early upon an Err
+    let value = divide(10, 2)?
+    return res.Ok(value * 3)
 
-res = pipeline()
-if res.is_ok():
-    print("Result:", res.unwrap())   # 15.0
-```
-
-### 5. Pattern Matching & Traits
-
-```python
-switch shape:
-    case Circle(r):
-        print("area:", 3.14 * r * r)
-    case Rect(w, h):
-        print("area:", w * h)
-    default:
-        print("unknown shape")
-```
-
-### 6. Async / Await
-
-```python
-import async
-
-async fn fetch(url):
-    # non-blocking I/O
-    return await http_get(url)
-
-async fn main():
-    results = await async.gather([fetch(u) for u in urls])
-    print(results)
-
-async.run(main())
+let outcome = calculate()
+if outcome.is_ok():
+    print("Calculated result:", outcome.unwrap())
 ```
 
 ---
 
-## ⚡ Rust-Grade Performance Optimisations (v7.1)
+## Performance Optimizations
 
-| Feature | Module | Detail |
+The T runtime includes specialized data structures and algorithms designed to achieve memory density and execution speeds comparable to compiled systems languages:
+
+| Optimization Mechanism | Module | Technical Implementation |
 |---|---|---|
-| **8-Pass LSD Radix Sort** | `std/vec.t` | $O(N)$ integer sort; >6× faster than `qsort -O2` |
-| **Unboxed Vectors** | `std/vec.t` | Contiguous `VecI64` / `VecF64` with zero-cost iterator fusion |
-| **Fibonacci IntMap** | `std/fastmap.t` | Open-addressing hash table using multiplicative Fibonacci hashing; L1/L2 cache-friendly |
-| **SIMD String Kernels** | `std/fastmap.t` | 8-way unrolled zero-copy scan (`str_count_byte`, `str_fnv1a_64`, `str_find_fast`) |
-| **Rayon-Style Thread Pool** | `std/thread.t` | Zero-spawn native C thread pool for CPU-heavy tasks (`par_reduce_i64`, `par_map_f64`) |
-| **`#[repr(C)]` Flat Struct Arrays** | `std/cstruct.t` | Zero-copy C-layout arrays with L1 cache tiling and SIMD `axpy_f64` |
-| **Lock-Free Concurrency** | `std/thread.t` | `AtomicInt`, `Mutex`, `SharedTensor` zero-copy sharing across worker threads |
-
-```python
-import vec
-import thread
-
-# 1. 8-Pass LSD Radix Sort
-mut v = vec.VecI64()
-for x in [54, 12, 999, 1, 450, 23]:
-    v.push(x)
-v.radix_sort()
-print(v.to_list())   # [1, 12, 23, 54, 450, 999]
-
-# 2. Rayon-style parallel reduction across 4 threads
-total = thread.par_reduce_i64(1, 1_000_000, 4)
-print(total)         # 500000500000
-```
+| **8-Pass LSD Radix Sort** | `std/vec.t` | The module implements an $O(N)$ Least Significant Digit radix sort for 64-bit integer vectors, sorting data faster than standard C library quicksort routines. |
+| **Unboxed Numeric Vectors** | `std/vec.t` | The `VecI64` and `VecF64` structures store unboxed numeric values in contiguous memory buffers and perform iterator fusion on chained map and filter operations. |
+| **Multiplicative Fibonacci IntMap** | `std/fastmap.t` | The hash table maps integer keys to values using multiplicative Fibonacci hashing, minimizing cache misses during probe sequences. |
+| **Vectorized SIMD String Operations** | `std/fastmap.t` | The runtime executes byte-scanning routines with eight-way unrolled loops, accelerating string searching and hash calculations. |
+| **Native Worker Thread Pool** | `std/thread.t` | The thread pool schedules parallel work items across native CPU threads without creating new operating system threads on each invocation. |
+| **Flat Memory Layouts** | `std/cstruct.t` | Structures marked with C-compatible memory layouts store records contiguously in memory, enabling cache-tiled arithmetic operations. |
+| **Lock-Free Concurrency Primitives** | `std/thread.t` | The runtime provides atomic integer counters, mutual exclusion locks, and shared memory tensor buffers for thread-safe cross-worker coordination. |
 
 ---
 
-## 📦 Standard Library
+## Standard Library
+
+The standard library ships with the core runtime and provides modular functionality without external dependencies:
 
 | Module | Description |
 |---|---|
-| `math` | Full trigonometric, exponential, and special functions; `pi`, `tau`, `e`, `clamp`, `gcd`, `lcm` |
-| `json` | RFC 8259 parser/serialiser with full Unicode (`\uXXXX`) and nested dict/list/tensor support |
-| `os` | File I/O, directories, environment, SHA-256, safe subprocess spawning (CWE-78 safe) |
-| `path` | Cross-platform path manipulation (`join`, `basename`, `dirname`, `ext`, `normpath`) |
-| `time` | High-resolution clock, epoch time, `sleep`, `measure` |
-| `random` | Seeded 64-bit PRNG (`randint`, `uniform`, `shuffle`, `choice`, `gauss`) |
-| `re` | Full regex engine (`match`, `search`, `findall`, `sub`, `split`, capture groups, `{m,n}`) |
-| `csv` | RFC 4180 CSV parser/serialiser (`loads`, `dumps`, `read_csv`, `write_csv`) |
-| `http` | URL encoding/parsing and HTTP client (`get`, `post`, `request`) |
-| `net` | Native TCP/UDP sockets (`TcpListener`, `TcpStream`, `UdpSocket`) and embedded `HttpServer` |
-| `async` | Cooperative async runtime: `EventLoop`, `Future`, `spawn`, `gather`, `async fn` / `await` |
-| `thread` | Worker threads, MPMC channels, Rayon thread pool, `AtomicInt`, `SharedTensor` |
-| `autograd` | Reverse-mode AD with fused C kernels for DL ops (`relu`, `gelu`, `softmax`, `conv2d`, …) |
-| `ai` | ML utilities: `linear`, `conv2d`, `relu`, `gelu`, `softmax`, `mse`, `grad` |
-| `transformer` | CPU-side LLM inference: RoPE, KV-Cache, GQA, SwiGLU, BPE tokeniser (LLaMA/Mistral/Qwen) |
-| `vulkan` | Vulkan Loader init, device enumeration, and direct SPIR-V 1.0 Compute Shader dispatch |
-| `cublas` / `cudnn` | NVIDIA Tensor Core GEMM and cuDNN Conv2D via FFI; silently falls back to CPU |
-| `sqlite` | Native SQLite client via OS library (`winsqlite3.dll` / `libsqlite3.so`); zero install |
-| `mmap` | Zero-copy memory-mapped file I/O for large tensors |
-| `gguf` / `safetensors` | GGUF v2/v3 and HuggingFace Safetensors model format parsers |
-| `quant` | FP16, BF16, Q8_0, Q4_0 quantisation and dequantisation |
-| `ffi` | Load `.dll` / `.so` and call C functions with raw pointer primitives (**unsafe**) |
-| `typecheck` | Static type checker with Borrow/Move/Use-After-Close analysis |
-| `result` | `Result<T,E>`, `Option<T>`, `move(x)`, zero-cost `?` operator |
-| `cstruct` | `#[repr(C)]` flat struct arrays: `define`, `alloc_array`, `axpy_f64` |
-| `aot` | Instant JIT (`aot.jit`) and AOT transpiler to C99 / Rust with pointer/array support |
-| `vec` | Unboxed `VecI64` / `VecF64`, zero-cost iterator fusion, 8-pass LSD Radix Sort |
-| `fastmap` | Fibonacci `IntMap`, 8-way SIMD string kernels |
-| `base64` | RFC 4648 Base64 encode/decode |
+| `math` | The module implements elementary arithmetic, trigonometric, hyperbolic, and rounding functions alongside mathematical constants. |
+| `json` | The module implements an RFC 8259-compliant JSON parser and serializer with Unicode escape decoding. |
+| `os` | The module exposes file system management functions, environment variable access, and process execution primitives without invoking an intermediate shell. |
+| `path` | The module normalizes and manipulates file system path components across Windows, Linux, and macOS platforms. |
+| `time` | The module provides monotonic time measurement, calendar timestamps, and thread sleep utilities. |
+| `random` | The module provides a seedable 64-bit pseudo-random number generator supporting uniform, integer, and Gaussian distributions. |
+| `re` | The module implements a regular expression engine supporting character classes, quantifier bounds, and captured subexpressions. |
+| `csv` | The module parses and formats comma-separated value tables in accordance with RFC 4180. |
+| `http` | The module handles URL encoding and provides client methods for dispatching HTTP requests. |
+| `net` | The module exposes BSD-style TCP and UDP socket primitives and includes a lightweight embedded HTTP server. |
+| `async` | The module provides a cooperative asynchronous event loop managing futures and coroutines defined with `async fn` and `await`. |
+| `thread` | The module manages worker threads, message-passing channels, atomic counters, and parallel reductions. |
+| `autograd` | The module implements reverse-mode automatic differentiation with fused C kernels for standard neural network layers. |
+| `ai` | The module provides machine learning helpers including loss computations, initialization routines, and layer evaluations. |
+| `transformer` | The module implements Transformer model inference supporting rotary embeddings, grouped-query attention, and SwiGLU feed-forward networks. |
+| `vulkan` | The module initializes the Vulkan API loader and executes SPIR-V 1.0 compute shaders directly on the GPU. |
+| `cublas` / `cudnn` | The modules dispatch dense matrix multiplications and two-dimensional convolutions to NVIDIA Tensor Cores via foreign function interfaces. |
+| `sqlite` | The module establishes database connections directly to native operating system SQLite shared libraries without third-party drivers. |
+| `mmap` | The module maps large files into process virtual memory, facilitating zero-copy tensor loading from disk. |
+| `gguf` / `safetensors` | The modules parse metadata and tensor catalogs from GGUF and Hugging Face Safetensors model archives. |
+| `quant` | The module converts floating-point tensor buffers into quantized representations including FP16, BF16, Q8_0, and Q4_0. |
+| `ffi` | The module loads external dynamic libraries and calls exported C functions using explicit foreign function calling conventions. |
+| `typecheck` | The module performs static semantic checks to identify type mismatches, variable moves, and unhandled branches. |
+| `result` | The module defines `Result` and `Option` container types to facilitate explicit error propagation without exceptions. |
+| `cstruct` | The module defines flat struct schemas and allocates contiguous memory arrays for C-interoperable data processing. |
+| `aot` | The module compiles T abstract syntax trees into C99 source files, Rust modules, or native shared libraries. |
+| `vec` | The module provides unboxed 64-bit integer and floating-point vectors alongside an $O(N)$ LSD radix sort implementation. |
+| `fastmap` | The module provides open-addressing integer hash tables and vectorized byte-scanning routines. |
+| `base64` | The module encodes and decodes binary data using RFC 4648 Base64 character representations. |
 
 ---
 
-## 🧰 Developer Tooling
+## Developer Tooling
 
-All tools are written in T and ship with the repository:
+The repository includes a complete developer toolchain written entirely in T:
 
-| Tool | Command | Description |
+| Tool | Invocation | Description |
 |---|---|---|
-| **REPL** | `trun` | Interactive shell with history and multi-line input |
-| **Debugger** | `trun -d app.tb` | Step (`s`), breakpoints (`b <pc>`), inspect stack/locals (`p`, `l`), disassemble (`d`) |
-| **Type Checker** | `trun tools/tcheck.t app.t` | Static types, borrow analysis, exhaustiveness checking |
-| **Formatter** | `trun tools/ffmt.t [--check] app.t` | Canonical 4-space formatting; idempotent |
-| **LSP Server** | `trun tools/tlsp.t` | Full LSP: hover, go-to-definition, references, rename, completion, diagnostics |
-| **Package Manager** | `trun tools/tpkg.t <cmd>` | `init`, `install`, `run`, `test`, `build [--exe]`, `pack`, `publish`, `search`, `release` |
-| **Test Runner** | `trun tools/run_all.t` | Runs all 52 test suites and reports a single pass/fail summary |
-| **Benchmark** | `trun bench/bench.t` | Head-to-head benchmark against Python and Rust |
+| **REPL** | `trun` | The tool launches an interactive shell supporting command history, multi-line expressions, and live evaluation. |
+| **Debugger** | `trun -d app.tb` | The interactive debugger supports step execution, breakpoint placement, stack inspection, and disassembly display. |
+| **Type Checker** | `trun tools/tcheck.t app.t` | The static analyzer checks type annotations and verifies ownership invariants across variable lifetimes. |
+| **Code Formatter** | `trun tools/ffmt.t app.t` | The formatter applies standard 4-space indentation and canonical whitespace formatting idempotently. |
+| **Language Server** | `trun tools/tlsp.t` | The server implements the Language Server Protocol to provide hover documentation, definition navigation, and diagnostics to editor clients. |
+| **Package Manager** | `trun tools/tpkg.t <command>` | The package tool initializes project manifests, resolves package dependencies, and packages modules for release. |
+| **Test Runner** | `trun tools/run_all.t` | The test driver runs all 52 subsystem test suites and outputs a consolidated status summary. |
+| **Benchmark Suite** | `trun bench/bench.t` | The benchmark script runs comparative workload evaluations against Python and compiled Rust binaries. |
 
-### VS Code Extension (`editors/vscode/`)
+### Visual Studio Code Extension
 
-- Syntax highlighting via TextMate Grammar (`.tmLanguage.json`).
-- Smart indentation and bracket matching.
-- Integrated Language Server (`tools/tlsp.t`).
-
----
-
-## 🔒 Security
-
-1. **Bytecode Verification** — Before executing any `.tb` file, the VM validates the magic number, opcode ranges, operand bounds, global index table, and line/exception tables (`LN01` / `EX01`).
-2. **No Shell Injection (CWE-78)** — Child processes are spawned directly via OS APIs (`CreateProcessA` on Windows, `fork`/`execvp` on POSIX) with an explicit argument array — never through a shell string.
-3. **Zip-Slip Prevention (CWE-22)** — The `.tpkg` extractor rejects any archive entry whose resolved path would escape the target directory (absolute paths, `..` components, Windows drive prefixes).
+The `editors/vscode/` directory contains an extension package for Visual Studio Code:
+- The extension applies TextMate grammar definitions to highlight keywords, numeric literals, and string templates.
+- The configuration specifies automatic bracket closure and indentation rules for colon-terminated blocks.
+- The client integrates with the language server (`tools/tlsp.t`) to provide real-time editor feedback.
 
 ---
 
-## 📁 Repository Layout
+## Security Architecture
+
+The runtime incorporates multiple defensive safeguards to protect host environments:
+
+1. **Bytecode Structure Verification**:
+   Before executing any bytecode file (`.tb`), the virtual machine examines header signatures, confirms that opcode values fall within defined ranges, and ensures that jump offsets and table references do not exceed allocated boundaries.
+
+2. **Mitigation of Command Injection (CWE-78)**:
+   The `os.run` function creates child processes by calling underlying operating system APIs (`CreateProcessA` on Windows and `fork`/`execvp` on POSIX systems) with discrete parameter arrays. The runtime does not invoke an intermediate command shell.
+
+3. **Mitigation of Path Traversal (CWE-22)**:
+   The package extraction logic inspects archive file paths and rejects entries that contain parent directory references (`..`), absolute root markers, or drive letter prefixes.
+
+4. **Automated Security Scanning**:
+   Continuous integration pipelines run automated secret scans with Gitleaks and filesystem vulnerability inspections with Trivy on every commit pushed to the repository.
+
+---
+
+## Repository Layout
 
 ```text
-.github/workflows/   CI pipeline — Gitleaks, Trivy, build & test on Linux + Windows
-bench/               Benchmark scripts vs Python and Rust
-editors/vscode/      VS Code extension (syntax + LSP integration)
-examples/            Sample programs: neural net XOR, ASCII raytracer, data pipeline
-self/                Self-hosted compiler (tcomp.t) and evaluator (eval.t)
-std/                 Standard library (25+ modules)
-tests/               52 automated test suites covering VM, JIT, stdlib, and tooling
-tools/               Developer tools: REPL, LSP, formatter, package manager, AOT
-vm/                  C VM, x86-64 JIT, ARM64 JIT, build scripts
-tcomp.tb             Pre-bootstrapped compiler bytecode (no Python required)
-LICENSE              MIT License
-README.md            This file
+.github/workflows/   Continuous integration configuration files for Linux and Windows builds
+bench/               Benchmark test scripts evaluating performance against Python and Rust
+editors/vscode/      Visual Studio Code editor extension files and TextMate grammar rules
+examples/            Demonstration programs including neural network training and data pipelines
+self/                Self-hosted compiler implementation and reference tree-walking evaluator
+std/                 Standard library modules providing core operating system and numeric services
+tests/               Automated test suites covering virtual machine features, compiler passes, and libraries
+tools/               Development utilities including the REPL, debugger, formatter, and package manager
+vm/                  Virtual machine implementation in C, x86-64 JIT, ARM64 JIT, and build scripts
+tcomp.tb             Pre-bootstrapped compiler bytecode required for self-hosting initial builds
+LICENSE              MIT license declaration
+README.md            Project overview and documentation
 ```
 
 ---
 
-## 🤝 Community & Contributing
+## Community and Contributing
 
-Contributions are warmly welcomed! Please review our **[Contributing Guide](CONTRIBUTING.md)** and **[Security Policy](SECURITY.md)** before opening pull requests or reporting issues.
-
-- **Issue Tracker**: Use [GitHub Issues](https://github.com/letho1608/t/issues) for bug reports and feature requests.
-- **Release History**: See the [Changelog](CHANGELOG.md) for full release notes across versions.
+We welcome contributions from the community. Please review the following documents before submitting contributions:
+- The [Contributing Guide](CONTRIBUTING.md) describes environment setup, coding conventions, testing requirements, and pull request procedures.
+- The [Security Policy](SECURITY.md) outlines instructions for reporting potential security vulnerabilities responsibly.
+- The [Changelog](CHANGELOG.md) tracks feature additions, architectural updates, and bug fixes across all released versions.
 
 ---
 
-## 📄 License
+## License
 
-Distributed under the [MIT License](LICENSE).
+The T programming language project is distributed under the terms of the [MIT License](LICENSE).
