@@ -20,7 +20,7 @@ cd /d "%ROOT%"
 :havecl
 where cl >nul 2>nul
 if errorlevel 1 (
-  echo [build] cl.exe (MSVC) not found
+  echo [build] cl.exe MSVC not found
   exit /b 1
 )
 if not exist build mkdir build
@@ -36,6 +36,6 @@ if exist "%ROOT%\tcomp.tb" (
   move /y tcomp.new.tb tcomp.tb >nul
   "%ROOT%\trun.exe" tcomp.tb -b tools\repl.t trepl.tb >nul
   if errorlevel 1 exit /b 1
-  echo [build] OK: tcomp.tb + trepl.tb (self-hosted)
+  echo [build] OK: tcomp.tb and trepl.tb self-hosted
 )
 exit /b 0

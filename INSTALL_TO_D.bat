@@ -21,14 +21,14 @@ echo [T] copied to %DST%
 
 :build
 echo.
-echo [T] building C VM (MSVC) + self-hosting tcomp.tb/trepl.tb...
+echo [T] building C VM with MSVC and self-hosting tcomp.tb/trepl.tb...
 call "%DST%\vm\build.bat"
 if errorlevel 1 (
-  echo [T] failed to build trun.exe (MSVC required)
+  echo [T] failed to build trun.exe - MSVC required
   goto :fail
 )
 echo.
-echo [T] running ALL tests (trun tools\run_all.t)...
+echo [T] running ALL tests with trun tools\run_all.t...
 pushd "%DST%"
 .\trun.exe tools\run_all.t
 set RC=%errorlevel%
